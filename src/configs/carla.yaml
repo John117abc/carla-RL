@@ -1,0 +1,14 @@
+host: "localhost"
+port: 2000
+timeout: 10.0
+sync_mode: true
+fixed_delta_seconds: 0.05
+world:
+  traffic_manager:
+    port: 8005
+    hybrid_physics_mode: false
+    synchronous_mode: True
+  weather:
+    cloudiness: 0
+    precipitation: 0
+    sun_altitude_angle: 90
