@@ -161,7 +161,7 @@ def spawn_background_traffic(client: carla.Client,
             spawn_point = spawn_points[i]  # 按顺序取，避免重复
             batch.append(
                 carla.command.SpawnActor(blueprint, spawn_point)
-                .then(carla.command.SetAutopilot(True, tm_port))  # 👈 关键：传入 tm_port
+                .then(carla.command.SetAutopilot(True, tm_port))  # 关键：传入 tm_port
             )
 
         responses = client.apply_batch_sync(batch, True)  # ← 这里不会再报 bind error

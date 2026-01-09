@@ -5,11 +5,13 @@ import numpy as np
 import carla
 import random
 import time
-from typing import Dict, Any, Tuple, Optional, Union
+from typing import Dict, Any, Tuple, Optional, Union,List
 
 from src.envs.sensors import CameraSensor, CollisionSensor, LaneInvasionSensor
 from src.carla_utils.vehicle_control import get_compass
+from src.utils import get_logger
 
+logger = get_logger()
 
 class CarlaEnv(gym.Env):
     """
@@ -48,11 +50,12 @@ class CarlaEnv(gym.Env):
         try:
             self.tm = self.client.get_trafficmanager(self.tm_port)
             self.tm.set_synchronous_mode(self.synchronous_mode)
+            self.tm.set_global_distance_to_leading_vehicle(2.0)
             self.tm.set_hybrid_physics_mode(
                 self.carla_cfg["world"]["traffic_manager"]["hybrid_physics_mode"]
             )
         except RuntimeError as e:
-            print(f"⚠️ TrafficManager 初始化失败（可能端口被占用）: {e}")
+            logger.error(f"⚠️ TrafficManager 初始化失败（可能端口被占用）: {e}")
             # 继续运行（不影响主车）
 
         # 天气
@@ -71,6 +74,9 @@ class CarlaEnv(gym.Env):
         self.lane_invasion_sensor: Optional[LaneInvasionSensor] = None
         self.vehicle = None
         self.step_count = 0
+
+        # 周车
+        self.actors = []
 
         # === 动作空间 ===
         action_type = self.env_cfg["action"]["type"]
@@ -123,20 +129,43 @@ class CarlaEnv(gym.Env):
         else:
             self.observation_space = gym.spaces.Dict(obs_spaces)
 
-        # 注意：不在 __init__ 中调用 reset()！由用户显式调用
+    def _spawn_ego_vehicle(self,spawn_point_index: Optional[int] = None) -> carla.Vehicle:
+        """
+        在世界中生成主控车辆（ego vehicle）。
 
-    def _spawn_ego_vehicle(self):
+        参数：
+            spawn_point_index (Optional[int]): 指定出生点索引。若为 None，则随机选择。
+        返回：
+            carla.Vehicle: 生成的主车对象。
+        """
+        blueprint_library = self.world.get_blueprint_library()
+        vehicle_bp = random.choice(blueprint_library.filter(self.env_cfg["actors"]["ego_car"]))
+        vehicle_bp.set_attribute('role_name', 'ego')
+
         spawn_points = self.world.get_map().get_spawn_points()
         if not spawn_points:
-            raise RuntimeError("没有可用的重生点。")
-        transform = random.choice(spawn_points)
-        vehicle_bp = self.blueprint_library.filter("vehicle.tesla.model3")[0]
-        self.vehicle = self.world.try_spawn_actor(vehicle_bp, transform)
+            raise RuntimeError("当前地图没有可用的出生点！")
+
+        if spawn_point_index is not None:
+            if spawn_point_index >= len(spawn_points):
+                raise ValueError(f"出生点索引 {spawn_point_index} 超出范围（共 {len(spawn_points)} 个）")
+            spawn_point = spawn_points[spawn_point_index]
+        else:
+            spawn_point = random.choice(spawn_points)
+
+        self.vehicle = self.world.try_spawn_actor(vehicle_bp, spawn_point)
         if self.vehicle is None:
-            raise RuntimeError("生成自我载具失败。")
+            raise RuntimeError("无法生成主车！可能出生点被占用。")
+
         self.vehicle.set_autopilot(False,tm_port=self.tm_port)
         if self.carla_cfg["sync_mode"]:
+            settings = self.world.get_settings()
+            settings.synchronous_mode = True
+            settings.fixed_delta_seconds = self.carla_cfg["fixed_delta_seconds"]
+            self.world.apply_settings(settings)
             self.world.tick()
+
+        logger.info(f"主车已生成，位置：{spawn_point.location}")
 
     def _setup_sensors(self):
         # 先清理旧传感器（安全）
@@ -159,7 +188,7 @@ class CarlaEnv(gym.Env):
         self.collision_sensor = CollisionSensor(self.vehicle)
         self.lane_invasion_sensor = LaneInvasionSensor(self.vehicle)
 
-        # 等待传感器数据就绪（关键！避免首次观测为空）
+        # 等待传感器数据就绪，避免首次观测为空
         for _ in range(5):  # 最多等待 5 帧
             if self.carla_cfg["sync_mode"]:
                 self.world.tick()
@@ -241,6 +270,61 @@ class CarlaEnv(gym.Env):
 
         return False, False, info
 
+    def _spawn_background_traffic(self):
+        """
+        生成背景交通车辆
+        """
+        blueprints = self.world.get_blueprint_library().filter('vehicle.*')
+        blueprints = [bp for bp in blueprints if int(bp.get_attribute('number_of_wheels')) == 4]
+
+        num_vehicles = self.env_cfg["actors"]["num_vehicles"]
+
+        spawn_points = self.world.get_map().get_spawn_points()
+        if len(spawn_points) < num_vehicles:
+            logger.warning(
+                f'出生点数量 ({len(spawn_points)}) 少于请求车辆数 ({num_vehicles})，将生成 {len(spawn_points)} 辆。')
+            num_vehicles = len(spawn_points)
+
+        if self.env_cfg["actors"]["safe_spawn"]:
+            batch = []
+            for i in range(num_vehicles):
+                blueprint = random.choice(blueprints)
+                if blueprint.has_attribute('color'):
+                    color = random.choice(blueprint.get_attribute('color').recommended_values)
+                    blueprint.set_attribute('color', color)
+                blueprint.set_attribute('role_name', 'background')
+                spawn_point = spawn_points[i]  # 按顺序取，避免重复
+                batch.append(
+                    carla.command.SpawnActor(blueprint, spawn_point)
+                    .then(carla.command.SetAutopilot(True, self.tm_port))
+                )
+
+            responses = self.client.apply_batch_sync(batch, True)
+            if self.carla_cfg["sync_mode"]:
+                self.world.tick()  # 确保车辆完全激活
+            actors = []
+            for response in responses:
+                if response.error:
+                    logger.debug(f"背景车辆生成失败：{response.error}")
+                else:
+                    actors.append(self.world.get_actor(response.actor_id))
+            logger.info(f"成功生成 {len(actors)} 辆背景交通车辆（TM 端口: {self.tm_port}）。")
+            return actors
+
+        else:
+            # 非安全模式（不推荐用于训练）
+            actors = []
+            for _ in range(num_vehicles):
+                blueprint = random.choice(blueprints)
+                spawn_point = random.choice(spawn_points)
+                vehicle = self.world.try_spawn_actor(blueprint, spawn_point)
+                if vehicle:
+                    vehicle.set_autopilot(True, self.tm_port)
+                    actors.append(vehicle)
+            logger.info(f"（非安全模式）生成 {len(actors)} 辆背景车辆（TM 端口: {self.tm_port}）。")
+            return actors
+
+
     def step(self, action):
         if self.vehicle is None:
             raise RuntimeError("环境没有重置. 请先 reset()。")
@@ -292,9 +376,18 @@ class CarlaEnv(gym.Env):
                 self.lane_invasion_sensor.destroy()
             self.vehicle.destroy()
 
+        # 清除周车
+        for actor in self.actors:
+            if actor is not None and actor.is_alive:
+                actor.destroy()
+        self.actors = []
+
         # 生成新车
         self._spawn_ego_vehicle()
         self._setup_sensors()
+
+        # 生成周车
+        self._spawn_background_traffic()
 
         # 重置计数器
         self.step_count = 0

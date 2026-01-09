@@ -5,8 +5,8 @@ sync_mode: true
 fixed_delta_seconds: 0.05
 world:
   traffic_manager:
-    port: 8005
-    hybrid_physics_mode: false
+    port: 8010
+    hybrid_physics_mode: True
     synchronous_mode: True
   weather:
     cloudiness: 0
