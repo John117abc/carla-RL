@@ -134,10 +134,33 @@ class PIDLongitudinalController:
 
 def get_compass(vehicle: carla.Vehicle) -> float:
     """
-    获取车辆的罗盘方向（弧度），0 表示正北，顺时针增加。
+    获取车辆的方向（弧度），0 表示正北，顺时针增加。
     返回值范围: [0, 2π)
     """
     yaw_deg = vehicle.get_transform().rotation.yaw
     # 转换为弧度，并归一化到 [0, 2π)
     compass_rad = math.radians(yaw_deg) % (2 * math.pi)
     return compass_rad
+
+
+def world_to_vehicle_frame(velocity: carla.Vector3D, transform: carla.Transform):
+    """
+    将世界坐标系下的速度向量转换为车辆本体坐标系下的速度
+    车辆本体系：x 向前，y 向左，z 向上（右手系）
+    """
+    # 获取车辆偏航角（yaw），单位：度
+    yaw = np.radians(transform.rotation.yaw)
+
+    # 构建从世界系到车身系的旋转矩阵（绕 Z 轴旋转 -yaw）
+    cos_yaw = np.cos(yaw)
+    sin_yaw = np.sin(yaw)
+
+    # 世界速度 (vx_world, vy_world)
+    vx_w = velocity.x
+    vy_w = velocity.y
+
+    # 转换到车身系
+    vx_body = cos_yaw * vx_w + sin_yaw * vy_w  # 纵向（向前为正）
+    vy_body = -sin_yaw * vx_w + cos_yaw * vy_w  # 横向（向左为正）
+
+    return vx_body, vy_body

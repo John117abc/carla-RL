@@ -8,7 +8,7 @@ import time
 from typing import Dict, Any, Tuple, Optional, Union,List
 
 from src.envs.sensors import CameraSensor, CollisionSensor, LaneInvasionSensor
-from src.carla_utils.vehicle_control import get_compass
+from src.carla_utils import get_compass,world_to_vehicle_frame
 from src.utils import get_logger
 
 logger = get_logger()
@@ -56,7 +56,6 @@ class CarlaEnv(gym.Env):
             )
         except RuntimeError as e:
             logger.error(f"⚠️ TrafficManager 初始化失败（可能端口被占用）: {e}")
-            # 继续运行（不影响主车）
 
         # 天气
         weather = carla.WeatherParameters(
@@ -115,6 +114,8 @@ class CarlaEnv(gym.Env):
             n_meas = 0
             for key in meas_keys:
                 if key == "gps":
+                    n_meas += 2
+                elif key == "speed":
                     n_meas += 2
                 elif key == "imu":
                     n_meas += 3
@@ -213,13 +214,14 @@ class CarlaEnv(gym.Env):
             measurements = []
             v = self.vehicle.get_velocity()
             c = self.vehicle.get_control()
-            speed = np.linalg.norm([v.x, v.y, v.z])
-            compass = get_compass(self.vehicle)  # radians
+            # 转换为车辆坐标系
+            vx,vy = world_to_vehicle_frame(v,self.vehicle.get_transform())
+            compass = get_compass(self.vehicle)  # 弧度
             loc = self.vehicle.get_location()
 
             for key in self.env_cfg["measurements"]["include"]:
                 if key == "speed":
-                    measurements.append(float(speed))
+                    measurements.extend([vx, vy])
                 elif key == "steer":
                     measurements.append(float(c.steer))
                 elif key == "compass":
@@ -293,37 +295,37 @@ class CarlaEnv(gym.Env):
                     color = random.choice(blueprint.get_attribute('color').recommended_values)
                     blueprint.set_attribute('color', color)
                 blueprint.set_attribute('role_name', 'background')
-                spawn_point = spawn_points[i]  # 按顺序取，避免重复
-                batch.append(
-                    carla.command.SpawnActor(blueprint, spawn_point)
-                    .then(carla.command.SetAutopilot(True, self.tm_port))
-                )
+                # spawn_point = spawn_points[i]  # 按顺序取，避免重复
+                # batch.append(
+                #     carla.command.SpawnActor(blueprint, spawn_point)
+                #     .then(carla.command.SetAutopilot(True, self.tm_port))
+                # )
+                v = self.world.try_spawn_actor(blueprint, spawn_points[i + 1])
+                if v:
+                    v.set_autopilot(True, self.tm_port)
 
             responses = self.client.apply_batch_sync(batch, True)
             if self.carla_cfg["sync_mode"]:
                 self.world.tick()  # 确保车辆完全激活
-            actors = []
-            for response in responses:
-                if response.error:
-                    logger.debug(f"背景车辆生成失败：{response.error}")
-                else:
-                    actors.append(self.world.get_actor(response.actor_id))
-            logger.info(f"成功生成 {len(actors)} 辆背景交通车辆（TM 端口: {self.tm_port}）。")
-            return actors
-
-        else:
-            # 非安全模式（不推荐用于训练）
-            actors = []
-            for _ in range(num_vehicles):
-                blueprint = random.choice(blueprints)
-                spawn_point = random.choice(spawn_points)
-                vehicle = self.world.try_spawn_actor(blueprint, spawn_point)
-                if vehicle:
-                    vehicle.set_autopilot(True, self.tm_port)
-                    actors.append(vehicle)
-            logger.info(f"（非安全模式）生成 {len(actors)} 辆背景车辆（TM 端口: {self.tm_port}）。")
-            return actors
-
+        #     actors = []
+        #     for response in responses:
+        #         if response.error:
+        #             logger.debug(f"背景车辆生成失败：{response.error}")
+        #         else:
+        #             actors.append(self.world.get_actor(response.actor_id))
+        #     logger.info(f"成功生成 {len(actors)} 辆背景交通车辆（TM 端口: {self.tm_port}）。")
+        #
+        # else:
+        #     # 非安全模式（不推荐用于训练）
+        #     actors = []
+        #     for _ in range(num_vehicles):
+        #         blueprint = random.choice(blueprints)
+        #         spawn_point = random.choice(spawn_points)
+        #         vehicle = self.world.try_spawn_actor(blueprint, spawn_point)
+        #         if vehicle:
+        #             vehicle.set_autopilot(True, self.tm_port)
+        #             actors.append(vehicle)
+        #     logger.info(f"（非安全模式）生成 {len(actors)} 辆背景车辆（TM 端口: {self.tm_port}）。")
 
     def step(self, action):
         if self.vehicle is None:

@@ -54,3 +54,5 @@ def setup_code_environment(config):
     warnings.filterwarnings("ignore", category=FutureWarning)
 
     print(f"✅ Environment set up. Seed={seed}, Device={config.device}")
+
+    return config.device

@@ -1,37 +1,7 @@
-# src/models/actor_critic.py
-
-import gymnasium as gym
-import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from torch.distributions import Normal, TanhTransform, TransformedDistribution
-
-# 在 src/models/actor_critic.py 的 ActorNetwork 类中添加：
-
-def evaluate_actions(self, obs, actions):
-    """
-    给定 obs 和 actions，返回 log_prob 和 entropy。
-    用于训练时重计算概率。
-    """
-    h = self.net(obs)
-    mean = self.mean_layer(h)
-    log_std = self.log_std_layer(h)
-    log_std = torch.clamp(log_std, min=-20, max=2)
-    std = log_std.exp()
-
-    normal = Normal(mean, std)
-    # 反 tanh 得到原始高斯变量
-    unsquashed_actions = torch.atanh(torch.clamp(actions, -0.999999, 0.999999))
-    # 缩放回 [-1,1] 再反变换
-    normalized_actions = (actions - self.action_bias.to(obs.device)) / self.action_scale.to(obs.device)
-    unsquashed = torch.atanh(torch.clamp(normalized_actions, -0.999999, 0.999999))
-
-    log_prob = normal.log_prob(unsquashed).sum(dim=-1, keepdim=True)
-    log_prob -= torch.log(1 - normalized_actions.pow(2) + 1e-6).sum(dim=-1, keepdim=True)
-    entropy = normal.entropy().sum(dim=-1, keepdim=True)
-
-    return log_prob, entropy, mean
+import numpy as np
+from torch.distributions import Normal
 
 
 def mlp(sizes, activation=nn.ReLU, output_activation=nn.Identity):
@@ -45,8 +15,9 @@ def mlp(sizes, activation=nn.ReLU, output_activation=nn.Identity):
 
 class ActorNetwork(nn.Module):
     """
-    高斯策略网络，输出动作均值和对数标准差。
-    使用 Tanh 变换将动作限制在 [-1, 1]，再缩放到 action_space 范围。
+    A2C 高斯策略网络（适用于连续动作空间）
+    输出动作均值和对数标准差。
+    注意：A2C 通常不强制限制动作范围（由环境处理），但也可保留缩放。
     """
 
     def __init__(self, observation_space, action_space, hidden_dim=256):
@@ -56,39 +27,51 @@ class ActorNetwork(nn.Module):
 
         self.net = mlp([obs_dim, hidden_dim, hidden_dim], activation=nn.ReLU)
         self.mean_layer = nn.Linear(hidden_dim, action_dim)
-        self.log_std_layer = nn.Linear(hidden_dim, action_dim)
+        self.log_std = nn.Parameter(torch.zeros(action_dim))  # 共享 log_std（更稳定）
 
-        # 保存动作空间边界（用于反 tanh 缩放）
+        # 如果环境要求动作在 [low, high]，可保留缩放（可选）
         self.action_scale = torch.tensor((action_space.high - action_space.low) / 2.0, dtype=torch.float32)
         self.action_bias = torch.tensor((action_space.high + action_space.low) / 2.0, dtype=torch.float32)
 
-        # 初始化最后一层权重较小，避免训练初期过大动作
+        # 初始化
         self.mean_layer.weight.data.uniform_(-1e-3, 1e-3)
         self.mean_layer.bias.data.uniform_(-1e-3, 1e-3)
-        self.log_std_layer.weight.data.uniform_(-1e-3, 1e-3)
-        self.log_std_layer.bias.data.uniform_(-1e-3, 1e-3)
 
     def forward(self, obs):
         h = self.net(obs)
         mean = self.mean_layer(h)
-        log_std = self.log_std_layer(h)
-        log_std = torch.clamp(log_std, min=-20, max=2)  # 防止数值不稳定
-        std = log_std.exp()
+        std = self.log_std.exp().expand_as(mean)
 
-        normal = Normal(mean, std)
-        # 使用 reparameterization trick
-        x_t = normal.rsample()  # 从 N(mean, std) 采样
-        y_t = torch.tanh(x_t)   # 压缩到 (-1, 1)
+        dist = Normal(mean, std)
+        action = dist.rsample()  # 重参数化采样
 
-        # 计算 log_prob（考虑 tanh 的雅可比行列式）
-        log_prob = normal.log_prob(x_t)
-        log_prob -= torch.log(1 - y_t.pow(2) + 1e-6)  # tanh 变换的 log det
-        log_prob = log_prob.sum(dim=-1, keepdim=True)
+        # 缩放到环境动作空间（可选，有些环境会自动 clip）
+        action_scaled = torch.tanh(action) * self.action_scale.to(obs.device) + self.action_bias.to(obs.device)
+        log_prob = dist.log_prob(action).sum(dim=-1, keepdim=True)
+        log_prob -= torch.log(1 - torch.tanh(action).pow(2) + 1e-6).sum(dim=-1, keepdim=True)
 
-        # 缩放到实际动作范围
-        action = y_t * self.action_scale.to(obs.device) + self.action_bias.to(obs.device)
+        return action_scaled, log_prob, mean
 
-        return action, log_prob, mean
+    def evaluate_actions(self, obs, actions):
+        """
+        给定 obs 和已执行的 actions，计算 log_prob 和 entropy。
+        注意：actions 是环境中的原始动作（已缩放），需反变换回 tanh 前的高斯变量。
+        """
+        h = self.net(obs)
+        mean = self.mean_layer(h)
+        std = self.log_std.exp().expand_as(mean)
+        dist = Normal(mean, std)
+
+        # 反缩放：从 [low, high] -> [-1, 1]
+        normalized_actions = (actions - self.action_bias.to(obs.device)) / self.action_scale.to(obs.device)
+        # 反 tanh
+        unsquashed = torch.atanh(torch.clamp(normalized_actions, -0.999999, 0.999999))
+
+        log_prob = dist.log_prob(unsquashed).sum(dim=-1, keepdim=True)
+        log_prob -= torch.log(1 - normalized_actions.pow(2) + 1e-6).sum(dim=-1, keepdim=True)
+        entropy = dist.entropy().sum(dim=-1, keepdim=True)
+
+        return log_prob, entropy
 
     def to(self, device):
         self.action_scale = self.action_scale.to(device)
@@ -98,27 +81,19 @@ class ActorNetwork(nn.Module):
 
 class CriticNetwork(nn.Module):
     """
-    双 Q 网络（Twin Q），用于减少 Q 值过估计。
-    输出两个独立的 Q 值。
+    A2C 的 Critic：学习状态价值函数 V(s)
+    输入：obs
+    输出：标量 V(s)
     """
 
-    def __init__(self, observation_space, action_space, hidden_dim=256):
+    def __init__(self, observation_space, hidden_dim=256):
         super().__init__()
         obs_dim = np.prod(observation_space.shape)
-        action_dim = np.prod(action_space.shape)
+        self.net = mlp([obs_dim, hidden_dim, hidden_dim, 1], activation=nn.ReLU)
 
-        # Q1
-        self.q1_net = mlp([obs_dim + action_dim, hidden_dim, hidden_dim, 1], activation=nn.ReLU)
-        # Q2
-        self.q2_net = mlp([obs_dim + action_dim, hidden_dim, hidden_dim, 1], activation=nn.ReLU)
+        # 初始化输出层（可选）
+        self.net[-2].weight.data.uniform_(-3e-3, 3e-3)
+        self.net[-2].bias.data.uniform_(-3e-3, 3e-3)
 
-        # 初始化输出层
-        for net in [self.q1_net, self.q2_net]:
-            net[-2].weight.data.uniform_(-3e-3, 3e-3)
-            net[-2].bias.data.uniform_(-3e-3, 3e-3)
-
-    def forward(self, obs, action):
-        xu = torch.cat([obs, action], dim=-1)
-        q1 = self.q1_net(xu).squeeze(-1)
-        q2 = self.q2_net(xu).squeeze(-1)
-        return q1, q2
+    def forward(self, obs):
+        return self.net(obs).squeeze(-1)  # shape: [B]

@@ -1,31 +1,22 @@
-# 强化学习算法通用配置（以 PPO 为例）
+# 强化学习算法通用配置
 rl:
-  algorithm: "PPO"             # 可选: DQN, SAC, PPO 等
+  algorithm: "A2C"
 
   # 通用超参
-  gamma: 0.99                  # 折扣因子
   seed: 42
-  num_envs: 1                  # 并行环境数（若支持 vectorized env）
+  num_envs: 1                  # 并行环境数
   total_timesteps: 1_000_000
-  log_interval: 1000           # 每多少步记录一次日志
+  log_interval: 100           # 每多少步记录一次日志
   save_freq: 50_000            # 每多少步保存一次模型
 
-  # PPO 特有参数
-  ppo:
-    lr: 3e-4
-    batch_size: 64
-    n_epochs: 10
-    clip_range: 0.2
-    gae_lambda: 0.95
+  A2C:
+    lr_actor: 3e-4
+    lr_critic: 3e-4
+    gamma: 0.99
     ent_coef: 0.01
     vf_coef: 0.5
     max_grad_norm: 0.5
+    use_gae: False
+    gae_lambda: 0.95
+    hidden_dim: 256
 
-  # DQN 示例（可选）
-  dqn:
-    lr: 1e-4
-    buffer_size: 100_000
-    learning_starts: 10_000
-    batch_size: 32
-    target_update_interval: 1000
-    train_freq: 4

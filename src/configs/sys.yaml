@@ -1,0 +1,7 @@
+# src/configs/sys.yaml
+seed: 22
+device: cuda
+cudnn_deterministic: true
+cudnn_benchmark: false
+checkpoints: 'checkpoints'
+log_path: 'logs'

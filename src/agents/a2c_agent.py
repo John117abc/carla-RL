@@ -1,42 +1,16 @@
 # src/agents/a2c_agent.py
 
 import os
-from typing import Any, Dict, Tuple
 
 import gymnasium as gym
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.distributions import Normal
+from typing import Dict, Any, Tuple
 
 from .base_agent import BaseAgent
 from src.models.actor_critic import ActorNetwork, CriticNetwork
-
-# 训练演示
-# agent = A2CAgent(env, device=device)
-# obs, _ = env.reset()
-#
-# for step in range(total_steps):
-#     action = agent.select_action(obs)
-#     next_obs, reward, terminated, truncated, _ = env.step(action)
-#     done = terminated or truncated
-#
-#     # 构造 batch（单步）
-#     batch = {
-#         "obs": torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0).to(device),
-#         "action": torch.as_tensor(action, dtype=torch.float32).unsqueeze(0).to(device),
-#         "reward": torch.as_tensor([reward], dtype=torch.float32).to(device),
-#         "next_obs": torch.as_tensor(next_obs, dtype=torch.float32).unsqueeze(0).to(device),
-#         "done": torch.as_tensor([done], dtype=torch.bool).to(device),
-#     }
-#
-#     metrics = agent.update(batch)
-#     logger.log(metrics)
-#
-#     obs = next_obs
-#     if done:
-#         obs, _ = env.reset()
 
 class A2CAgent(BaseAgent):
     """
@@ -47,37 +21,34 @@ class A2CAgent(BaseAgent):
 
     def __init__(
         self,
+        rl_config: Dict[str, Any],
         env: gym.Env,
         device: torch.device = torch.device("cpu"),
-        lr_actor: float = 3e-4,
-        lr_critic: float = 3e-4,
-        gamma: float = 0.99,
-        ent_coef: float = 0.01,
-        vf_coef: float = 0.5,
-        max_grad_norm: float = 0.5,
-        use_gae: bool = False,
-        gae_lambda: float = 0.95,
-        hidden_dim: int = 256,
     ) -> None:
         super().__init__(env, device)
 
         assert isinstance(self.action_space, gym.spaces.Box), "A2智能体需要连续的动作空间。"
 
-        # 网络
-        self.actor = ActorNetwork(self.observation_space, self.action_space, hidden_dim=hidden_dim).to(self.device)
-        self.critic = CriticNetwork(self.observation_space, self.action_space, hidden_dim=hidden_dim).to(self.device)
+        # 读取配置参数
+        rl_algorithm = "A2C"
+        self.base_config = rl_config['rl']
+        self.a2c_config = rl_config['rl'][rl_algorithm]
 
-        # 优化器（可共享或分离）
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=lr_actor)
-        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=lr_critic)
+        # 网络
+        self.actor = ActorNetwork(self.observation_space, self.action_space, hidden_dim=self.a2c_config['hidden_dim']).to(self.device)
+        self.critic = CriticNetwork(self.observation_space,hidden_dim=self.a2c_config['hidden_dim']).to(self.device)
+
+        # 优化器
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.a2c_config['lr_actor'])
+        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=self.a2c_config['lr_critic'])
 
         # 超参数
-        self.gamma = gamma
-        self.ent_coef = ent_coef
-        self.vf_coef = vf_coef
-        self.max_grad_norm = max_grad_norm
-        self.use_gae = use_gae
-        self.gae_lambda = gae_lambda
+        self.gamma = self.a2c_config['gamma']
+        self.ent_coef = self.a2c_config['ent_coef']
+        self.vf_coef = self.a2c_config['vf_coef']
+        self.max_grad_norm = self.a2c_config['max_grad_norm']
+        self.use_gae = self.a2c_config['use_gae']
+        self.gae_lambda = self.a2c_config['gae_lambda']
 
         # 用于 GAE 的缓存（如果启用）
         self._rollout_cache = {
@@ -117,15 +88,15 @@ class A2CAgent(BaseAgent):
         使用单步 TD 优势：A = r + γV(s') - V(s)
         """
         # 当前状态价值
-        values = self.critic(obs).squeeze(-1)  # [B]
+        values = self.critic(obs)
         # 下一状态价值（用于 bootstrap）
         with torch.no_grad():
-            next_values = self.critic(next_obs).squeeze(-1)  # [B]
+            next_values = self.critic(next_obs)
             target_values = rewards + self.gamma * next_values * (1 - dones.float())
             advantages = target_values - values  # [B]
 
         # 重新评估动作
-        _, log_probs, entropy = self.actor.evaluate_actions(obs, actions)
+        log_probs, entropy = self.actor.evaluate_actions(obs, actions)
 
         # 策略损失（最大化 E[logπ(a|s) * A]）
         actor_loss = -(log_probs * advantages.detach()).mean()
@@ -164,14 +135,13 @@ class A2CAgent(BaseAgent):
         # 优化 Actor
         self.actor_optimizer.zero_grad()
         # 注意：loss 已包含 actor 和 critic 部分，但通常分开优化更稳定
-        # 这里我们拆开（更清晰）
-        values = self.critic(obs).squeeze(-1)
+        values = self.critic(obs)
         with torch.no_grad():
-            next_values = self.critic(next_obs).squeeze(-1)
+            next_values = self.critic(next_obs)
             target_values = rewards + self.gamma * next_values * (1 - dones.float())
             advantages = target_values - values
 
-        _, log_probs, entropy = self.actor.evaluate_actions(obs, actions)
+        log_probs, entropy = self.actor.evaluate_actions(obs, actions)
         actor_loss = -(log_probs * advantages.detach()).mean()
         critic_loss = nn.functional.mse_loss(values, target_values)
 
