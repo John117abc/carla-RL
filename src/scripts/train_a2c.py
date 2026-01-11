@@ -8,13 +8,9 @@ import os
 import torch
 import numpy as np
 import cv2
+import sys
 from src.utils import load_config,get_logger,setup_code_environment,checkpoint
 from src.agents import A2CAgent
-
-# # === 添加 CARLA 路径（请根据你的实际路径修改）===
-# CARLA_ROOT = "/home/user/CARLA_0.9.16"  # 请替换为你的 CARLA 根目录
-# sys.path.append(os.path.join(CARLA_ROOT, 'PythonAPI'))
-# sys.path.append(os.path.join(CARLA_ROOT, 'PythonAPI/carla'))
 
 # === 添加项目源码路径 ===
 # sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
@@ -66,7 +62,6 @@ def main():
         logger.info(f"动作空间: {env.action_space}")
 
         num_episodes = train_param["num_episodes"]
-        max_step = train_param["max_step"]
         for ep in range(num_episodes):
             logger.info(f"\n▶️  开始第 {ep + 1} 轮测试...")
             obs, info = env.reset()
@@ -74,10 +69,10 @@ def main():
             total_reward = 0.0
             now_step = 0
             done = False
-            while now_step <= max_step and not done:
+            while not done:
                 action = agent.select_action(obs)
-                next_obs, reward, terminated, truncated, info = env.step(action)
-                done = terminated or truncated
+                next_obs, reward, _, _, info = env.step(action)
+                done = info['collision'] or info['off_route'] or info['TimeLimit.truncated']
                 total_reward += reward
 
                 # 构造 batch（单步）

@@ -7,10 +7,8 @@ import random
 import time
 from typing import Dict, Any, Tuple, Optional, Union,List
 
-from traci import switch
-
 from src.envs.sensors import CameraSensor, CollisionSensor, LaneInvasionSensor
-from src.carla_utils import get_compass,world_to_vehicle_frame
+from src.carla_utils import get_compass,world_to_vehicle_frame,RoutePlanner
 from src.utils import get_logger
 from src.configs.constant import (LAYERS_TO_REMOVE_1,
                                   LAYERS_TO_REMOVE_2,
@@ -139,6 +137,9 @@ class CarlaEnv(gym.Env):
 
         # 卸载地图层级
         self._init_map_layers()
+
+        # 初始化路径规划器
+        self.route_planner = RoutePlanner(self.world,self.carla_cfg["world"]["sampling_resolution"])
 
     def _init_map_layers(self):
         match self.carla_cfg["world"]["map_layer"]:
@@ -303,6 +304,13 @@ class CarlaEnv(gym.Env):
         """
         生成背景交通车辆
         """
+
+        # 清除周车
+        for actor in self.actors:
+            if actor is not None and actor.is_alive:
+                actor.destroy()
+        self.actors = []
+
         blueprints = self.world.get_blueprint_library().filter('vehicle.*')
         blueprints = [bp for bp in blueprints if int(bp.get_attribute('number_of_wheels')) == 4]
 
@@ -333,6 +341,19 @@ class CarlaEnv(gym.Env):
             self.world.tick()  # 确保车辆完全激活
         logger.info(f"成功生成 {len(self.actors)} 辆背景交通车辆（TM 端口: {self.tm_port}）。")
 
+    def _place_spectator_above_vehicle(self):
+        """将观察者摄像头放置在车辆后上方，便于查看"""
+        if self.vehicle is None:
+            return
+
+        vehicle_transform = self.vehicle.get_transform()
+        # 设置 spectator 位置：在车后 6 米，高 4 米，朝向车辆
+        offset = carla.Location(x=-6.0, y=0.0, z=4.0)
+        spectator_transform = carla.Transform(
+            vehicle_transform.location + offset,
+            carla.Rotation(pitch=-20.0, yaw=vehicle_transform.rotation.yaw, roll=0.0)
+        )
+        self.world.get_spectator().set_transform(spectator_transform)
 
     def step(self, action):
         if self.vehicle is None:
@@ -385,12 +406,6 @@ class CarlaEnv(gym.Env):
                 self.lane_invasion_sensor.destroy()
             self.vehicle.destroy()
 
-        # # 清除周车
-        # for actor in self.actors:
-        #     if actor is not None and actor.is_alive:
-        #         actor.destroy()
-        # self.actors = []
-
         # 生成新车
         if self.env_cfg["actors"]["random_place"]:
             self._spawn_ego_vehicle()
@@ -403,6 +418,9 @@ class CarlaEnv(gym.Env):
 
         # 重置计数器
         self.step_count = 0
+
+        # 规划静态路径
+        self.route_plane(end_x = 549.1342163085938,end_y = 45.20916748046875,end_z = 0.29999998211860657)
 
         obs = self._get_observation()
         info = {}  # 可扩展
@@ -438,18 +456,21 @@ class CarlaEnv(gym.Env):
             settings.fixed_delta_seconds = None
             self.world.apply_settings(settings)
 
-    def _place_spectator_above_vehicle(self):
-        """将观察者摄像头放置在车辆后上方，便于查看"""
-        if self.vehicle is None:
-            return
-
-        vehicle_transform = self.vehicle.get_transform()
-        # 设置 spectator 位置：在车后 6 米，高 4 米，朝向车辆
-        offset = carla.Location(x=-6.0, y=0.0, z=4.0)
-        spectator_transform = carla.Transform(
-            vehicle_transform.location + offset,
-            carla.Rotation(pitch=-20.0, yaw=vehicle_transform.rotation.yaw, roll=0.0)
-        )
-        self.world.get_spectator().set_transform(spectator_transform)
-
+    def route_plane(self,end_x,end_y,end_z):
+        start_location = self.vehicle.get_transform().location
+        end_location = carla.Location(x=end_x,y=end_y,z=end_z)
+        logger.info("开始进行路径规划")
+        self.route_planner.set_destination(start_location,end_location)
+        path_locations = self.route_planner.get_route()
+        # 可视化路径
+        for i, loc in enumerate(path_locations):
+            self.world.debug.draw_point(loc, size=0.1, color=carla.Color(0, 255, 0), life_time=60.0)
+            if i > 0:
+                self.world.debug.draw_line(
+                    path_locations[i - 1], loc,
+                    thickness=0.05,
+                    color=carla.Color(255, 0, 0),
+                    life_time=60.0
+                )
+        logger.info("路径规划成功！")
 

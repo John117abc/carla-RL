@@ -6,11 +6,14 @@ CARLA 路径规划模块。
 
 import carla
 import numpy as np
+import sys
+import os
 from typing import List, Tuple, Optional
 import logging
 
 logger = logging.getLogger(__name__)
 
+import carla
 
 class RoutePlanner:
     """
@@ -31,7 +34,7 @@ class RoutePlanner:
         self.sampling_resolution = sampling_resolution
 
         # 初始化全局路径规划器
-        from carla_python_api.carla.agents.navigation.global_route_planner import GlobalRoutePlanner
+        from carla_agents.navigation.global_route_planner import GlobalRoutePlanner
         self._grp = GlobalRoutePlanner(self.map, sampling_resolution)
 
         self._route: List[carla.Location] = []  # 存储当前路径点列表

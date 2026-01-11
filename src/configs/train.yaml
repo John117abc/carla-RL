@@ -1,6 +1,5 @@
 train:
-  num_episodes: 1    # 训练回合数
-  max_step: 10000  # 每回合最大执行步数
+  num_episodes: 2    # 训练回合数
   num_envs: 1                  # 并行环境数
   total_timesteps: 1_000_000
   log_interval: 100          # 每多少步记录一次日志
