@@ -16,7 +16,7 @@ from src.configs.constant import (LAYERS_TO_REMOVE_1,
                                   LAYERS_TO_REMOVE_4,
                                   BIRTH_POINT)
 
-logger = get_logger()
+logger = get_logger(name='carla_env')
 
 class CarlaEnv(gym.Env):
     """
@@ -141,6 +141,7 @@ class CarlaEnv(gym.Env):
 
         # 初始化路径规划器
         self.route_planner = RoutePlanner(self.world,self.carla_cfg["world"]["sampling_resolution"])
+        self.path_locations = None
 
     def _init_map_layers(self):
         match self.carla_cfg["world"]["map_layer"]:
@@ -357,7 +358,7 @@ class CarlaEnv(gym.Env):
 
         vehicle_transform = self.vehicle.get_transform()
         # 设置 spectator 位置：在车后 6 米，高 4 米，朝向车辆
-        offset = carla.Location(x=-6.0, y=0.0, z=4.0)
+        offset = carla.Location(x=20.0, y=0.0, z=10.0)
         spectator_transform = carla.Transform(
             vehicle_transform.location + offset,
             carla.Rotation(pitch=-20.0, yaw=vehicle_transform.rotation.yaw, roll=0.0)
@@ -429,7 +430,7 @@ class CarlaEnv(gym.Env):
         self.step_count = 0
 
         # 规划静态路径
-        self.route_plane(end_x = 549.1342163085938,end_y = 45.20916748046875,end_z = 0.29999998211860657)
+        self.route_plane(end_x = -229.562531,end_y = -15.150213,end_z = 0.300000)
 
         obs = self._get_observation()
         info = {}  # 可扩展
@@ -481,5 +482,6 @@ class CarlaEnv(gym.Env):
                     color=carla.Color(255, 0, 0),
                     life_time=60.0
                 )
-        logger.info("路径规划成功！")
+        self.path_locations = path_locations
+        logger.info(f"路径规划成功！已规划{len(path_locations)}个坐标点")
 

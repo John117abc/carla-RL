@@ -32,5 +32,5 @@ LAYERS_TO_REMOVE_4 = [
 
 # 出生点
 BIRTH_POINT = {
-    "Town06_Opt": 24
+    "Town06_Opt": 6
 }

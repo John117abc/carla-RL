@@ -8,7 +8,6 @@ import os
 import torch
 import numpy as np
 import cv2
-import sys
 from src.utils import (load_config,get_logger,
                        setup_code_environment,
                        save_checkpoint,

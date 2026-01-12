@@ -6,6 +6,8 @@ from datetime import datetime
 from src.utils import get_logger
 from pathlib import Path
 
+logger = get_logger('checkpoint')
+
 def save_checkpoint(
         model,
         model_name: str,
@@ -91,7 +93,7 @@ def save_checkpoint(
 
     # 5. 保存
     torch.save(checkpoint, file_path)
-    get_logger().info(f'训练文件保存在：{file_path}')
+    logger.info(f'训练文件保存在：{file_path}')
 
 
 def load_checkpoint(model, filepath, optimizer=None, device=None):
@@ -134,10 +136,10 @@ def load_checkpoint(model, filepath, optimizer=None, device=None):
                                f"Available keys: {list(saved_model_state.keys())}")
             net.load_state_dict(saved_model_state[name])
     else:
-        # 单模型模式（兼容旧版）
+        # 单模型模式
         model.load_state_dict(saved_model_state)
 
-    # === 加载优化器（可选）===
+    # === 加载优化器===
     saved_optim_state = checkpoint.get('optimizer_state_dict')
     if optimizer is not None and saved_optim_state is not None:
         if isinstance(optimizer, dict):

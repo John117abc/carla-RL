@@ -9,7 +9,7 @@ from typing import Optional, Tuple, List
 from src.utils import get_logger
 
 # 配置日志
-logger = get_logger()
+logger = get_logger(name='word_setup')
 import socket
 
 def find_free_port():

@@ -22,7 +22,7 @@ from src.utils import load_config,get_logger
 import gymnasium as gym
 from src.envs.carla_env import CarlaEnv  # 假设你的环境类在这里
 
-logger = get_logger()
+logger = get_logger('collect_data')
 
 
 def save_image(obs, step: int, save_dir: str = "debug_images"):
