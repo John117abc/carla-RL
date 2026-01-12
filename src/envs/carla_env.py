@@ -218,11 +218,16 @@ class CarlaEnv(gym.Env):
 
         if self.vehicle is None:
             logger.info(f'出生点还是被占用，随机选一个')
-            spawn_point = random.choice(spawn_points)
-            self.vehicle = self.world.try_spawn_actor(vehicle_bp, random.choice(spawn_points))
+            # 重试20次
+            for count in range(20):
+                spawn_point = random.choice(spawn_points)
+                self.vehicle = self.world.try_spawn_actor(vehicle_bp, random.choice(spawn_points))
+                if self.vehicle is not None:
+                    break
 
         if self.vehicle is None:
             logger.error(f'无法初始化自车:x:{spawn_point.location.x} y:{spawn_point.location.y}')
+            RuntimeError(f'无法初始化自车:x:{spawn_point.location.x} y:{spawn_point.location.y}')
 
         self.vehicle.set_autopilot(False,tm_port=self.tm_port)
         if self.carla_cfg["sync_mode"]:
@@ -335,23 +340,46 @@ class CarlaEnv(gym.Env):
 
         v = self.vehicle.get_velocity()
         speed = np.linalg.norm([v.x, v.y, v.z])
-        r += w["speed"] * min(speed, 10.0)
+        speed_reward = w["speed"] * min(speed, 10.0)
+        r += speed_reward
 
-        r -= w["centering"] * lane_inv * 0.5
+        centering_reward = w["centering"] * lane_inv * 0.5
+        r -= centering_reward
 
+        collision_reward = 0.0
         if collision > self.env_cfg["termination"]["collision_threshold"]:
+            collision_reward = w["collision"]
             r += w["collision"]
 
+        obstacle_reward = 0.0
         if obstacle:
-            r += w["obstacle"]
+            obstacle_reward = w["obstacle"]
+            r += obstacle_reward
+
+        # todo 缺少高性能样本计算高性能标准：高速、保持在道路上、在正确车道
 
         # 航向对齐简化奖励
         r += w["angle"] * (1.0 - abs(self.vehicle.get_transform().rotation.yaw) / 180.0)
 
-        return float(r)
+        return {
+            'total_reward':float(r),
+            'speed_reward':speed_reward,
+            'centering_reward':centering_reward,
+            'collision_reward':collision_reward,
+            'obstacle_reward':obstacle_reward,
+            'high_speed_reward':0.0,
+            'right_lane_reward':0.0
+        }
 
     def _check_termination(self,lane_inv,collision,obstacle) -> Tuple[bool, bool, Dict[str, Any]]:
-        info = {"collision": False, "off_route": False, "TimeLimit.truncated": False}
+        # 计算速度信息存到info中
+        vx,vy = world_to_vehicle_frame(self.vehicle.get_velocity(),self.vehicle.get_transform())
+        v = math.sqrt(vx**2 + vy**2)
+
+        info = {"collision": False,
+                "off_route": False,
+                "TimeLimit.truncated": False,
+                'speed': v}
 
         # 碰撞actors和障碍物公用一个终止条件
         if collision > self.env_cfg["termination"]["collision_threshold"] or obstacle:

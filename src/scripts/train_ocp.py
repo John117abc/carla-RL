@@ -11,7 +11,7 @@ import cv2
 import sys
 from src.utils import (load_config,get_logger,
                        setup_code_environment)
-from src.agents import A2CAgent
+from src.agents import OcpAgent
 
 # === 添加项目源码路径 ===
 # sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
@@ -55,10 +55,10 @@ def main():
             carla_config=carla_config,
             env_config=env_config
         )
-        agent = A2CAgent(env=env, rl_config=rl_config, device=device)
-        if train_config['continue_a2c']:
+        agent = OcpAgent(env=env, rl_config=rl_config, device=device)
+        if train_config['continue_ocp']:
             logger.info("开始读取智能体参数...")
-            checkpoint = agent.load(train_config["model_path_a2c"])
+            checkpoint = agent.load(train_config["model_path_ocp"])
             if not env.is_eval:
                 # 读取归一化参数
                 env.meas_normalizer.load_state_dict(checkpoint['meas_normalizer'])
@@ -73,40 +73,32 @@ def main():
         while episode < num_episodes:
             logger.info(f"\n▶️  开始第 {episode + 1} 轮测试...")
             obs, info = env.reset()
-            obs = obs['measurements']
+            obs = obs['ocp_obs']
             logger.info(f"初始观测类型: {type(obs)}, 形状/结构: {get_obs_shape(obs)}")
             total_reward = 0.0
             done = False
             while not done:
-                action = agent.select_action(obs)
+                # action = agent.select_action(obs)
+                action = [1.0,0]
                 next_obs, reward, _, _, info = env.step(action)
-                next_obs = next_obs['measurements']
+                next_obs = next_obs['ocp_obs']
                 done = info['collision'] or info['off_route'] or info['TimeLimit.truncated']
-                total_reward += reward
+                total_reward += reward['total_reward']
 
-                # 构造 batch（单步）
-                batch = {
-                    "obs": torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0).to(device),
-                    "action": torch.as_tensor(action, dtype=torch.float32).unsqueeze(0).to(device),
-                    "reward": torch.as_tensor([reward], dtype=torch.float32).to(device),
-                    "next_obs": torch.as_tensor(next_obs, dtype=torch.float32).unsqueeze(0).to(device),
-                    "done": torch.as_tensor([done], dtype=torch.bool).to(device),
-                }
-
-                metrics = agent.update(batch)
+                # 数据加入buffer
+                agent.buffer.handle_new_experience((obs, action, reward, _, done, info))
                 obs = next_obs
 
                 global_step+=1
                 # 打印关键信息
                 if global_step % train_config["log_interval"] == 0:
-                    logger.info(f"  Step {global_step}: reward={reward:.3f}, total={total_reward:.2f}")
+                    logger.info(f"  Step {global_step}: reward={reward['total_reward']:.3f}, total={total_reward:.2f}")
                     if 'speed' in info:
                         logger.info(f"    速度: {info['speed']:.2f} km/h")
-                    # 记录日志
-                    history.append(metrics)
 
-                # 可选：保存图像（调试用）
-                # save_image(obs, now_step)
+                # 如果达到buffer可以训练的数量，则开始进行训练
+                if agent.buffer.should_start_training():
+                    agent.update_critic()
 
                 if done:
                     logger.info(f"  ⏹️  Episode 结束 (info={info})")

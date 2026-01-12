@@ -49,7 +49,7 @@ def get_ego_observation(ego_vehicle:carla.Vehicle,ego_imu:src.envs.sensors.IMUSe
     ego_yaw_deg = ego_transform.rotation.yaw
     # 角速度
     ego_angular_velocity = ego_imu.get_angular_velocity()
-    ocp_obs = [ego_x,ego_y,ego_vx,ego_vy,ego_yaw_deg,ego_angular_velocity]
+    ocp_obs = [ego_x,ego_y,ego_vx,ego_vy,ego_yaw_deg,ego_angular_velocity.z]
     return ocp_obs
 
 
@@ -163,7 +163,9 @@ def get_closest_lane_edge_point(ego_vehicle: carla.Vehicle) -> carla.Location:
     dist_left = ego_loc.distance(left_edge)
     dist_right = ego_loc.distance(right_edge)
 
-    return left_edge if dist_left < dist_right else right_edge
+    pos = left_edge if dist_left < dist_right else right_edge
+
+    return [pos.x,pos.y,0,0,0,0]
 
 
 

@@ -82,13 +82,13 @@ def main():
                 next_obs, reward, _, _, info = env.step(action)
                 next_obs = next_obs['measurements']
                 done = info['collision'] or info['off_route'] or info['TimeLimit.truncated']
-                total_reward += reward
+                total_reward += reward['total_reward']
 
                 # 构造 batch（单步）
                 batch = {
                     "obs": torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0).to(device),
                     "action": torch.as_tensor(action, dtype=torch.float32).unsqueeze(0).to(device),
-                    "reward": torch.as_tensor([reward], dtype=torch.float32).to(device),
+                    "reward": torch.as_tensor([reward['total_reward']], dtype=torch.float32).to(device),
                     "next_obs": torch.as_tensor(next_obs, dtype=torch.float32).unsqueeze(0).to(device),
                     "done": torch.as_tensor([done], dtype=torch.bool).to(device),
                 }
@@ -99,7 +99,7 @@ def main():
                 global_step+=1
                 # 打印关键信息
                 if global_step % train_config["log_interval"] == 0:
-                    logger.info(f"  Step {global_step}: reward={reward:.3f}, total={total_reward:.2f}")
+                    logger.info(f"  Step {global_step}: reward={reward['total_reward']:.3f}, total={total_reward:.2f}")
                     if 'speed' in info:
                         logger.info(f"    速度: {info['speed']:.2f} km/h")
                     # 记录日志

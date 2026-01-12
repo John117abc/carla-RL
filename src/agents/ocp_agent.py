@@ -10,8 +10,9 @@ import torch.optim as optim
 from typing import Dict, Any, Tuple
 
 from .base_agent import BaseAgent
-from src.models.actor_critic import ActorNetwork, CriticNetwork
+from src.models.advantage_actor_critic import ActorNetwork, CriticNetwork
 from src.utils import save_checkpoint,load_checkpoint
+from src.buffer import StochasticBufferManager
 
 class OcpAgent(BaseAgent):
     """
@@ -42,6 +43,9 @@ class OcpAgent(BaseAgent):
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.ocp_config['lr_actor'])
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=self.ocp_config['lr_critic'])
 
+        # 损失函数
+        self.loss_func = nn.MSELoss()
+
         # 超参数
         self.init_penalty = self.ocp_config['init_penalty']
         self.max_penalty = self.ocp_config['max_penalty']
@@ -54,6 +58,13 @@ class OcpAgent(BaseAgent):
         self.M_matrix = np.diag([1,1,0,0,0,0])
         # 严格使用s^ref = [δp, δφ, δv ]状态时候的Q
         self.Q_matrix_ref = np.diag([0.04,0.1,0.01])
+
+        # 采样数量
+        self.batch_size = self.ocp_config['batch_size']
+
+        # 初始化缓冲区
+        self.buffer = StochasticBufferManager(min_start_train = self.ocp_config['min_start_train'],
+                                              total_capacity = self.ocp_config['total_capacity'])
 
     def select_action(self, obs: Any, deterministic: bool = False) -> np.ndarray:
         """
@@ -155,6 +166,92 @@ class OcpAgent(BaseAgent):
             "entropy": entropy.mean().item(),
         })
         return metrics
+
+    # 更新critic
+    def update_critic(self):
+        """
+        更新评论家网络ω
+        """
+        # 更新评论家网络
+        # 从缓冲区采样
+        all_batch_data = np.asarray(self.buffer.sample_batch(self.batch_size)).reshape(self.batch_size,6)
+        states = all_batch_data[:,0:1]
+        actions = all_batch_data[:,1:2]
+
+        # 转为tensor
+        state_ego = torch.from_numpy(np.array([[s[0][0] for s in states]])).squeeze(0).to(self.device).float()
+        state_other = torch.from_numpy(np.array([[s[0][1] for s in states]])).squeeze(0).to(self.device).float()
+        state_road = torch.from_numpy(np.array([[s[0][2] for s in states]])).squeeze(0).to(self.device).float()
+        state_ref = torch.from_numpy(np.array([[s[0][3] for s in states]])).squeeze(0).to(self.device).float()
+        state_all = torch.tensor([state_ego,state_other,state_road,state_ref])
+
+        actions = torch.from_numpy(np.array([[a[0] for a in actions]])).squeeze(0).to(self.device).float()
+
+        Q_matrix_tensor = torch.from_numpy(self.Q_matrix).to(self.device).float()
+        R_matrix_tensor = torch.from_numpy(self.R_matrix).to(self.device).float()
+
+        # 跟踪误差
+        with torch.no_grad():
+            actions = self.select_action(actions)
+        tracking_error = ((state_ref - state_ego) @ Q_matrix_tensor) * (state_ref - state_ego)
+        control_energy = (actions @ R_matrix_tensor) * actions
+        # 文章中的l(si|t, πθ(si|t))
+        l_critic = torch.mean(tracking_error) + torch.mean(control_energy)
+
+        # 文章中的Vw(s0|t)
+        v_w = self.critic(state_all)
+        v_w = torch.mean(v_w)
+        loss_critic = self.loss_func(l_critic, v_w)
+        # 更新ω
+        self.critic_optimizer.zero_grad()
+        loss_critic.backward()
+        self.critic_optimizer.step()
+        return loss_critic.detach().item()
+
+    def update_actor(self):
+        """
+        更新策略网络θ
+        """
+        # 从缓冲区采样
+        all_batch_data = np.asarray(self.buffer.sample_batch(self.batch_size)).reshape(self.batch_size,6)
+        states = all_batch_data[:,0:1]
+        actions = all_batch_data[:,1:2]
+
+        # 转为tensor
+        state_ego = torch.from_numpy(np.array([[s[0][0] for s in states]])).squeeze(0).to(self.device).float()
+        state_other = torch.from_numpy(np.array([[s[0][1] for s in states]])).squeeze(0).to(self.device).float()
+        state_road = torch.from_numpy(np.array([[s[0][2] for s in states]])).squeeze(0).to(self.device).float()
+        state_ref = torch.from_numpy(np.array([[s[0][3] for s in states]])).squeeze(0).to(self.device).float()
+        state_all = torch.tensor([state_ego,state_other,state_road,state_ref])
+
+        actions = torch.from_numpy(np.array([[a[0] for a in actions]])).squeeze(0).to(self.device).float()
+
+        Q_matrix_tensor = torch.from_numpy(self.Q_matrix).to(self.device).float()
+        R_matrix_tensor = torch.from_numpy(self.R_matrix).to(self.device).float()
+        M_matrix_tensor = torch.from_numpy(self.M_matrix).to(self.device).float()
+        # 跟踪误差
+        with torch.no_grad():
+            actions = self.select_action(state_all)
+        tracking_error = ((state_ref - state_ego) @ Q_matrix_tensor) * (state_ref - state_ego)
+        control_energy = (actions @ R_matrix_tensor) * actions
+        # 文章中的l(si|t, πθ(si|t))
+        l_actor = torch.mean(tracking_error) + torch.mean(control_energy)
+
+        # 周车约束
+        ge_car = torch.relu(-torch.sum((((state_ego.unsqueeze(1) - state_other) @ M_matrix_tensor * (
+                    state_ego.unsqueeze(1) - state_other)).reshape(self.batch_size * self.other_car_count,
+                                                                   6) ** 2) - self.other_car_min_distance ** 2,
+                                       dim=1))
+        # 道路约束
+        ge_road = torch.relu(-(torch.sum(((state_ego - state_road) @ M_matrix_tensor * (state_ego - state_road)) ** 2,
+                                         dim=1) - self.road_min_distance ** 2))
+        constraint = self.init_penalty * (torch.mean(ge_car) + torch.mean(ge_road))
+
+        loss_actor = l_actor + constraint
+        self.actor_optimizer.zero_grad()
+        loss_actor.backward()
+        self.actor_optimizer.step()
+        return loss_actor.detach().item()
 
     def save(self,
              rl_config:Dict[str, Any],
