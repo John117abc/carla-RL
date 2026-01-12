@@ -8,9 +8,11 @@ rl:
   num_episodes: 2    # 训练回合数
   total_timesteps: 1_000_000
   log_interval: 100          # 每多少步记录一次日志
-  save_freq: 10            # 每多少回合保存一次模型
-  continue: Ture    # 是否继续训练，如果需要继续训练，则需要填写模型地址
-  model_path: 'checkpoints/20260112/a2c-v1.0_Town06_Opt_133243_episode=100.pth'
+  save_freq: 1            # 每多少回合保存一次模型
+  continue_a2c: False    # 是否继续训练，如果需要继续训练，则需要填写模型地址
+  model_path_a2c: 'checkpoints/20260112/a2c-v1.0_Town06_Opt_133243_episode=100.pth'
+  continue_ocp: False    # 是否继续训练，如果需要继续训练，则需要填写模型地址
+  model_path_ocp:
 
   A2C:
     lr_actor: 3e-3

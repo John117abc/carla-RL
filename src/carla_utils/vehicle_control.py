@@ -164,3 +164,27 @@ def world_to_vehicle_frame(velocity: carla.Vector3D, transform: carla.Transform)
     vy_body = -sin_yaw * vx_w + cos_yaw * vy_w  # 横向（向左为正）
 
     return vx_body, vy_body
+
+# def get_vehicle_longitudinal_velocity(vehicle: carla.Vehicle) -> float:
+#     """
+#     获取车辆的纵向速度（沿车身前进方向，单位：m/s）
+#     正值：前进，负值：倒车
+#     """
+#     v = vehicle.get_velocity()
+#     t = vehicle.get_transform()
+#     yaw_rad = math.radians(t.rotation.yaw)
+#
+#     vx, vy = v.x, v.y
+#     longitudinal = vx * math.cos(yaw_rad) + vy * math.sin(yaw_rad)
+#     return longitudinal
+#
+#
+# def get_vehicle_lateral_velocity(vehicle: carla.Vehicle) -> float:
+#     """获取横向速度（单位：m/s）"""
+#     v = vehicle.get_velocity()
+#     t = vehicle.get_transform()
+#     yaw_rad = math.radians(t.rotation.yaw)
+#
+#     vx, vy = v.x, v.y
+#     lateral = -vx * math.sin(yaw_rad) + vy * math.cos(yaw_rad)
+#     return lateral

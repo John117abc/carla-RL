@@ -5,10 +5,11 @@ import numpy as np
 import carla
 import random
 import time
-from typing import Dict, Any, Tuple, Optional, Union,List
+import math
+from typing import Dict, Any, Tuple, Optional, Union
 
-from src.envs.sensors import CameraSensor, CollisionSensor, LaneInvasionSensor,ObstacleSensor
-from src.carla_utils import get_compass,world_to_vehicle_frame,RoutePlanner
+from src.envs.sensors import CameraSensor, CollisionSensor, LaneInvasionSensor,ObstacleSensor,IMUSensor
+from src.carla_utils import get_compass,world_to_vehicle_frame,RoutePlanner,get_ocp_observation
 from src.utils import get_logger
 from src.configs.constant import (LAYERS_TO_REMOVE_1,
                                   LAYERS_TO_REMOVE_2,
@@ -77,6 +78,7 @@ class CarlaEnv(gym.Env):
         self.collision_sensor: Optional[CollisionSensor] = None
         self.lane_invasion_sensor: Optional[LaneInvasionSensor] = None
         self.obstacle_sensor: Optional[ObstacleSensor] = None
+        self.imu_sensor: Optional[IMUSensor] = None
         self.vehicle = None
         self.step_count = 0
 
@@ -129,6 +131,11 @@ class CarlaEnv(gym.Env):
                     n_meas += 1
             obs_spaces["measurements"] = gym.spaces.Box(
                 low=-np.inf, high=np.inf, shape=(n_meas,), dtype=np.float32
+            )
+
+        if "ocp_obs" in obs_type:
+            obs_spaces["ocp_obs"] = gym.spaces.Box(
+                low=-np.inf, high=np.inf, shape=(6,), dtype=np.float32
             )
 
         if len(obs_spaces) == 1:
@@ -199,7 +206,7 @@ class CarlaEnv(gym.Env):
         logger.info(f"主车已生成，位置：{spawn_point.location}")
 
     def _setup_sensors(self):
-        # 先清理旧传感器（安全）
+        # 先清理旧传感器
         if self.camera_sensor:
             self.camera_sensor.destroy()
         if self.collision_sensor:
@@ -208,6 +215,8 @@ class CarlaEnv(gym.Env):
             self.lane_invasion_sensor.destroy()
         if self.obstacle_sensor:
             self.obstacle_sensor.destroy()
+        if self.imu_sensor:
+            self.imu_sensor.destroy()
 
         # 创建新传感器
         if "image" in self.env_cfg["obs_type"]:
@@ -221,6 +230,7 @@ class CarlaEnv(gym.Env):
         self.collision_sensor = CollisionSensor(self.vehicle)
         self.lane_invasion_sensor = LaneInvasionSensor(self.vehicle)
         self.obstacle_sensor = ObstacleSensor(self.vehicle)
+        self.imu_sensor = IMUSensor(self.vehicle)
         # 等待传感器数据就绪，避免首次观测为空
         for _ in range(5):  # 最多等待 5 帧
             if self.carla_cfg["sync_mode"]:
@@ -250,6 +260,16 @@ class CarlaEnv(gym.Env):
             vx,vy = world_to_vehicle_frame(v,self.vehicle.get_transform())
             compass = get_compass(self.vehicle)  # 弧度
             loc = self.vehicle.get_location()
+            if self.imu_sensor.get_acceleration() is None:
+                acc = 0.0
+            else:
+                acc = math.sqrt(self.imu_sensor.get_acceleration().x ** 2 + self.imu_sensor.get_acceleration().y ** 2 + self.imu_sensor.get_acceleration().z ** 2)
+
+            if self.imu_sensor.get_angular_velocity() is None:
+                ang_v = 0.0
+            else:
+                ang_v = math.sqrt(
+                    self.imu_sensor.get_angular_velocity().x ** 2 + self.imu_sensor.get_angular_velocity().y ** 2 + self.imu_sensor.get_angular_velocity().z ** 2)
 
             for key in self.env_cfg["measurements"]["include"]:
                 if key == "speed":
@@ -261,12 +281,15 @@ class CarlaEnv(gym.Env):
                 elif key == "gps":
                     measurements.extend([float(loc.x), float(loc.y)])
                 elif key == "imu":
-                    measurements.extend([0.0, 0.0, 0.0])  # 占位
+                    measurements.extend([acc, ang_v, self.imu_sensor.get_yaw_rate()])
                 else:
                     measurements.append(0.0)
 
             obs["measurements"] = np.array(measurements, dtype=np.float32)
 
+        if "ocp_obs" in self.env_cfg["obs_type"]:
+            # 获取ocp观察信息
+            obs["ocp_obs"] = get_ocp_observation(self.vehicle,self.imu_sensor,self.actors,self.path_locations)
         if len(obs) == 1:
             return list(obs.values())[0]
         return obs

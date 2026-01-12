@@ -179,3 +179,75 @@ class ObstacleSensor:
         if hasattr(self, 'sensor') and self.sensor is not None and self.sensor.is_alive:
             self.sensor.stop()
             self.sensor.destroy()
+
+
+class IMUSensor:
+    """
+    IMU 传感器（惯性测量单元），提供加速度、角速度和时间戳。
+    调用 get_angular_velocity() 可获取当前角速度（含 yaw_rate = gyroscope.z）。
+    所有数据均为最新一帧的瞬时值。
+    """
+
+    def __init__(self, vehicle: carla.Actor):
+        """
+        :param vehicle: 绑定的车辆
+        """
+        self.vehicle = vehicle
+        self._last_accelerometer: Optional[carla.Vector3D] = None  # m/s²
+        self._last_gyroscope: Optional[carla.Vector3D] = None      # rad/s
+        self._last_timestamp: Optional[float] = None               # seconds (simulation time)
+
+        world = vehicle.get_world()
+        bp = world.get_blueprint_library().find("sensor.other.imu")
+
+        # 安装在车辆重心附近
+        transform = carla.Transform(carla.Location(x=0.0, y=0.0, z=0.0))
+        self.sensor = world.spawn_actor(bp, transform, attach_to=vehicle)
+        self.sensor.listen(self._callback)
+
+    def _callback(self, imu_data: carla.IMUMeasurement):
+        """当 IMU 数据更新时触发"""
+        self._last_accelerometer = imu_data.accelerometer  # Vector3D (x, y, z) in m/s²
+        self._last_gyroscope = imu_data.gyroscope          # Vector3D (x, y, z) in rad/s
+        self._last_timestamp = imu_data.timestamp          # simulation time in seconds
+
+    def get_acceleration(self) -> Optional[carla.Vector3D]:
+        """
+        获取最新加速度（单位：m/s²）
+        :return: carla.Vector3D 或 None
+        """
+        return self._last_accelerometer
+
+    def get_angular_velocity(self) -> Optional[carla.Vector3D]:
+        """
+        获取最新角速度（单位：rad/s）
+        其中：
+            - x: roll rate（横滚角速度）
+            - y: pitch rate（俯仰角速度）
+            - z: yaw rate（偏航角速度，即航向角变化率）
+        :return: carla.Vector3D 或 None
+        """
+        return self._last_gyroscope
+
+    def get_yaw_rate(self) -> Optional[float]:
+        """
+        获取 yaw 角速度（即 yaw_rate，单位：rad/s）
+        等价于 get_angular_velocity().z
+        :return: float 或 None
+        """
+        if self._last_gyroscope is not None:
+            return self._last_gyroscope.z
+        return None
+
+    def get_timestamp(self) -> Optional[float]:
+        """
+        获取最新 IMU 数据的时间戳（仿真时间，秒）
+        :return: float 或 None
+        """
+        return self._last_timestamp
+
+    def destroy(self):
+        """销毁传感器"""
+        if hasattr(self, 'sensor') and self.sensor is not None and self.sensor.is_alive:
+            self.sensor.stop()
+            self.sensor.destroy()

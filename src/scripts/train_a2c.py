@@ -11,7 +11,6 @@ import cv2
 import sys
 from src.utils import (load_config,get_logger,
                        setup_code_environment,
-                       save_checkpoint,
                        load_checkpoint)
 from src.agents import A2CAgent
 
@@ -58,13 +57,10 @@ def main():
             env_config=env_config
         )
         agent = A2CAgent(env=env, rl_config=rl_config, device=device)
-        if train_config['continue']:
-            load_checkpoint(
-                model={'actor': agent.actor, 'critic': agent.critic},
-                filepath=train_config["model_path"],
-                optimizer={'actor_optim': agent.actor_optimizer, 'critic_optim': agent.critic_optimizer},
-                device=device
-            )
+        if train_config['continue_a2c']:
+            logger.info("开始读取智能体参数...")
+            agent.load(train_config["model_path_a2c"])
+
         logger.info("✅ 环境创建成功！")
         logger.info(f"观测空间: {env.observation_space}")
         logger.info(f"动作空间: {env.action_space}")
@@ -75,12 +71,14 @@ def main():
         while episode < num_episodes:
             logger.info(f"\n▶️  开始第 {episode + 1} 轮测试...")
             obs, info = env.reset()
+            obs = obs['measurements']
             logger.info(f"初始观测类型: {type(obs)}, 形状/结构: {get_obs_shape(obs)}")
             total_reward = 0.0
             done = False
             while not done:
                 action = agent.select_action(obs)
                 next_obs, reward, _, _, info = env.step(action)
+                next_obs = next_obs['measurements']
                 done = info['collision'] or info['off_route'] or info['TimeLimit.truncated']
                 total_reward += reward
 
@@ -118,22 +116,7 @@ def main():
             # 保存模型
             if episode % train_config["save_freq"] == 0:
                 logger.info(f"开始保存模型：  Step {global_step}: reward={reward:.3f}, total={total_reward:.2f}")
-                actor_model = agent.actor
-                critic_model = agent.critic
-                actor_optimizer = agent.actor_optimizer
-                critic_optimizer = agent.critic_optimizer
-                model = {'actor':actor_model,'critic':critic_model}
-                optimizer = {'actor_optim':actor_optimizer,'critic_optim':critic_optimizer}
-                extra_info = {'config':rl_config,'global_step':global_step}
-                met = {'episode': episode}
-                save_checkpoint(
-                    model = model,
-                    model_name='a2c-v1.0',
-                    optimizer=optimizer,
-                    extra_info= extra_info,
-                    metrics=met,
-                    env_name=env_config['world']['map']
-                    )
+                agent.save(rl_config,global_step,episode,env_config['world']['map'])
 
     except Exception as e:
         logger.error(f"❌ 环境运行出错: {e}")

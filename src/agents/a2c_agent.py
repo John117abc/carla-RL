@@ -11,6 +11,7 @@ from typing import Dict, Any, Tuple
 
 from .base_agent import BaseAgent
 from src.models.actor_critic import ActorNetwork, CriticNetwork
+from src.utils import save_checkpoint,load_checkpoint
 
 class A2CAgent(BaseAgent):
     """
@@ -35,8 +36,8 @@ class A2CAgent(BaseAgent):
         self.a2c_config = rl_config['rl'][rl_algorithm]
 
         # 网络
-        self.actor = ActorNetwork(self.observation_space, self.action_space, hidden_dim=self.a2c_config['hidden_dim']).to(self.device)
-        self.critic = CriticNetwork(self.observation_space,hidden_dim=self.a2c_config['hidden_dim']).to(self.device)
+        self.actor = ActorNetwork(self.observation_space['measurements'], self.action_space, hidden_dim=self.a2c_config['hidden_dim']).to(self.device)
+        self.critic = CriticNetwork(self.observation_space['measurements'],hidden_dim=self.a2c_config['hidden_dim']).to(self.device)
 
         # 优化器
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.a2c_config['lr_actor'])
@@ -161,21 +162,35 @@ class A2CAgent(BaseAgent):
         })
         return metrics
 
-    def save(self, path: str) -> None:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        torch.save({
-            "actor_state_dict": self.actor.state_dict(),
-            "critic_state_dict": self.critic.state_dict(),
-            "actor_optimizer_state_dict": self.actor_optimizer.state_dict(),
-            "critic_optimizer_state_dict": self.critic_optimizer.state_dict(),
-        }, path)
+    def save(self,
+             rl_config:Dict[str, Any],
+             global_step:int,
+             episode:int,
+             map_name:str) -> None:
+        actor_model = self.actor
+        critic_model = self.critic
+        actor_optimizer = self.actor_optimizer
+        critic_optimizer = self.critic_optimizer
+        model = {'actor': actor_model, 'critic': critic_model}
+        optimizer = {'actor_optim': actor_optimizer, 'critic_optim': critic_optimizer}
+        extra_info = {'config': rl_config, 'global_step': global_step}
+        met = {'episode': episode}
+        save_checkpoint(
+            model=model,
+            model_name='a2c-v1.0',
+            optimizer=optimizer,
+            extra_info=extra_info,
+            metrics=met,
+            env_name=map_name
+        )
 
     def load(self, path: str) -> None:
-        checkpoint = torch.load(path, map_location=self.device)
-        self.actor.load_state_dict(checkpoint["actor_state_dict"])
-        self.critic.load_state_dict(checkpoint["critic_state_dict"])
-        self.actor_optimizer.load_state_dict(checkpoint["actor_optimizer_state_dict"])
-        self.critic_optimizer.load_state_dict(checkpoint["critic_optimizer_state_dict"])
+        load_checkpoint(
+            model={'actor': self.actor, 'critic': self.critic},
+            filepath=path,
+            optimizer={'actor_optim': self.actor_optimizer, 'critic_optim': self.critic_optimizer},
+            device=self.device
+        )
 
     def eval(self, num_episodes: int = 10) -> Tuple[float, float]:
         total_rewards = []
