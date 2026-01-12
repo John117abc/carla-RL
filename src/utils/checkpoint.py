@@ -4,8 +4,7 @@ import torch
 import numpy as np
 from datetime import datetime
 from src.utils import get_logger
-
-
+from pathlib import Path
 
 def save_checkpoint(
         model,
@@ -17,33 +16,37 @@ def save_checkpoint(
         optimizer=None,
         extra_info=None
 ):
-    from src.utils import get_project_root
     """
-    保存模型检查点，自动按日期创建子文件夹（如 checkpoints/20251223/...）
+    保存模型检查点，支持单模型或多个模型（如 Actor-Critic）。
 
     Args:
-        model: 要保存的模型（nn.Module）
-        model_name: 模型名称，如 'ppo', 'dqn'
+        model:
+            - 单个 nn.Module（兼容旧用法），或
+            - 字典：{'actor': actor_model, 'critic': critic_model}
+        model_name: 模型名称，如 'a2c', 'ppo'
         env_name: 环境名称，如 'highway-v0'
-        file_dir: 基础保存目录，如 "checkpoints"
+        file_dir: 基础保存目录
         metrics: 性能指标，如 {'reward': 234.5}
         extension: 文件扩展名，默认 'pth'
-        optimizer: 可选，优化器状态
-        epoch: 当前 epoch
+        optimizer:
+            - 单个优化器，或
+            - 字典：{'actor_optim': ..., 'critic_optim': ...}
         extra_info: 其他自定义信息
     """
-    # 获取根目录信息
+    # 获取根目录
+    from src.utils import get_project_root
+
     file_dir = get_project_root() / file_dir
 
     # 1. 获取当前日期和时间
-    today = datetime.now().strftime("%Y%m%d")  # 20251223
-    time_now = datetime.now().strftime("%H%M%S")  # 145723
+    today = datetime.now().strftime("%Y%m%d")
+    time_now = datetime.now().strftime("%H%M%S")
 
     # 2. 构建日期子目录路径
     dated_dir = os.path.join(file_dir, today)
     os.makedirs(dated_dir, exist_ok=True)
 
-    # 3. 构建文件名（不含路径）
+    # 3. 构建文件名
     base_name = f"{model_name}_{env_name}_{time_now}"
     if metrics:
         metric_strs = []
@@ -58,10 +61,30 @@ def save_checkpoint(
     file_path = os.path.join(dated_dir, file_name)
 
     # 4. 构建 checkpoint 字典
-    checkpoint = {
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict() if optimizer else None,
-    }
+    checkpoint = {}
+
+    # 处理模型
+    if isinstance(model, dict):
+        # 多模型模式：保存每个模型的 state_dict
+        checkpoint['model_state_dict'] = {
+            name: m.state_dict() for name, m in model.items()
+        }
+    else:
+        # 单模型模式（兼容旧版）
+        checkpoint['model_state_dict'] = model.state_dict()
+
+    # 处理优化器
+    if optimizer is not None:
+        if isinstance(optimizer, dict):
+            checkpoint['optimizer_state_dict'] = {
+                name: opt.state_dict() for name, opt in optimizer.items()
+            }
+        else:
+            checkpoint['optimizer_state_dict'] = optimizer.state_dict()
+    else:
+        checkpoint['optimizer_state_dict'] = None
+
+    # 添加额外信息
     if extra_info:
         clean_info = to_serializable(extra_info)
         checkpoint.update(clean_info)
@@ -73,34 +96,62 @@ def save_checkpoint(
 
 def load_checkpoint(model, filepath, optimizer=None, device=None):
     """
-    加载模型检查点。
+    加载模型检查点，支持单模型或多个模型（如 Actor-Critic）。
 
     Args:
-        model: 要加载权重的模型（nn.Module）
-        filepath: 检查点文件路径
-        optimizer: 可选，用于恢复优化器状态（评估时通常不需要）
-        device: 指定加载到哪个设备（如 'cpu' 或 'cuda'）
+        model:
+            - 单个 nn.Module（兼容旧用法），或
+            - 字典：{'actor': actor_model, 'critic': critic_model}
+        filepath: 检查点文件路径（相对于项目根目录）
+        optimizer:
+            - 单个优化器，或
+            - 字典：{'actor_optim': ..., 'critic_optim': ...}
+            - 若为 None，则不加载优化器
+        device: 指定加载设备（如 'cpu' 或 'cuda'）
 
     Returns:
-        checkpoint: 完整的 checkpoint 字典（包含 epoch、extra_info 等）
+        checkpoint: 完整的 checkpoint 字典（包含 extra_info、metrics 等）
     """
     from src.utils import get_project_root
 
-    filepath = get_project_root() / filepath
+    filepath = Path(get_project_root()) / filepath
 
     if not filepath.exists():
         raise FileNotFoundError(f"Checkpoint file not found: {filepath}")
 
-    # 自动选择设备（如果未指定）
+    # 设置设备映射
     map_location = device if device is not None else lambda storage, loc: storage
     checkpoint = torch.load(filepath, map_location=map_location)
 
-    # 加载模型状态
-    model.load_state_dict(checkpoint['model_state_dict'])
+    # === 加载模型 ===
+    saved_model_state = checkpoint['model_state_dict']
 
-    # 如果提供了 optimizer 且 checkpoint 中有优化器状态，则加载
-    if optimizer and checkpoint.get('optimizer_state_dict') is not None:
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    if isinstance(model, dict):
+        # 多模型模式：按名称加载
+        for name, net in model.items():
+            if name not in saved_model_state:
+                raise KeyError(f"Model '{name}' not found in checkpoint. "
+                               f"Available keys: {list(saved_model_state.keys())}")
+            net.load_state_dict(saved_model_state[name])
+    else:
+        # 单模型模式（兼容旧版）
+        model.load_state_dict(saved_model_state)
+
+    # === 加载优化器（可选）===
+    saved_optim_state = checkpoint.get('optimizer_state_dict')
+    if optimizer is not None and saved_optim_state is not None:
+        if isinstance(optimizer, dict):
+            # 多优化器
+            for name, opt in optimizer.items():
+                if name not in saved_optim_state:
+                    raise KeyError(f"Optimizer '{name}' not found in checkpoint. "
+                                   f"Available keys: {list(saved_optim_state.keys())}")
+                opt.load_state_dict(saved_optim_state[name])
+        else:
+            # 单优化器
+            optimizer.load_state_dict(saved_optim_state)
+    elif optimizer is not None and saved_optim_state is None:
+        print("Warning: optimizer provided but no optimizer state in checkpoint.")
 
     return checkpoint
 

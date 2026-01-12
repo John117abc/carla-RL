@@ -60,7 +60,7 @@ class CameraSensor:
 class CollisionSensor:
     """
     碰撞传感器，记录最近一次碰撞的冲量强度（L2 范数）。
-    调用 get_intensity() 后自动清零，适合 step-wise 奖励计算。
+    调用 get_intensity() 后自动清零
     """
 
     def __init__(self, vehicle: carla.Actor):
@@ -117,5 +117,65 @@ class LaneInvasionSensor:
     def destroy(self):
         """销毁传感器"""
         if self.sensor is not None and self.sensor.is_alive:
+            self.sensor.stop()
+            self.sensor.destroy()
+
+
+class ObstacleSensor:
+    """
+    障碍物传感器（基于 ray-cast），检测车辆前方最近的障碍物。
+    调用 get_distance() 可获取最近障碍物距离（米），若无障碍物返回 None。
+    """
+
+    def __init__(self, vehicle: carla.Actor, distance: float = 50.0):
+        """
+        :param vehicle: 绑定的车辆
+        :param distance: 最大探测距离（米）
+        """
+        self.vehicle = vehicle
+        self.distance = distance
+        self._last_distance: float | None = None
+        self._last_actor: carla.Actor | None = None
+
+        world = vehicle.get_world()
+        bp = world.get_blueprint_library().find("sensor.other.obstacle")
+        bp.set_attribute("distance", str(distance))      # 最大探测距离
+        bp.set_attribute("hit_radius", "0.6")            # 射线半径
+        bp.set_attribute("only_dynamics", "false")       # false 表示也检测静态物体（如路灯、建筑）
+        bp.set_attribute("debug_linetrace", "true")     # 设为 true 可在仿真中看到射线（调试用）
+
+        # 通常安装在车头中心，稍微往前一点
+        transform = carla.Transform(carla.Location(x=0.8, z=1.7))
+        self.sensor = world.spawn_actor(bp, transform, attach_to=vehicle)
+        self.sensor.listen(self._callback)
+
+    def _callback(self, event: carla.ObstacleDetectionEvent):
+        """当检测到障碍物时触发"""
+        self._last_distance = event.distance  # 单位：米
+        self._last_actor = event.other_actor
+
+    def get_distance(self) -> float | None:
+        """
+        获取最近障碍物的距离（米）
+        :return: 距离（float）或 None（无障碍物）
+        """
+        return self._last_distance
+
+    def get_obstacle_actor(self) -> carla.Actor | None:
+        """获取最近障碍物的 Actor 对象"""
+        return self._last_actor
+
+    def is_obstacle_ahead(self, threshold: float = 2.0) -> bool:
+        """
+        判断前方是否有障碍物在指定距离内
+        :param threshold: 距离阈值（米）
+        :return: bool
+        """
+        dist = self.get_distance()
+        return dist is not None and dist < threshold
+
+    def destroy(self):
+        """销毁传感器"""
+        if hasattr(self, 'sensor') and self.sensor is not None and self.sensor.is_alive:
             self.sensor.stop()
             self.sensor.destroy()

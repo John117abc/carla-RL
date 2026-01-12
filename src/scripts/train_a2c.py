@@ -9,7 +9,10 @@ import torch
 import numpy as np
 import cv2
 import sys
-from src.utils import load_config,get_logger,setup_code_environment,checkpoint
+from src.utils import (load_config,get_logger,
+                       setup_code_environment,
+                       save_checkpoint,
+                       load_checkpoint)
 from src.agents import A2CAgent
 
 # === 添加项目源码路径 ===
@@ -49,12 +52,20 @@ def main():
     train_param = train_config["train"]
     logger.info("🚀 正在初始化 CARLA 环境...")
     env = CarlaEnv(  # 或直接使用类：CarlaEnv()
-        render_mode=None,  # 设为 'human' 可显示 CARLA 视窗（但会变慢）
+        render_mode=None,  # 设为 'human' 可显示 CARLA 视窗
         carla_config=carla_config,
         env_config=env_config
     )
-    agent = A2CAgent(env=env,rl_config=rl_config, device=device)
-    obs, _ = env.reset()
+    agent = A2CAgent(env=env, rl_config=rl_config, device=device)
+    if train_param['continue']:
+        load_checkpoint(
+            model={'actor': agent.actor, 'critic': agent.critic},
+            filepath=train_param["model_path"],
+            optimizer={'actor_optim': agent.actor_optimizer, 'critic_optim': agent.critic_optimizer},
+            device=device
+        )
+
+    # obs, _ = env.reset()
     history = []
     try:
         logger.info("✅ 环境创建成功！")
@@ -62,12 +73,13 @@ def main():
         logger.info(f"动作空间: {env.action_space}")
 
         num_episodes = train_param["num_episodes"]
-        for ep in range(num_episodes):
-            logger.info(f"\n▶️  开始第 {ep + 1} 轮测试...")
+        global_step = 0
+        episode = 0
+        while episode < num_episodes:
+            logger.info(f"\n▶️  开始第 {episode + 1} 轮测试...")
             obs, info = env.reset()
             logger.info(f"初始观测类型: {type(obs)}, 形状/结构: {get_obs_shape(obs)}")
             total_reward = 0.0
-            now_step = 0
             done = False
             while not done:
                 action = agent.select_action(obs)
@@ -87,10 +99,10 @@ def main():
                 metrics = agent.update(batch)
                 obs = next_obs
 
-                now_step+=1
+                global_step+=1
                 # 打印关键信息
-                if now_step % train_param["log_interval"] == 0:
-                    logger.info(f"  Step {now_step}: reward={reward:.3f}, total={total_reward:.2f}")
+                if global_step % train_param["log_interval"] == 0:
+                    logger.info(f"  Step {global_step}: reward={reward:.3f}, total={total_reward:.2f}")
                     if 'speed' in info:
                         logger.info(f"    速度: {info['speed']:.2f} km/h")
                     # 记录日志
@@ -100,11 +112,31 @@ def main():
                 # save_image(obs, now_step)
 
                 if done:
-                    logger.info(f"  ⏹️  Episode 结束 (terminated={terminated}, truncated={truncated})")
+                    logger.info(f"  ⏹️  Episode 结束 (info={info})")
                     break
+            episode += 1
+
+            logger.info(f"✅ 第 {episode} 轮完成，总奖励: {total_reward:.2f}")
+
             # 保存模型
-            # if ep % train_param["save_freq"] == 0:
-            logger.info(f"✅ 第 {ep + 1} 轮完成，总奖励: {total_reward:.2f}")
+            if episode % train_param["save_freq"] == 0:
+                logger.info(f"开始保存模型：  Step {global_step}: reward={reward:.3f}, total={total_reward:.2f}")
+                actor_model = agent.actor
+                critic_model = agent.critic
+                actor_optimizer = agent.actor_optimizer
+                critic_optimizer = agent.critic_optimizer
+                model = {'actor':actor_model,'critic':critic_model}
+                optimizer = {'actor_optim':actor_optimizer,'critic_optim':critic_optimizer}
+                extra_info = {'config':rl_config,'global_step':global_step}
+                met = {'episode': episode}
+                save_checkpoint(
+                    model = model,
+                    model_name='a2c-v1.0',
+                    optimizer=optimizer,
+                    extra_info= extra_info,
+                    metrics=met,
+                    env_name=env_config['world']['map']
+                    )
 
     except Exception as e:
         logger.error(f"❌ 环境运行出错: {e}")

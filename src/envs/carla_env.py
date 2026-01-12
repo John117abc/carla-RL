@@ -7,7 +7,7 @@ import random
 import time
 from typing import Dict, Any, Tuple, Optional, Union,List
 
-from src.envs.sensors import CameraSensor, CollisionSensor, LaneInvasionSensor
+from src.envs.sensors import CameraSensor, CollisionSensor, LaneInvasionSensor,ObstacleSensor
 from src.carla_utils import get_compass,world_to_vehicle_frame,RoutePlanner
 from src.utils import get_logger
 from src.configs.constant import (LAYERS_TO_REMOVE_1,
@@ -76,6 +76,7 @@ class CarlaEnv(gym.Env):
         self.camera_sensor: Optional[CameraSensor] = None
         self.collision_sensor: Optional[CollisionSensor] = None
         self.lane_invasion_sensor: Optional[LaneInvasionSensor] = None
+        self.obstacle_sensor: Optional[ObstacleSensor] = None
         self.vehicle = None
         self.step_count = 0
 
@@ -204,6 +205,8 @@ class CarlaEnv(gym.Env):
             self.collision_sensor.destroy()
         if self.lane_invasion_sensor:
             self.lane_invasion_sensor.destroy()
+        if self.obstacle_sensor:
+            self.obstacle_sensor.destroy()
 
         # 创建新传感器
         if "image" in self.env_cfg["obs_type"]:
@@ -216,7 +219,7 @@ class CarlaEnv(gym.Env):
             )
         self.collision_sensor = CollisionSensor(self.vehicle)
         self.lane_invasion_sensor = LaneInvasionSensor(self.vehicle)
-
+        self.obstacle_sensor = ObstacleSensor(self.vehicle)
         # 等待传感器数据就绪，避免首次观测为空
         for _ in range(5):  # 最多等待 5 帧
             if self.carla_cfg["sync_mode"]:
@@ -282,6 +285,10 @@ class CarlaEnv(gym.Env):
         if collision > self.env_cfg["termination"]["collision_threshold"]:
             r += w["collision"]
 
+        obstacle = self.obstacle_sensor.is_obstacle_ahead(self.env_cfg["termination"]["obstacle_threshold"])
+        if obstacle:
+            r += w["obstacle"]
+
         # 航向对齐简化奖励
         r += w["angle"] * (1.0 - abs(self.vehicle.get_transform().rotation.yaw) / 180.0)
 
@@ -290,7 +297,9 @@ class CarlaEnv(gym.Env):
     def _check_termination(self) -> Tuple[bool, bool, Dict[str, Any]]:
         info = {"collision": False, "off_route": False, "TimeLimit.truncated": False}
 
-        if self.collision_sensor.get_intensity() > self.env_cfg["termination"]["collision_threshold"]:
+        # 碰撞actors和障碍物公用一个终止条件
+        if self.collision_sensor.get_intensity() > self.env_cfg["termination"]["collision_threshold"]\
+                or self.obstacle_sensor.is_obstacle_ahead(self.env_cfg["termination"]["obstacle_threshold"]):
             info["collision"] = True
             return True, False, info
 
