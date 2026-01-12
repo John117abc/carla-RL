@@ -212,7 +212,17 @@ class CarlaEnv(gym.Env):
 
         self.vehicle = self.world.try_spawn_actor(vehicle_bp, spawn_point)
         if self.vehicle is None:
-            raise RuntimeError("无法生成主车！可能出生点被占用。")
+            logger.info(f'出生点被占用，换一个')
+            spawn_point = spawn_points[spawn_point_index+1]
+            self.vehicle = self.world.try_spawn_actor(vehicle_bp, spawn_point)
+
+        if self.vehicle is None:
+            logger.info(f'出生点还是被占用，随机选一个')
+            spawn_point = random.choice(spawn_points)
+            self.vehicle = self.world.try_spawn_actor(vehicle_bp, random.choice(spawn_points))
+
+        if self.vehicle is None:
+            logger.error(f'无法初始化自车:x:{spawn_point.location.x} y:{spawn_point.location.y}')
 
         self.vehicle.set_autopilot(False,tm_port=self.tm_port)
         if self.carla_cfg["sync_mode"]:
@@ -319,7 +329,7 @@ class CarlaEnv(gym.Env):
             return list(obs.values())[0]
         return obs
 
-    def _compute_reward(self) -> float:
+    def _compute_reward(self,lane_inv,collision,obstacle) -> float:
         w = self.env_cfg["reward_weights"]
         r = 0.0
 
@@ -327,14 +337,11 @@ class CarlaEnv(gym.Env):
         speed = np.linalg.norm([v.x, v.y, v.z])
         r += w["speed"] * min(speed, 10.0)
 
-        lane_inv = self.lane_invasion_sensor.get_count()
         r -= w["centering"] * lane_inv * 0.5
 
-        collision = self.collision_sensor.get_intensity()
         if collision > self.env_cfg["termination"]["collision_threshold"]:
             r += w["collision"]
 
-        obstacle = self.obstacle_sensor.is_obstacle_ahead(self.env_cfg["termination"]["obstacle_threshold"])
         if obstacle:
             r += w["obstacle"]
 
@@ -343,12 +350,11 @@ class CarlaEnv(gym.Env):
 
         return float(r)
 
-    def _check_termination(self) -> Tuple[bool, bool, Dict[str, Any]]:
+    def _check_termination(self,lane_inv,collision,obstacle) -> Tuple[bool, bool, Dict[str, Any]]:
         info = {"collision": False, "off_route": False, "TimeLimit.truncated": False}
 
         # 碰撞actors和障碍物公用一个终止条件
-        if self.collision_sensor.get_intensity() > self.env_cfg["termination"]["collision_threshold"]\
-                or self.obstacle_sensor.is_obstacle_ahead(self.env_cfg["termination"]["obstacle_threshold"]):
+        if collision > self.env_cfg["termination"]["collision_threshold"] or obstacle:
             info["collision"] = True
             return True, False, info
 
@@ -444,10 +450,14 @@ class CarlaEnv(gym.Env):
 
         self.step_count += 1
 
-        # 获取状态
+        # 获取传感器状态
+        lane_inv = self.lane_invasion_sensor.get_count()
+        collision = self.collision_sensor.get_intensity()
+        obstacle = self.obstacle_sensor.is_obstacle_ahead(self.env_cfg["termination"]["obstacle_threshold"])
+        # 获取观察状态
         obs = self._get_observation()
-        reward = self._compute_reward()
-        terminated, truncated, info = self._check_termination()
+        reward = self._compute_reward(lane_inv,collision,obstacle)
+        terminated, truncated, info = self._check_termination(lane_inv,collision,obstacle)
 
         return obs, reward, terminated, truncated, info
 

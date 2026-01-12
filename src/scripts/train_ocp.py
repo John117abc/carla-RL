@@ -10,16 +10,16 @@ import numpy as np
 import cv2
 import sys
 from src.utils import (load_config,get_logger,
-                       setup_code_environment,
-                       save_checkpoint,
-                       load_checkpoint)
+                       setup_code_environment)
 from src.agents import A2CAgent
 
+# === 添加项目源码路径 ===
+# sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
 import gymnasium as gym
 from src.envs.carla_env import CarlaEnv  # 假设你的环境类在这里
 
-logger = get_logger('train_ocp')
+logger = get_logger('train_a2c')
 
 
 def save_image(obs, step: int, save_dir: str = "debug_images"):
@@ -56,8 +56,13 @@ def main():
             env_config=env_config
         )
         agent = A2CAgent(env=env, rl_config=rl_config, device=device)
-        if train_config['continue_ocp']:
-            return
+        if train_config['continue_a2c']:
+            logger.info("开始读取智能体参数...")
+            checkpoint = agent.load(train_config["model_path_a2c"])
+            if not env.is_eval:
+                # 读取归一化参数
+                env.meas_normalizer.load_state_dict(checkpoint['meas_normalizer'])
+
         logger.info("✅ 环境创建成功！")
         logger.info(f"观测空间: {env.observation_space}")
         logger.info(f"动作空间: {env.action_space}")
@@ -68,27 +73,27 @@ def main():
         while episode < num_episodes:
             logger.info(f"\n▶️  开始第 {episode + 1} 轮测试...")
             obs, info = env.reset()
-            obs = obs['ocp_obs']
+            obs = obs['measurements']
             logger.info(f"初始观测类型: {type(obs)}, 形状/结构: {get_obs_shape(obs)}")
             total_reward = 0.0
             done = False
             while not done:
-                # action = agent.select_action(obs)
-                next_obs, reward, _, _, info = env.step([0.5,0])
-                next_obs = next_obs['ocp_obs']
+                action = agent.select_action(obs)
+                next_obs, reward, _, _, info = env.step(action)
+                next_obs = next_obs['measurements']
                 done = info['collision'] or info['off_route'] or info['TimeLimit.truncated']
                 total_reward += reward
 
-                # # 构造 batch（单步）
-                # batch = {
-                #     "obs": torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0).to(device),
-                #     "action": torch.as_tensor(action, dtype=torch.float32).unsqueeze(0).to(device),
-                #     "reward": torch.as_tensor([reward], dtype=torch.float32).to(device),
-                #     "next_obs": torch.as_tensor(next_obs, dtype=torch.float32).unsqueeze(0).to(device),
-                #     "done": torch.as_tensor([done], dtype=torch.bool).to(device),
-                # }
-                #
-                # metrics = agent.update(batch)
+                # 构造 batch（单步）
+                batch = {
+                    "obs": torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0).to(device),
+                    "action": torch.as_tensor(action, dtype=torch.float32).unsqueeze(0).to(device),
+                    "reward": torch.as_tensor([reward], dtype=torch.float32).to(device),
+                    "next_obs": torch.as_tensor(next_obs, dtype=torch.float32).unsqueeze(0).to(device),
+                    "done": torch.as_tensor([done], dtype=torch.bool).to(device),
+                }
+
+                metrics = agent.update(batch)
                 obs = next_obs
 
                 global_step+=1
@@ -98,7 +103,7 @@ def main():
                     if 'speed' in info:
                         logger.info(f"    速度: {info['speed']:.2f} km/h")
                     # 记录日志
-                    # history.append(metrics)
+                    history.append(metrics)
 
                 # 可选：保存图像（调试用）
                 # save_image(obs, now_step)
@@ -110,25 +115,14 @@ def main():
 
             logger.info(f"✅ 第 {episode} 轮完成，总奖励: {total_reward:.2f}")
 
-            # # 保存模型
-            # if episode % train_config["save_freq"] == 0:
-            #     logger.info(f"开始保存模型：  Step {global_step}: reward={reward:.3f}, total={total_reward:.2f}")
-            #     actor_model = agent.actor
-            #     critic_model = agent.critic
-            #     actor_optimizer = agent.actor_optimizer
-            #     critic_optimizer = agent.critic_optimizer
-            #     model = {'actor':actor_model,'critic':critic_model}
-            #     optimizer = {'actor_optim':actor_optimizer,'critic_optim':critic_optimizer}
-            #     extra_info = {'config':rl_config,'global_step':global_step}
-            #     met = {'episode': episode}
-            #     save_checkpoint(
-            #         model = model,
-            #         model_name='a2c-v1.0',
-            #         optimizer=optimizer,
-            #         extra_info= extra_info,
-            #         metrics=met,
-            #         env_name=env_config['world']['map']
-            #         )
+            # 保存模型
+            if episode % train_config["save_freq"] == 0:
+                logger.info(f"开始保存模型：  Step {global_step}: reward={reward:.3f}, total={total_reward:.2f}")
+                agent.save(rl_config,
+                           global_step,
+                           episode,
+                           env_config['world']['map'],
+                           env.meas_normalizer.state_dict())
 
     except Exception as e:
         logger.error(f"❌ 环境运行出错: {e}")
