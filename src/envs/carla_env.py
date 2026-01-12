@@ -10,7 +10,7 @@ from typing import Dict, Any, Tuple, Optional, Union
 
 from src.envs.sensors import CameraSensor, CollisionSensor, LaneInvasionSensor,ObstacleSensor,IMUSensor
 from src.carla_utils import get_compass,world_to_vehicle_frame,RoutePlanner,get_ocp_observation
-from src.utils import get_logger
+from src.utils import get_logger,RunningNormalizer
 from src.configs.constant import (LAYERS_TO_REMOVE_1,
                                   LAYERS_TO_REMOVE_2,
                                   LAYERS_TO_REMOVE_3,
@@ -82,6 +82,13 @@ class CarlaEnv(gym.Env):
         self.vehicle = None
         self.step_count = 0
 
+        # 归一化处理
+        meas_dim = self._get_measurements_dim()  # 你需要实现这个函数
+        self.meas_normalizer = RunningNormalizer(shape=(meas_dim,))
+
+        # 控制是否更新归一化统计量（评估 时不更新）
+        self._is_eval = False
+
         # 周车
         self.actors = []
 
@@ -119,16 +126,7 @@ class CarlaEnv(gym.Env):
 
         if "measurements" in obs_type:
             meas_keys = self.env_cfg["measurements"]["include"]
-            n_meas = 0
-            for key in meas_keys:
-                if key == "gps":
-                    n_meas += 2
-                elif key == "speed":
-                    n_meas += 2
-                elif key == "imu":
-                    n_meas += 3
-                else:
-                    n_meas += 1
+            n_meas = self._get_measurements_dim()
             obs_spaces["measurements"] = gym.spaces.Box(
                 low=-np.inf, high=np.inf, shape=(n_meas,), dtype=np.float32
             )
@@ -149,6 +147,27 @@ class CarlaEnv(gym.Env):
         # 初始化路径规划器
         self.route_planner = RoutePlanner(self.world,self.carla_cfg["world"]["sampling_resolution"])
         self.path_locations = None
+
+    def _get_measurements_dim(self):
+        """
+        获取measurements观察下的维度大小
+        :return: 维度大小
+        """
+        dim = 0
+        for key in self.env_cfg["measurements"]["include"]:
+            if key == "speed":
+                dim += 2
+            elif key == "steer":
+                dim += 1
+            elif key == "compass":
+                dim += 1
+            elif key == "gps":
+                dim += 2
+            elif key == "imu":
+                dim += 3  # acc, ang_v, yaw_rate
+            else:
+                dim += 1
+        return dim
 
     def _init_map_layers(self):
         match self.carla_cfg["world"]["map_layer"]:
@@ -285,7 +304,13 @@ class CarlaEnv(gym.Env):
                 else:
                     measurements.append(0.0)
 
-            obs["measurements"] = np.array(measurements, dtype=np.float32)
+            # 归一化 measurements
+            meas_array = np.array(measurements, dtype=np.float32)
+            if not self._is_eval:
+                self.meas_normalizer.update(meas_array[None, :])  # 添加 batch 维度
+            meas_normalized = self.meas_normalizer.normalize(meas_array)
+
+            obs["measurements"] = meas_normalized
 
         if "ocp_obs" in self.env_cfg["obs_type"]:
             # 获取ocp观察信息
@@ -507,4 +532,8 @@ class CarlaEnv(gym.Env):
                 )
         self.path_locations = path_locations
         logger.info(f"路径规划成功！已规划{len(path_locations)}个坐标点")
+
+    @property
+    def is_eval(self):
+        return self._is_eval
 

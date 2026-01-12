@@ -10,8 +10,7 @@ import numpy as np
 import cv2
 import sys
 from src.utils import (load_config,get_logger,
-                       setup_code_environment,
-                       load_checkpoint)
+                       setup_code_environment)
 from src.agents import A2CAgent
 
 # === 添加项目源码路径 ===
@@ -20,7 +19,7 @@ from src.agents import A2CAgent
 import gymnasium as gym
 from src.envs.carla_env import CarlaEnv  # 假设你的环境类在这里
 
-logger = get_logger()
+logger = get_logger('train_a2c')
 
 
 def save_image(obs, step: int, save_dir: str = "debug_images"):
@@ -59,8 +58,11 @@ def main():
         agent = A2CAgent(env=env, rl_config=rl_config, device=device)
         if train_config['continue_a2c']:
             logger.info("开始读取智能体参数...")
-            agent.load(train_config["model_path_a2c"])
-
+            checkpoint = agent.load(train_config["model_path_a2c"])
+            if not env.is_eval:
+                # 读取归一化参数
+                env.meas_normalizer.load_state_dict(checkpoint['meas_normalizer'])
+            
         logger.info("✅ 环境创建成功！")
         logger.info(f"观测空间: {env.observation_space}")
         logger.info(f"动作空间: {env.action_space}")
@@ -116,7 +118,11 @@ def main():
             # 保存模型
             if episode % train_config["save_freq"] == 0:
                 logger.info(f"开始保存模型：  Step {global_step}: reward={reward:.3f}, total={total_reward:.2f}")
-                agent.save(rl_config,global_step,episode,env_config['world']['map'])
+                agent.save(rl_config,
+                           global_step,
+                           episode,
+                           env_config['world']['map'],
+                           env.meas_normalizer.state_dict())
 
     except Exception as e:
         logger.error(f"❌ 环境运行出错: {e}")

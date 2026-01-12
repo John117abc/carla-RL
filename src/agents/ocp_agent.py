@@ -10,16 +10,13 @@ import torch.optim as optim
 from typing import Dict, Any, Tuple
 
 from .base_agent import BaseAgent
-from src.models.advantage_actor_critic import ActorNetwork,CriticNetwork
-from src.utils import save_checkpoint,load_checkpoint,get_logger
+from src.models.actor_critic import ActorNetwork, CriticNetwork
+from src.utils import save_checkpoint,load_checkpoint
 
-logger = get_logger('a2c_agent')
-
-class A2CAgent(BaseAgent):
+class OcpAgent(BaseAgent):
     """
-    Advantage Actor-Critic (A2C) 智能体。
-    同步 on-policy 算法，使用 GAE 或单步 TD 误差估计优势。
-    默认使用单步优势：A(s,a) = r + γV(s') - V(s)
+    ocp智能体，复现《Integrated Decision and Control: Toward  Interpretable and Computationally  Efficient Driving Intelligence》
+    这篇论文中的Dynamic Optimal Tracking-Offline Training算法
     """
 
     def __init__(
@@ -33,35 +30,30 @@ class A2CAgent(BaseAgent):
         assert isinstance(self.action_space, gym.spaces.Box), "A2智能体需要连续的动作空间。"
 
         # 读取配置参数
-        rl_algorithm = "A2C"
+        rl_algorithm = "OCP"
         self.base_config = rl_config['rl']
-        self.a2c_config = rl_config['rl'][rl_algorithm]
+        self.ocp_config = rl_config['rl'][rl_algorithm]
 
         # 网络
-        self.actor = ActorNetwork(self.observation_space['measurements'], self.action_space, hidden_dim=self.a2c_config['hidden_dim']).to(self.device)
-        self.critic = CriticNetwork(self.observation_space['measurements'],hidden_dim=self.a2c_config['hidden_dim']).to(self.device)
+        self.actor = ActorNetwork(self.observation_space['ocp_obs'], self.action_space, hidden_dim=self.ocp_config['hidden_dim']).to(self.device)
+        self.critic = CriticNetwork(self.observation_space['ocp_obs'],hidden_dim=self.ocp_config['hidden_dim']).to(self.device)
 
         # 优化器
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.a2c_config['lr_actor'])
-        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=self.a2c_config['lr_critic'])
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.ocp_config['lr_actor'])
+        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=self.ocp_config['lr_critic'])
 
         # 超参数
-        self.gamma = self.a2c_config['gamma']
-        self.ent_coef = self.a2c_config['ent_coef']
-        self.vf_coef = self.a2c_config['vf_coef']
-        self.max_grad_norm = self.a2c_config['max_grad_norm']
-        self.use_gae = self.a2c_config['use_gae']
-        self.gae_lambda = self.a2c_config['gae_lambda']
+        self.init_penalty = self.ocp_config['init_penalty']
+        self.max_penalty = self.ocp_config['max_penalty']
+        self.other_car_min_distance = self.ocp_config['other_car_min_distance']
+        self.road_min_distance = self.ocp_config['road_min_distance']
 
-        # 用于 GAE 的缓存（如果启用）
-        self._rollout_cache = {
-            "obs": [],
-            "actions": [],
-            "log_probs": [],
-            "rewards": [],
-            "dones": [],
-            "values": [],
-        }
+        # 正定矩阵
+        self.Q_matrix = np.diag([0.04, 0.04, 0.01, 0.01, 0.1, 0.02])
+        self.R_matrix = np.diag([0.1, 0.005])
+        self.M_matrix = np.diag([1,1,0,0,0,0])
+        # 严格使用s^ref = [δp, δφ, δv ]状态时候的Q
+        self.Q_matrix_ref = np.diag([0.04,0.1,0.01])
 
     def select_action(self, obs: Any, deterministic: bool = False) -> np.ndarray:
         """
@@ -168,23 +160,14 @@ class A2CAgent(BaseAgent):
              rl_config:Dict[str, Any],
              global_step:int,
              episode:int,
-             map_name:str,
-             meas_normalizer:Dict[str, Any]) -> None:
-        """
-        保存模型参数
-        :param rl_config: 超参数
-        :param global_step: 总计运行步数
-        :param episode: 运行回合数
-        :param map_name: 地图名称
-        :param meas_normalizer: measurements观察归一化数据
-        """
+             map_name:str) -> None:
         actor_model = self.actor
         critic_model = self.critic
         actor_optimizer = self.actor_optimizer
         critic_optimizer = self.critic_optimizer
         model = {'actor': actor_model, 'critic': critic_model}
         optimizer = {'actor_optim': actor_optimizer, 'critic_optim': critic_optimizer}
-        extra_info = {'config': rl_config, 'global_step': global_step,'meas_normalizer':meas_normalizer}
+        extra_info = {'config': rl_config, 'global_step': global_step}
         met = {'episode': episode}
         save_checkpoint(
             model=model,
@@ -196,13 +179,12 @@ class A2CAgent(BaseAgent):
         )
 
     def load(self, path: str) -> None:
-        checkpoint = load_checkpoint(
+        load_checkpoint(
             model={'actor': self.actor, 'critic': self.critic},
             filepath=path,
             optimizer={'actor_optim': self.actor_optimizer, 'critic_optim': self.critic_optimizer},
             device=self.device
         )
-        return checkpoint
 
     def eval(self, num_episodes: int = 10) -> Tuple[float, float]:
         total_rewards = []

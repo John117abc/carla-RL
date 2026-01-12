@@ -1,99 +1,67 @@
-import torch
-import torch.nn as nn
-import numpy as np
-from torch.distributions import Normal
+from torch import nn
+import torch.nn.functional as F
 
-
-def mlp(sizes, activation=nn.ReLU, output_activation=nn.Identity):
-    """构建多层感知机（MLP）"""
-    layers = []
-    for i in range(len(sizes) - 1):
-        act = activation if i < len(sizes) - 2 else output_activation
-        layers += [nn.Linear(sizes[i], sizes[i + 1]), act()]
-    return nn.Sequential(*layers)
-
-
-class ActorNetwork(nn.Module):
+class ActorCritic(nn.Module):
     """
-    A2C 高斯策略网络（适用于连续动作空间）
-    输出动作均值和对数标准差。
-    注意：A2C 通常不强制限制动作范围（由环境处理），但也可保留缩放。
+    AC/A2C算法的神经网络，使用共享主干参数，来获得policy和value
     """
-
-    def __init__(self, observation_space, action_space, hidden_dim=256):
+    def __init__(self, state_dim, hidden_dim, action_dim=2):
         super().__init__()
-        obs_dim = np.prod(observation_space.shape)
-        action_dim = np.prod(action_space.shape)
+        self.shared = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU()
+        )
+        self.mu_head = nn.Linear(hidden_dim, action_dim)      # 均值
+        self.log_std_head = nn.Linear(hidden_dim, action_dim) # 标准差
+        self.value_head = nn.Linear(hidden_dim, 1)
 
-        self.net = mlp([obs_dim, hidden_dim, hidden_dim], activation=nn.ReLU)
-        self.mean_layer = nn.Linear(hidden_dim, action_dim)
-        self.log_std = nn.Parameter(torch.zeros(action_dim))  # 共享 log_std（更稳定）
-
-        # 如果环境要求动作在 [low, high]，可保留缩放（可选）
-        self.action_scale = torch.tensor((action_space.high - action_space.low) / 2.0, dtype=torch.float32)
-        self.action_bias = torch.tensor((action_space.high + action_space.low) / 2.0, dtype=torch.float32)
-
-        # 初始化
-        self.mean_layer.weight.data.uniform_(-1e-3, 1e-3)
-        self.mean_layer.bias.data.uniform_(-1e-3, 1e-3)
-
-    def forward(self, obs):
-        h = self.net(obs)
-        mean = self.mean_layer(h)
-        std = self.log_std.exp().expand_as(mean)
-
-        dist = Normal(mean, std)
-        action = dist.rsample()  # 重参数化采样
-
-        # 缩放到环境动作空间（可选，有些环境会自动 clip）
-        action_scaled = torch.tanh(action) * self.action_scale.to(obs.device) + self.action_bias.to(obs.device)
-        log_prob = dist.log_prob(action).sum(dim=-1, keepdim=True)
-        log_prob -= torch.log(1 - torch.tanh(action).pow(2) + 1e-6).sum(dim=-1, keepdim=True)
-
-        return action_scaled, log_prob, mean
-
-    def evaluate_actions(self, obs, actions):
-        """
-        给定 obs 和已执行的 actions，计算 log_prob 和 entropy。
-        注意：actions 是环境中的原始动作（已缩放），需反变换回 tanh 前的高斯变量。
-        """
-        h = self.net(obs)
-        mean = self.mean_layer(h)
-        std = self.log_std.exp().expand_as(mean)
-        dist = Normal(mean, std)
-
-        # 反缩放：从 [low, high] -> [-1, 1]
-        normalized_actions = (actions - self.action_bias.to(obs.device)) / self.action_scale.to(obs.device)
-        # 反 tanh
-        unsquashed = torch.atanh(torch.clamp(normalized_actions, -0.999999, 0.999999))
-
-        log_prob = dist.log_prob(unsquashed).sum(dim=-1, keepdim=True)
-        log_prob -= torch.log(1 - normalized_actions.pow(2) + 1e-6).sum(dim=-1, keepdim=True)
-        entropy = dist.entropy().sum(dim=-1, keepdim=True)
-
-        return log_prob, entropy
-
-    def to(self, device):
-        self.action_scale = self.action_scale.to(device)
-        self.action_bias = self.action_bias.to(device)
-        return super().to(device)
+    def forward(self, x):
+        h = self.shared(x)
+        mu = self.mu_head(h)
+        log_std = self.log_std_head(h)
+        value = self.value_head(h)
+        return mu, log_std, value
 
 
-class CriticNetwork(nn.Module):
+class ActorNet(nn.Module):
     """
-    A2C 的 Critic：学习状态价值函数 V(s)
-    输入：obs
-    输出：标量 V(s)
+    ac/a2c算法的actor网络
     """
-
-    def __init__(self, observation_space, hidden_dim=256):
+    def __init__(self,state_dim : int,hidden_dim: int = 256,output_dim: int = 2):
         super().__init__()
-        obs_dim = np.prod(observation_space.shape)
-        self.net = mlp([obs_dim, hidden_dim, hidden_dim, 1], activation=nn.ReLU)
+        self.l1 = nn.Linear(state_dim,hidden_dim)
+        self.l2 = nn.Linear(hidden_dim,hidden_dim)
+        self.l3 = nn.Linear(hidden_dim,output_dim)
 
-        # 初始化输出层（可选）
-        self.net[-2].weight.data.uniform_(-3e-3, 3e-3)
-        self.net[-2].bias.data.uniform_(-3e-3, 3e-3)
+    def forward(self,x):
+        """
+        向前传播
+        :param x: 输入参数
+        :return: 转向角，加速度 (映射到-1，1)
+        """
+        x = F.elu(self.l1(x))
+        x = F.elu(self.l2(x))
+        x = self.l3(x)
+        return F.tanh(x)
 
-    def forward(self, obs):
-        return self.net(obs).squeeze(-1)  # shape: [B]
+class CriticNet(nn.Module):
+    """
+    ac/a2c算法的critic网络
+    """
+    def __init__(self,state_dim : int,hidden_dim: int = 256,output_dim: int = 1):
+        super().__init__()
+        self.l1 = nn.Linear(state_dim,hidden_dim)
+        self.l2 = nn.Linear(hidden_dim,hidden_dim)
+        self.l3 = nn.Linear(hidden_dim,output_dim)
+
+    def forward(self,x):
+        """
+        向前传播
+        :param x: 输入参数
+        :return: 评估值
+        """
+        x = F.elu(self.l1(x))
+        x = F.elu(self.l2(x))
+        return F.elu(self.l3(x))

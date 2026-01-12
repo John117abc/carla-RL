@@ -5,18 +5,19 @@ rl:
   # 通用超参
   seed: 42
   num_envs: 1                  # 并行环境数
-  num_episodes: 2    # 训练回合数
+  num_episodes: 100    # 训练回合数
   total_timesteps: 1_000_000
   log_interval: 100          # 每多少步记录一次日志
-  save_freq: 1            # 每多少回合保存一次模型
-  continue_a2c: False    # 是否继续训练，如果需要继续训练，则需要填写模型地址
-  model_path_a2c: 'checkpoints/20260112/a2c-v1.0_Town06_Opt_133243_episode=100.pth'
+  save_freq: 10            # 每多少回合保存一次模型
+  continue_a2c: True    # 是否继续训练，如果需要继续训练，则需要填写模型地址
+  model_path_a2c: 'checkpoints/20260112/a2c-v1.0_Town06_Opt_195250_episode=2.pth'
   continue_ocp: False    # 是否继续训练，如果需要继续训练，则需要填写模型地址
   model_path_ocp:
+  buffer_size: 1024
 
   A2C:
-    lr_actor: 3e-3
-    lr_critic: 3e-3
+    lr_actor: 3e-4
+    lr_critic: 3e-4
     gamma: 0.99
     ent_coef: 0.01
     vf_coef: 0.5
@@ -24,4 +25,15 @@ rl:
     use_gae: False
     gae_lambda: 0.95
     hidden_dim: 256
+
+  OCP:
+    amplifier_c: 1.1
+    amplifier_m: 10 # 10回合更新一次m
+    lr_actor: 1e-3
+    lr_critic: 1e-3
+    init_penalty: 1.0  # 初始惩罚系数
+    max_penalty: 100
+    hidden_dim: 256
+    other_car_min_distance: 1.0   # 与周车最小距离
+    road_min_distance: 0.5    # 与路边缘最小距离
 

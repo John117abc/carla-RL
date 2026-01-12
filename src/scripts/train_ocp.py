@@ -19,7 +19,7 @@ from src.agents import A2CAgent
 import gymnasium as gym
 from src.envs.carla_env import CarlaEnv  # 假设你的环境类在这里
 
-logger = get_logger()
+logger = get_logger('train_ocp')
 
 
 def save_image(obs, step: int, save_dir: str = "debug_images"):
@@ -57,7 +57,7 @@ def main():
         )
         agent = A2CAgent(env=env, rl_config=rl_config, device=device)
         if train_config['continue_ocp']:
-
+            return
         logger.info("✅ 环境创建成功！")
         logger.info(f"观测空间: {env.observation_space}")
         logger.info(f"动作空间: {env.action_space}")
