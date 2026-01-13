@@ -18,14 +18,14 @@ class PriorityBuffer:
         count = next(self._counter)
         # 如果缓冲区未满，直接添加
         if len(self.buffer) < self.capacity:
-            heapq.heappush(self.buffer, (priority, experience,count))
+            heapq.heappush(self.buffer, (priority, count,experience))
             self.sum_priorities += priority
             return True
         # 如果新样本优先级高于最低优先级样本，替换
         elif priority > self.buffer[0][0]:
             removed = heapq.heappop(self.buffer)
             self.sum_priorities -= removed[0]
-            heapq.heappush(self.buffer, (priority, experience,self.count))
+            heapq.heappush(self.buffer, (priority, self.count,experience))
             self.sum_priorities += priority
             return True
         return False
@@ -57,7 +57,7 @@ class PriorityBuffer:
 
         batch = []
         for idx in indices:
-            batch.append(self.buffer[idx][1])
+            batch.append(self.buffer[idx][2])
 
         return batch
 

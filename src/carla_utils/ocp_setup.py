@@ -1,9 +1,11 @@
 # src/carla_utils/ocp_setup.py
 import carla
+import numpy as np
+import torch
 
 import src.envs.sensors
 import math
-from typing import List, Dict
+from typing import List, Dict, Union
 
 def get_ocp_observation(ego_vehicle:carla.Vehicle,
                         ego_imu:src.envs.sensors.IMUSensor,
@@ -26,7 +28,7 @@ def get_ocp_observation(ego_vehicle:carla.Vehicle,
     ocp_road = get_closest_lane_edge_point(ego_vehicle)
     # 获取静态路径信息
     ocp_ref = get_ref_observation(ego_vehicle,path_locations)
-    return  [ocp_ego,ocp_other,ocp_road,ocp_ref]
+    return [ocp_ego,ocp_other,ocp_road,ocp_ref]
 
 
 def get_ego_observation(ego_vehicle:carla.Vehicle,ego_imu:src.envs.sensors.IMUSensor):
@@ -49,7 +51,7 @@ def get_ego_observation(ego_vehicle:carla.Vehicle,ego_imu:src.envs.sensors.IMUSe
     ego_yaw_deg = ego_transform.rotation.yaw
     # 角速度
     ego_angular_velocity = ego_imu.get_angular_velocity()
-    ocp_obs = [ego_x,ego_y,ego_vx,ego_vy,ego_yaw_deg,ego_angular_velocity.z]
+    ocp_obs = np.array([ego_x,ego_y,ego_vx,ego_vy,ego_yaw_deg,ego_angular_velocity.z])
     return ocp_obs
 
 
@@ -112,7 +114,7 @@ def get_other_observation(
         else:
             padded_result.append(_get_zero_vehicle_obs())
 
-    return padded_result
+    return np.array(padded_result)
 
 
 def get_closest_lane_edge_point(ego_vehicle: carla.Vehicle) -> carla.Location:
@@ -165,7 +167,7 @@ def get_closest_lane_edge_point(ego_vehicle: carla.Vehicle) -> carla.Location:
 
     pos = left_edge if dist_left < dist_right else right_edge
 
-    return [pos.x,pos.y,0,0,0,0]
+    return np.array([pos.x,pos.y,0,0,0,0])
 
 
 
@@ -227,7 +229,4 @@ def get_ref_observation(
     longitudinal_velocity = default_longitudinal_velocity
     yaw = ref_yaw_deg
 
-    return [x, y, longitudinal_velocity,0, yaw,0]
-
-
-
+    return np.array([x, y, longitudinal_velocity,0, yaw,0])

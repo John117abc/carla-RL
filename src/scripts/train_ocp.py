@@ -78,8 +78,7 @@ def main():
             total_reward = 0.0
             done = False
             while not done:
-                # action = agent.select_action(obs)
-                action = [1.0,0]
+                action = agent.select_action(obs)
                 next_obs, reward, _, _, info = env.step(action)
                 next_obs = next_obs['ocp_obs']
                 done = info['collision'] or info['off_route'] or info['TimeLimit.truncated']
@@ -90,15 +89,19 @@ def main():
                 obs = next_obs
 
                 global_step+=1
+
+                # 如果达到buffer可以训练的数量，则开始进行训练
+                actor_loss,critic_loss = None,None
+                if agent.buffer.should_start_training():
+                    actor_loss,critic_loss =  agent.update()
+
                 # 打印关键信息
                 if global_step % train_config["log_interval"] == 0:
                     logger.info(f"  Step {global_step}: reward={reward['total_reward']:.3f}, total={total_reward:.2f}")
                     if 'speed' in info:
                         logger.info(f"    速度: {info['speed']:.2f} km/h")
-
-                # 如果达到buffer可以训练的数量，则开始进行训练
-                if agent.buffer.should_start_training():
-                    agent.update_critic()
+                    if actor_loss is not None and critic_loss is not None:
+                        logger.info(f'训练损失actor_loss:{actor_loss},critic_loss:{critic_loss}')
 
                 if done:
                     logger.info(f"  ⏹️  Episode 结束 (info={info})")
@@ -109,7 +112,7 @@ def main():
 
             # 保存模型
             if episode % train_config["save_freq"] == 0:
-                logger.info(f"开始保存模型：  Step {global_step}: reward={reward:.3f}, total={total_reward:.2f}")
+                logger.info(f"开始保存模型：  Step {global_step}: reward={reward['total_reward']:.3f}, total={total_reward:.2f}")
                 agent.save(rl_config,
                            global_step,
                            episode,

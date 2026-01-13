@@ -117,7 +117,7 @@ def main():
 
             # 保存模型
             if episode % train_config["save_freq"] == 0:
-                logger.info(f"开始保存模型：  Step {global_step}: reward={reward:.3f}, total={total_reward:.2f}")
+                logger.info(f"开始保存模型：  Step {global_step}: reward={reward['total_reward']:.3f}, total={total_reward:.2f}")
                 agent.save(rl_config,
                            global_step,
                            episode,

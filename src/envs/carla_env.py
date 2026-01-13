@@ -83,8 +83,10 @@ class CarlaEnv(gym.Env):
         self.step_count = 0
 
         # 归一化处理
-        meas_dim = self._get_measurements_dim()  # 你需要实现这个函数
+        meas_dim = self._get_measurements_dim()
         self.meas_normalizer = RunningNormalizer(shape=(meas_dim,))
+
+        self.ocp_normalizer = RunningNormalizer(shape=(4,6,))
 
         # 控制是否更新归一化统计量（评估 时不更新）
         self._is_eval = False
@@ -125,15 +127,16 @@ class CarlaEnv(gym.Env):
             )
 
         if "measurements" in obs_type:
-            meas_keys = self.env_cfg["measurements"]["include"]
             n_meas = self._get_measurements_dim()
             obs_spaces["measurements"] = gym.spaces.Box(
                 low=-np.inf, high=np.inf, shape=(n_meas,), dtype=np.float32
             )
 
         if "ocp_obs" in obs_type:
+            # 有自车，周车，道路，参考4个维度数据，每个维度有6项
+            # 而且周车观察8辆车，所以维度是66
             obs_spaces["ocp_obs"] = gym.spaces.Box(
-                low=-np.inf, high=np.inf, shape=(6,), dtype=np.float32
+                low=-np.inf, high=np.inf, shape=(66,), dtype=np.float32
             )
 
         if len(obs_spaces) == 1:
@@ -322,7 +325,7 @@ class CarlaEnv(gym.Env):
             # 归一化 measurements
             meas_array = np.array(measurements, dtype=np.float32)
             if not self._is_eval:
-                self.meas_normalizer.update(meas_array[None, :])  # 添加 batch 维度
+                self.meas_normalizer.update(meas_array[None, :])
             meas_normalized = self.meas_normalizer.normalize(meas_array)
 
             obs["measurements"] = meas_normalized

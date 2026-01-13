@@ -7,7 +7,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple,List, Union
 
 from .base_agent import BaseAgent
 from src.models.advantage_actor_critic import ActorNetwork, CriticNetwork
@@ -72,7 +72,7 @@ class OcpAgent(BaseAgent):
         训练时返回随机动作和 log_prob；评估时返回均值。
         """
         with torch.no_grad():
-            obs_tensor = torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
+            obs_tensor, _, _, _, _ = self.unpack_observation(obs)
             if deterministic:
                 _, _, action_mean = self.actor(obs_tensor)
                 action = action_mean
@@ -122,153 +122,82 @@ class OcpAgent(BaseAgent):
         }
         return loss, metrics
 
-    def update(
-        self,
-        batch: Dict[str, torch.Tensor],
-    ) -> Dict[str, float]:
+    def update(self):
         """
-        执行一次 A2C 更新。
-        batch 应包含: obs, action, reward, next_obs, done
+        更新 Actor 和 Critic
         """
-        obs = batch["obs"]
-        actions = batch["action"]
-        rewards = batch["reward"]
-        next_obs = batch["next_obs"]
-        dones = batch["done"]
+        # 从 buffer 采样
+        batch = self.buffer.sample_batch(self.batch_size)  # 假设返回 list of tuples
+        batch = np.asarray(batch,dtype=object).reshape(self.batch_size, 6)
+        states = batch[:, 0]
+        actions_old = batch[:, 1]
 
-        loss, metrics = self.compute_loss(obs, actions, rewards, next_obs, dones)
+        # 解包状态
+        state_all,state_ego,state_other,state_road,state_ref = self.unpack_observation(states,True)
 
-        # 优化 Actor
-        self.actor_optimizer.zero_grad()
-        # 注意：loss 已包含 actor 和 critic 部分，但通常分开优化更稳定
-        values = self.critic(obs)
-        with torch.no_grad():
-            next_values = self.critic(next_obs)
-            target_values = rewards + self.gamma * next_values * (1 - dones.float())
-            advantages = target_values - values
+        # 获取 Q, R, M 矩阵
+        Q = torch.from_numpy(self.Q_matrix).to(self.device).float()
+        R = torch.from_numpy(self.R_matrix).to(self.device).float()
+        M = torch.from_numpy(self.M_matrix).to(self.device).float()
 
-        log_probs, entropy = self.actor.evaluate_actions(obs, actions)
-        actor_loss = -(log_probs * advantages.detach()).mean()
-        critic_loss = nn.functional.mse_loss(values, target_values)
+        # 计算当前策略下的 action
+        action_new, log_prob, _ = self.actor(state_all)
 
-        actor_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
-        self.actor_optimizer.step()
+        # 计算 cost components
+        tracking_error = ((state_ref - state_ego) @ Q) * (state_ref - state_ego)
+        control_energy = (action_new @ R) * action_new
+        l_current = tracking_error.mean() + control_energy.mean()
 
-        self.critic_optimizer.zero_grad()
-        critic_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
-        self.critic_optimizer.step()
+        # 计算约束项
+        diff = state_ego.unsqueeze(1) - state_other
+        dist_sq = (diff @ M).pow(2).sum(dim=-1)
+        ge_car = torch.relu(self.other_car_min_distance ** 2 - dist_sq).mean()
+        ge_road = torch.relu(-((state_ego - state_road) @ M).pow(2).sum(dim=-1) + self.road_min_distance ** 2)
+        constraint = self.init_penalty * (ge_car.mean() + ge_road.mean())
 
-        metrics.update({
-            "actor_loss": actor_loss.item(),
-            "critic_loss": critic_loss.item(),
-            "entropy": entropy.mean().item(),
-        })
-        return metrics
-
-    # 更新critic
-    def update_critic(self):
-        """
-        更新评论家网络ω
-        """
-        # 更新评论家网络
-        # 从缓冲区采样
-        all_batch_data = np.asarray(self.buffer.sample_batch(self.batch_size)).reshape(self.batch_size,6)
-        states = all_batch_data[:,0:1]
-        actions = all_batch_data[:,1:2]
-
-        # 转为tensor
-        state_ego = torch.from_numpy(np.array([[s[0][0] for s in states]])).squeeze(0).to(self.device).float()
-        state_other = torch.from_numpy(np.array([[s[0][1] for s in states]])).squeeze(0).to(self.device).float()
-        state_road = torch.from_numpy(np.array([[s[0][2] for s in states]])).squeeze(0).to(self.device).float()
-        state_ref = torch.from_numpy(np.array([[s[0][3] for s in states]])).squeeze(0).to(self.device).float()
-        state_all = torch.tensor([state_ego,state_other,state_road,state_ref])
-
-        actions = torch.from_numpy(np.array([[a[0] for a in actions]])).squeeze(0).to(self.device).float()
-
-        Q_matrix_tensor = torch.from_numpy(self.Q_matrix).to(self.device).float()
-        R_matrix_tensor = torch.from_numpy(self.R_matrix).to(self.device).float()
-
-        # 跟踪误差
-        with torch.no_grad():
-            actions = self.select_action(actions)
-        tracking_error = ((state_ref - state_ego) @ Q_matrix_tensor) * (state_ref - state_ego)
-        control_energy = (actions @ R_matrix_tensor) * actions
-        # 文章中的l(si|t, πθ(si|t))
-        l_critic = torch.mean(tracking_error) + torch.mean(control_energy)
-
-        # 文章中的Vw(s0|t)
-        v_w = self.critic(state_all)
-        v_w = torch.mean(v_w)
-        loss_critic = self.loss_func(l_critic, v_w)
-        # 更新ω
-        self.critic_optimizer.zero_grad()
-        loss_critic.backward()
-        self.critic_optimizer.step()
-        return loss_critic.detach().item()
-
-    def update_actor(self):
-        """
-        更新策略网络θ
-        """
-        # 从缓冲区采样
-        all_batch_data = np.asarray(self.buffer.sample_batch(self.batch_size)).reshape(self.batch_size,6)
-        states = all_batch_data[:,0:1]
-        actions = all_batch_data[:,1:2]
-
-        # 转为tensor
-        state_ego = torch.from_numpy(np.array([[s[0][0] for s in states]])).squeeze(0).to(self.device).float()
-        state_other = torch.from_numpy(np.array([[s[0][1] for s in states]])).squeeze(0).to(self.device).float()
-        state_road = torch.from_numpy(np.array([[s[0][2] for s in states]])).squeeze(0).to(self.device).float()
-        state_ref = torch.from_numpy(np.array([[s[0][3] for s in states]])).squeeze(0).to(self.device).float()
-        state_all = torch.tensor([state_ego,state_other,state_road,state_ref])
-
-        actions = torch.from_numpy(np.array([[a[0] for a in actions]])).squeeze(0).to(self.device).float()
-
-        Q_matrix_tensor = torch.from_numpy(self.Q_matrix).to(self.device).float()
-        R_matrix_tensor = torch.from_numpy(self.R_matrix).to(self.device).float()
-        M_matrix_tensor = torch.from_numpy(self.M_matrix).to(self.device).float()
-        # 跟踪误差
-        with torch.no_grad():
-            actions = self.select_action(state_all)
-        tracking_error = ((state_ref - state_ego) @ Q_matrix_tensor) * (state_ref - state_ego)
-        control_energy = (actions @ R_matrix_tensor) * actions
-        # 文章中的l(si|t, πθ(si|t))
-        l_actor = torch.mean(tracking_error) + torch.mean(control_energy)
-
-        # 周车约束
-        ge_car = torch.relu(-torch.sum((((state_ego.unsqueeze(1) - state_other) @ M_matrix_tensor * (
-                    state_ego.unsqueeze(1) - state_other)).reshape(self.batch_size * self.other_car_count,
-                                                                   6) ** 2) - self.other_car_min_distance ** 2,
-                                       dim=1))
-        # 道路约束
-        ge_road = torch.relu(-(torch.sum(((state_ego - state_road) @ M_matrix_tensor * (state_ego - state_road)) ** 2,
-                                         dim=1) - self.road_min_distance ** 2))
-        constraint = self.init_penalty * (torch.mean(ge_car) + torch.mean(ge_road))
-
-        loss_actor = l_actor + constraint
+        # Actor Loss
+        loss_actor = l_current + constraint
         self.actor_optimizer.zero_grad()
         loss_actor.backward()
         self.actor_optimizer.step()
-        return loss_actor.detach().item()
+
+        with torch.no_grad():
+            v_target = l_current  # ❗仅在特定假设下成立！
+
+        v_pred = self.critic(state_all).mean()
+        loss_critic = self.loss_func(v_pred, v_target.detach())
+
+        self.critic_optimizer.zero_grad()
+        loss_critic.backward()
+        self.critic_optimizer.step()
+
+        return loss_actor.item(), loss_critic.item()
 
     def save(self,
              rl_config:Dict[str, Any],
              global_step:int,
              episode:int,
-             map_name:str) -> None:
+             map_name:str,
+             meas_normalizer:Dict[str, Any]) -> None:
+        """
+        保存模型参数
+        :param rl_config: 超参数
+        :param global_step: 总计运行步数
+        :param episode: 运行回合数
+        :param map_name: 地图名称
+        :param meas_normalizer: measurements观察归一化数据
+        """
         actor_model = self.actor
         critic_model = self.critic
         actor_optimizer = self.actor_optimizer
         critic_optimizer = self.critic_optimizer
         model = {'actor': actor_model, 'critic': critic_model}
         optimizer = {'actor_optim': actor_optimizer, 'critic_optim': critic_optimizer}
-        extra_info = {'config': rl_config, 'global_step': global_step}
+        extra_info = {'config': rl_config, 'global_step': global_step,'meas_normalizer':meas_normalizer}
         met = {'episode': episode}
         save_checkpoint(
             model=model,
-            model_name='a2c-v1.0',
+            model_name='ocp-v1.0',
             optimizer=optimizer,
             extra_info=extra_info,
             metrics=met,
@@ -276,13 +205,13 @@ class OcpAgent(BaseAgent):
         )
 
     def load(self, path: str) -> None:
-        load_checkpoint(
+        checkpoint = load_checkpoint(
             model={'actor': self.actor, 'critic': self.critic},
             filepath=path,
             optimizer={'actor_optim': self.actor_optimizer, 'critic_optim': self.critic_optimizer},
             device=self.device
         )
-
+        return checkpoint
     def eval(self, num_episodes: int = 10) -> Tuple[float, float]:
         total_rewards = []
         for _ in range(num_episodes):
@@ -296,3 +225,70 @@ class OcpAgent(BaseAgent):
                 done = terminated or truncated
             total_rewards.append(episode_reward)
         return float(np.mean(total_rewards)), float(np.std(total_rewards))
+
+    def unpack_observation(self, obs: Union[List, np.ndarray], batched: bool = False):
+        """
+        解包 observation 数据，支持单样本和批量样本
+
+        Args:
+            obs:
+                - 若 batched=False: [ego, other, road, ref]
+                  其中 ego/other/road/ref 为 array-like (list, np.ndarray)
+                - 若 batched=True: [sample_1, sample_2, ..., sample_B]
+                  其中 sample_i = [ego_i, other_i, road_i, ref_i]
+            batched: 是否为批量数据
+
+        Returns:
+            state_all: [D] if not batched, or [B, D] if batched
+            state_ego, state_other, state_road, state_ref: 各部分张量（在 self.device 上）
+        """
+
+        def to_tensor(data, is_batch=False):
+            """将 list 或 np.ndarray 转为 tensor"""
+            if isinstance(data, torch.Tensor):
+                tensor = data
+            else:
+                # 先转为 numpy array避免 list of ndarray
+                arr = np.array(data, dtype=np.float32)
+                tensor = torch.from_numpy(arr)
+            return tensor.to(self.device)
+
+        if batched:
+            ego_list = [sample[0] for sample in obs]
+            other_list = [sample[1] for sample in obs]
+            road_list = [sample[2] for sample in obs]
+            ref_list = [sample[3] for sample in obs]
+
+            state_ego = to_tensor(ego_list)
+            state_other = to_tensor(other_list)
+            state_road = to_tensor(road_list)
+            state_ref = to_tensor(ref_list)
+
+            B = state_ego.shape[0]
+            state_ego_flat = state_ego.view(B, -1)
+            state_other_flat = state_other.view(B, -1)
+            state_road_flat = state_road.view(B, -1)
+            state_ref_flat = state_ref.view(B, -1)
+
+            state_all = torch.cat([
+                state_ego_flat,
+                state_other_flat,
+                state_road_flat,
+                state_ref_flat
+            ], dim=1)  # [B, D]
+
+        else:
+
+            state_ego = to_tensor(obs[0])
+            state_other = to_tensor(obs[1])
+            state_road = to_tensor(obs[2])
+            state_ref = to_tensor(obs[3])
+
+            state_all = torch.cat([
+                state_ego.view(-1),
+                state_other.view(-1),
+                state_road.view(-1),
+                state_ref.view(-1)
+            ], dim=0)
+
+        return state_all, state_ego, state_other, state_road, state_ref
