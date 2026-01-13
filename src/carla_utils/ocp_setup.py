@@ -1,7 +1,6 @@
 # src/carla_utils/ocp_setup.py
 import carla
 import numpy as np
-import torch
 
 import src.envs.sensors
 import math

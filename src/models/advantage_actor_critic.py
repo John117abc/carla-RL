@@ -59,9 +59,9 @@ class ActorNetwork(nn.Module):
         log_prob -= (2 * (action - F.softplus(2 * action))).sum(dim=-1, keepdim=True)
 
         # logger.info(f"mean:{mean}")
-        logger.info(f"std:{std}")
-        logger.info(f"action:{action}")
-        logger.info(f"log_prob:{log_prob}")
+        # logger.info(f"std:{std}")
+        # logger.info(f"action:{action}")
+        # logger.info(f"log_prob:{log_prob}")
 
         return action_scaled, log_prob, mean
 

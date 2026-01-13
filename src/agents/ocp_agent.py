@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torch.nn.functional as F
 from typing import Dict, Any, Tuple,List, Union
 
 from .base_agent import BaseAgent
@@ -58,11 +59,11 @@ class OcpAgent(BaseAgent):
         self.road_min_distance = self.ocp_config['road_min_distance']
 
         # 正定矩阵
-        self.Q_matrix = np.diag([0.04, 0.04, 0.1, 0.01, 0.1, 0.02])
+        self.Q_matrix = np.diag([0.04, 0.04, 0.1, 0.01, 0.0001, 0.02])
         self.R_matrix = np.diag([0.1, 0.005])
         self.M_matrix = np.diag([1,1,0,0,0,0])
         # 严格使用s^ref = [δp, δφ, δv ]状态时候的Q
-        self.Q_matrix_ref = np.diag([0.04,0.1,0.01])
+        self.Q_matrix_ref = np.diag([0.04,0.01,0.01])
 
         # 采样数量
         self.batch_size = self.ocp_config['batch_size']
@@ -84,57 +85,63 @@ class OcpAgent(BaseAgent):
             else:
                 action, log_prob, _ = self.actor(obs_tensor)
             action = action.cpu().numpy().flatten()
-            # logger.info(f'动作打印：{np.clip(action, self.action_space.low, self.action_space.high)}')
         return np.clip(action, self.action_space.low, self.action_space.high)
 
     def update(self):
-        """
-        更新 Actor 和 Critic
-        """
-        # 从 buffer 采样
-        batch = self.buffer.sample_batch(self.batch_size)
-        batch = np.asarray(batch,dtype=object).reshape(-1, 6)
-        states = batch[:, 0]
+        # 采样 N 条完整轨迹
+        trajectories = self.buffer.sample_batch(self.batch_size)
 
-        # 解包状态
-        state_all,state_ego,state_other,state_road,state_ref = self.unpack_observation(states,True)
+        actor_losses = []
+        critic_targets = []
+        initial_states = []
 
-        # 获取 Q, R, M 矩阵
-        Q = torch.from_numpy(self.Q_matrix).to(self.device).float()
-        R = torch.from_numpy(self.R_matrix).to(self.device).float()
-        M = torch.from_numpy(self.M_matrix).to(self.device).float()
+        for traj in trajectories:
+            # traj 包含: init_s, states, actions, refs, etc.
+            total_cost = 0
+            total_constraint = 0
 
-        # 计算当前策略下的 action
-        action_new, log_prob, _ = self.actor(state_all)
+            for t in range(len(traj.states)):
+                s_all, s_ego, s_other, s_road, s_ref = self.unpack_observation(traj.states[t])
+                action, log_prob, _ = self.actor(s_all)
 
-        # 计算 cost components
-        tracking_error = ((state_ref - state_ego) @ Q) * (state_ref - state_ego)
-        control_energy = (action_new @ R) * action_new
-        l_current = tracking_error.mean() + control_energy.mean()
+                # 获取 Q, R, M 矩阵
+                Q = torch.from_numpy(self.Q_matrix).to(self.device).float()
+                R = torch.from_numpy(self.R_matrix).to(self.device).float()
+                M = torch.from_numpy(self.M_matrix).to(self.device).float()
 
-        # 计算约束项
-        diff = state_ego.unsqueeze(1) - state_other
-        dist_sq = (diff @ M).pow(2).sum(dim=-1)
-        ge_car = torch.relu(self.other_car_min_distance ** 2 - dist_sq).mean()
-        ge_road = torch.relu(-((state_ego - state_road) @ M).pow(2).sum(dim=-1) + self.road_min_distance ** 2)
-        constraint = self.init_penalty * (ge_car.mean() + ge_road.mean())
+                tracking = ((s_ref - s_ego) @ Q * (s_ref - s_ego)).sum()
+                control = (action @ R * action).sum()
+                total_cost += tracking + control
 
-        # Actor Loss
-        actor_loss = l_current + self.init_penalty * constraint
+                # 计算约束项
+                diff = s_ego - s_other
+                dist_sq = (diff @ M).pow(2).sum(dim=-1)
+                ge_car = torch.relu(self.other_car_min_distance ** 2 - dist_sq).mean()
+                ge_road = torch.relu(-((s_ego - s_road) @ M).pow(2).sum(dim=-1) + self.road_min_distance ** 2)
+                total_constraint += ge_car + ge_road
+
+            actor_loss = total_cost + self.init_penalty * total_constraint
+            actor_losses.append(actor_loss)
+
+            # Critic
+            initial_states.append(traj.initial_state)
+            critic_targets.append(total_cost)
+
+        # Actor更新
+        actor_loss = torch.stack(actor_losses).mean()
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
         self.actor_optimizer.step()
 
-        with torch.no_grad():
-            v_target = l_current
-
-        v_pred = self.critic(state_all).mean()
-        critic_loss = self.loss_func(v_pred, v_target.detach())
+        # Critic更新
+        initial_states, _, _, _, _ = self.unpack_observation(initial_states[0])
+        critic_pred = self.critic(initial_states).squeeze()
+        critic_target = torch.tensor(critic_targets, device=self.device)
+        critic_loss = F.mse_loss(critic_pred, critic_target)
 
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
         self.critic_optimizer.step()
-
         return {
             "actor_loss": actor_loss.detach().item(),
             "critic_loss": critic_loss.detach().item()
@@ -260,69 +267,29 @@ class OcpAgent(BaseAgent):
         return state_all, state_ego, state_other, state_road, state_ref
 
 
-    def collect_trajectory(self,env:CarlaEnv, horizon=25):
-        """
-        收集轨迹
-        :param env: 环境
-        :param horizon: 收集轨迹中的步数
-        :return: 轨迹
-        """
-        states, actions, rewards, infos = [], [], [], []
-        state,_ = env.reset()
-        initial_state = state.copy()
-        for t in range(horizon):
-            action = self.select_action(state)
-            actions.append(action)
-            states.append(state)
-            next_state, reward_dict,  terminated, truncated, info = env.step(action)
-            done = info['collision'] or info['off_route'] or info['TimeLimit.truncated']
-            rewards.append(reward_dict)
-            infos.append(info)
-
-            state = next_state
-            if done:
-                break
-
-        # 计算 total_cost 和 total_constraint
-        total_cost, total_constraint = self.compute_total_cost_and_constraint(states, actions)
-
-        return Trajectory(
-            initial_state=initial_state,
-            states=states,
-            actions=actions,
-            rewards=rewards,
-            infos=infos,
-            total_cost=total_cost,
-            total_constraint=total_constraint,
-            path_id=env.current_path_id,
-            horizon=len(states)
-        )
-
     def compute_total_cost_and_constraint(self,states,action):
         """
         计算这条轨迹的效用值和约束
-        :param states:
-        :param action:
-        :return:
+        :param states: 观察状态
+        :param action: 动作
+        :return: 效用值，约束值
         """
         # 解包状态
-        state_all, state_ego, state_other, state_road, state_ref = self.unpack_observation(states, True)
-
-        # 获取 Q, R, M 矩阵
-        Q = torch.from_numpy(self.Q_matrix).to(self.device).float()
-        R = torch.from_numpy(self.R_matrix).to(self.device).float()
-        M = torch.from_numpy(self.M_matrix).to(self.device).float()
+        state_ego =  np.asarray([sample[0] for sample in states])
+        state_other = np.asarray([sample[1] for sample in states])
+        state_road = np.asarray([sample[2] for sample in states])
+        state_ref = np.asarray([sample[3] for sample in states])
+        action = np.asarray(action)
 
         # 计算 cost components
-        tracking_error = ((state_ref - state_ego) @ Q) * (state_ref - state_ego)
-        control_energy = (action @ R) * action
+        tracking_error = ((state_ref - state_ego) @ self.Q_matrix) * (state_ref - state_ego)
+        control_energy = (action @ self.R_matrix) * action
         l_current = tracking_error.mean() + control_energy.mean()
 
         # 计算约束项
-        diff = state_ego.unsqueeze(1) - state_other
-        dist_sq = (diff @ M).pow(2).sum(dim=-1)
-        ge_car = torch.relu(self.other_car_min_distance ** 2 - dist_sq).mean()
-        ge_road = torch.relu(-((state_ego - state_road) @ M).pow(2).sum(dim=-1) + self.road_min_distance ** 2)
+        diff = np.expand_dims(state_ego, axis=1)- state_other
+        dist_sq = np.sum(((diff @ self.M_matrix)**2),axis=-1)
+        ge_car = np.maximum(0.0,self.other_car_min_distance ** 2 - dist_sq).mean()
+        ge_road = np.maximum(0.0,-np.sum((((state_ego - state_road) @ self.M_matrix)**2),axis=-1)+ self.road_min_distance ** 2)
         constraint = self.init_penalty * (ge_car.mean() + ge_road.mean())
-
         return l_current,constraint

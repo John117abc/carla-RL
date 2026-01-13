@@ -11,7 +11,7 @@ rl:
   save_freq: 10            # 每多少回合保存一次模型
   continue_a2c: True    # 是否继续训练，如果需要继续训练，则需要填写模型地址
   model_path_a2c: 'checkpoints/20260112/a2c-v1.0_Town06_Opt_204520_episode=40.pth'
-  continue_ocp: True    # 是否继续训练，如果需要继续训练，则需要填写模型地址
+  continue_ocp: False    # 是否继续训练，如果需要继续训练，则需要填写模型地址
   model_path_ocp: 'checkpoints/20260113/ocp-v1.0_Town06_Opt_142635_episode=10.pth'
 
   A2C:
@@ -36,6 +36,6 @@ rl:
     hidden_dim: 256
     other_car_min_distance: 1.0   # 与周车最小距离
     road_min_distance: 0.5    # 与路边缘最小距离
-    min_start_train: 128    # 最小启动训练样本数(轨迹数)
-    total_capacity: 50000  # 缓冲区容量(轨迹数)
-    batch_size: 128
+    min_start_train: 2    # 最小启动训练样本数(轨迹数)
+    total_capacity: 5000  # 缓冲区容量(轨迹数)
+    batch_size: 4

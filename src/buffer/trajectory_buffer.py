@@ -9,8 +9,8 @@ from typing import List, Any
 @dataclass
 class Trajectory:
     initial_state: Any          # 包含 path info 的初始状态（用于 Critic 输入）
-    states: List[Any]           # [s0, s1, ..., sT]
-    actions: List[Any]          # [a0, a1, ..., a_{T-1}]
+    states: List[np.ndarray]           # [s0, s1, ..., sT]
+    actions: List[np.ndarray]          # [a0, a1, ..., a_{T-1}]
     rewards: List[dict]         # 每一步的 reward dict
     infos: List[dict]           # 每一步的 info
     total_cost: float           # 整条轨迹的 tracking + control cost
@@ -152,13 +152,13 @@ class DiversityTrajectoryBuffer(TrajectoryPriorityBuffer):
         path_freq = self.path_counts[path_id] / max(1, self.total_trajectories)
         path_priority = max(0.1, 1.0 / (path_freq * 20 + 0.01))
 
-        # 场景指纹（可选增强）
+        # 场景指纹
         scenario_fp = self._create_scenario_fingerprint(traj)
         self.scenario_counts[scenario_fp] += 1
         scenario_freq = self.scenario_counts[scenario_fp] / max(1, self.total_trajectories)
         scenario_priority = max(0.1, 1.0 / (scenario_freq * 30 + 0.01))
 
-        # 动作/状态极端性（简化）
+        # 动作/状态极端性
         action_diversity = self._evaluate_action_diversity(traj.actions)
         state_diversity = self._evaluate_state_diversity(traj.states)
 
@@ -304,3 +304,68 @@ class TrajectoryBuffer:
 
     def should_start_training(self) -> bool:
         return sum(len(buf) for buf in self.buffers) >= self.min_start_train
+
+    def _calculate_gep_priority(self, trajectory: Trajectory, buffer_idx: int) -> float:
+        """
+        根据轨迹内容和目标缓冲区类型，计算 GEP 风格的优先级。
+        GEP 强调：探索性（diversity）、性能提升（competence progress）、安全性（criticality）。
+        此处复用各子缓冲区的 calculate_priority 方法，并加入全局 penalty 调整。
+        """
+        # 获取对应缓冲区的原生优先级
+        base_priority = self.buffers[buffer_idx].calculate_priority(trajectory)
+
+        # 可选：根据全局 GEP 策略调整（例如对高约束轨迹施加 penalty）
+        constraint_penalty = max(0.0, trajectory.total_constraint - 0.5)
+        adjusted_priority = base_priority - self.gep_penalty_factor * constraint_penalty
+
+        # 保证优先级在合理范围内
+        return max(0.1, min(10.0, adjusted_priority))
+
+    def _handle_buffer_full(self, buffer_idx: int, trajectory: Trajectory, priority: float):
+        """
+        当目标缓冲区已满且新轨迹优先级不足以替换最低项时，
+        尝试以下策略：
+        1. 临时扩容（仅限非安全关键缓冲区）
+        2. 降级存入次优缓冲区（例如 diversity -> curriculum）
+        3. 直接丢弃（最后手段）
+        """
+        target_buffer = self.buffers[buffer_idx]
+
+        # 策略1：临时扩容（避免频繁丢弃高价值轨迹）
+        if buffer_idx != 0:  # 不对 SafetyCritical 缓冲区扩容（保持严格性）
+            original_capacity = target_buffer.capacity
+            target_buffer.temporarily_expand()
+            added = target_buffer.add(trajectory, priority)
+            if added:
+                return  # 成功插入，结束
+            else:
+                # 扩容后仍无法插入？恢复容量（理论上不会发生，但保险起见）
+                target_buffer.capacity = original_capacity
+
+        # 策略2：尝试降级存入其他缓冲区（按优先级顺序）
+        fallback_order = [2, 1, 3]  # 先 diversity，再 performance，最后 curriculum
+        if buffer_idx in fallback_order:
+            fallback_order.remove(buffer_idx)
+
+        for idx in fallback_order:
+            fallback_priority = self._calculate_gep_priority(trajectory, idx)
+            if self.buffers[idx].add(trajectory, fallback_priority):
+                return  # 成功降级存储
+
+        # 彻底丢弃路径
+        # print(f"Trajectory (path_id={trajectory.path_id}) dropped: all buffers full and low priority.")
+
+    def _is_rare_path(self, path_id: int) -> bool:
+        """
+        判断 path_id 是否属于“稀有路径”。
+        使用 DiversityBuffer 中的 path_counts 进行判断。
+        若该路径出现频率低于阈值（如 < 2%），则视为稀有。
+        """
+        diversity_buf = self.buffers[2]  # DiversityTrajectoryBuffer
+        total = diversity_buf.total_trajectories
+        if total == 0:
+            return True  # 初始阶段所有路径都算稀有
+
+        count = diversity_buf.path_counts.get(path_id, 0)
+        frequency = count / total
+        return frequency < 0.02  # 阈值可调，当前设为 2%

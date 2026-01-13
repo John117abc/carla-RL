@@ -12,7 +12,7 @@ import sys
 from src.utils import (load_config,get_logger,
                        setup_code_environment)
 from src.agents import OcpAgent
-
+from src.buffer import Trajectory
 # 添加项目源码路径
 # sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
@@ -69,62 +69,72 @@ def main():
         episode = 0
         while episode < num_episodes:
             logger.info(f"\n▶️  开始第 {episode + 1} 轮测试...")
-            obs, info = env.reset()
-            obs = obs['ocp_obs']
-            logger.info(f"初始观测类型: {type(obs)}, 形状/结构: {get_obs_shape(obs)}")
+            state, info = env.reset()
+            state = state['ocp_obs']
+            logger.info(f"初始观测类型: {type(state)}, 形状/结构: {get_obs_shape(state)}")
             total_reward = 0.0
             done = False
-            # 记录轨迹
-            agent.collect_trajectory(env = env,horizon = env.env_cfg["termination"]["max_episode_steps"])
-            # while not done:
-            #     action = agent.select_action(obs)
-            #     next_obs, reward, _, _, info = env.step(action)
-            #     next_obs = next_obs['ocp_obs']
-            #     done = info['collision'] or info['off_route'] or info['TimeLimit.truncated']
-            #     total_reward += reward['total_reward']
-            #
-            #     # 数据加入buffer
-            #     agent.buffer.handle_new_experience((obs, action, reward, _, done, info))
-            #     obs = next_obs
-            #
-            #     # 如果达到buffer可以训练的数量，则开始进行训练
-            #     loss = None
-            #     if agent.buffer.should_start_training():
-            #         loss =  agent.update()
-            #
-            #     # 更新惩罚参数
-            #     agent.update_penalty(env.step_count)
-            #     # 打印关键信息
-            #     if global_step % train_config["log_interval"] == 0:
-            #         logger.info(f"  Step {global_step}: reward={reward['total_reward']:.3f}, total={total_reward:.2f}")
-            #         if 'speed' in info:
-            #             logger.info(f"    速度: {info['speed']:.2f} km/h")
-            #         if loss is not None:
-            #             logger.info(f"训练损失: actor_loss:{loss['actor_loss']:.5f},critic_loss:{loss['critic_loss']:.5f},"
-            #                         f"惩罚参数：{agent.init_penalty:.5f}")
-            #             loss.update({
-            #                 'global_step':global_step
-            #             })
-            #             history.append(loss)
-            #     global_step += 1
-            #     if done:
-            #         logger.info(f"  ⏹️  Episode 结束 (info={info})")
-            #         break
-            # episode += 1
+            states, actions, rewards, infos = [], [], [], []
+            initial_state = state.copy()
+            while not done:
+                action = agent.select_action(state)
+                next_obs, reward, _, _, info = env.step(action)
+                next_state = next_obs['ocp_obs']
+                done = info['collision'] or info['off_route'] or info['TimeLimit.truncated']
+                total_reward += reward['total_reward']
+                # 数据加入buffer
+                actions.append(action)
+                states.append(state)
+                rewards.append(reward)
+                infos.append(info)
+                state = next_state
 
+                # 更新惩罚参数
+                agent.update_penalty(env.step_count)
+                # 打印关键信息
+                if global_step % train_config["log_interval"] == 0:
+                    logger.info(f"  Step {global_step}: reward={reward['total_reward']:.3f}, total={total_reward:.2f}")
+                    if 'speed' in info:
+                        logger.info(f"    速度: {info['speed']:.2f} km/h")
+                global_step += 1
+                if done:
+                    logger.info(f"  ⏹️  Episode 结束 (info={info})")
+                    break
+
+            # 计算 total_cost 和 total_constraint
+            total_cost, total_constraint = agent.compute_total_cost_and_constraint(states, actions)
+            trajectory = Trajectory(initial_state=initial_state,states=states,actions=actions,rewards=rewards,infos=infos,
+                                    total_cost=total_cost,total_constraint=total_constraint,path_id=env.current_path_id,horizon=len(states))
+            # 加入buffer
+            agent.buffer.handle_new_trajectory(trajectory)
+
+            # 更新参数
+            loss = None
+            if agent.buffer.should_start_training():
+                loss = agent.update()
             logger.info(f"✅ 第 {episode} 轮完成，总奖励: {total_reward:.2f}")
 
-            # 保存模型
-            if episode % train_config["save_freq"] == 0:
-                logger.info(f"开始保存模型：  Step {global_step}: reward={reward['total_reward']:.3f}, total={total_reward:.2f}")
-                save_info = {
-                    'rl_config':rl_config,
-                    'global_step':global_step,
-                    'episode':episode,
-                    'map':env_config['world']['map'],
-                    'history_loss':history
-                }
-                agent.save(save_info)
+            if loss is not None:
+                logger.info(f"训练损失: actor_loss:{loss['actor_loss']:.5f},critic_loss:{loss['critic_loss']:.5f},"
+                            f"惩罚参数：{agent.init_penalty:.5f}")
+                loss.update({
+                    'global_step': global_step
+                })
+                history.append(loss)
+
+            episode += 1
+
+            # # 保存模型
+            # if episode % train_config["save_freq"] == 0:
+            #     logger.info(f"开始保存模型：  Step {global_step}: reward={reward['total_reward']:.3f}, total={total_reward:.2f}")
+            #     save_info = {
+            #         'rl_config':rl_config,
+            #         'global_step':global_step,
+            #         'episode':episode,
+            #         'map':env_config['world']['map'],
+            #         'history_loss':history
+            #     }
+            #     agent.save(save_info)
 
     except Exception as e:
         logger.error(f"❌ 环境运行出错: {e}")
