@@ -12,7 +12,7 @@ from typing import Dict, Any, Tuple, List, Union
 from .base_agent import BaseAgent
 from src.models.advantage_actor_critic import ActorNetwork,CriticNetwork
 from src.utils import save_checkpoint,load_checkpoint,get_logger
-from src.buffer import StochasticBufferManager
+from src.buffer import StochasticBuffer
 
 logger = get_logger('a2c_agent')
 
@@ -56,7 +56,7 @@ class A2CAgent(BaseAgent):
         self.batch_size = self.a2c_config['batch_size']
 
         # 初始化缓冲区
-        self.buffer = StochasticBufferManager(min_start_train = self.a2c_config['min_start_train'],
+        self.buffer = StochasticBuffer(min_start_train = self.a2c_config['min_start_train'],
                                               total_capacity = self.a2c_config['total_capacity'])
 
 

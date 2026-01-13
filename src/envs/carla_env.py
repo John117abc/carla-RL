@@ -38,7 +38,7 @@ class CarlaEnv(gym.Env):
         self.env_cfg = env_config
         self.render_mode = render_mode
 
-        # === 初始化 CARLA 客户端 ===
+        # 初始化 CARLA 客户端
         self.client = carla.Client(self.carla_cfg["host"], self.carla_cfg["port"])
         self.client.set_timeout(self.carla_cfg["timeout"])
         self.world = self.client.load_world(self.env_cfg["world"]["map"])
@@ -94,7 +94,7 @@ class CarlaEnv(gym.Env):
         # 周车
         self.actors = []
 
-        # === 动作空间 ===
+        # 动作空间
         action_type = self.env_cfg["action"]["type"]
         if action_type == "continuous":
             low = np.array([
@@ -112,7 +112,7 @@ class CarlaEnv(gym.Env):
         else:
             raise ValueError(f"不支持的操作类型: {action_type}")
 
-        # === 观测空间 ===
+        # 观测空间
         obs_type = self.env_cfg["obs_type"]
         obs_spaces = {}
 
@@ -150,6 +150,9 @@ class CarlaEnv(gym.Env):
         # 初始化路径规划器
         self.route_planner = RoutePlanner(self.world,self.carla_cfg["world"]["sampling_resolution"])
         self.path_locations = None
+
+        # 路径id
+        self.current_path_id = 0
 
     def _get_measurements_dim(self):
         """
@@ -337,7 +340,7 @@ class CarlaEnv(gym.Env):
             return list(obs.values())[0]
         return obs
 
-    def _compute_reward(self,lane_inv,collision,obstacle) -> float:
+    def _compute_reward(self,lane_inv,collision,obstacle) -> dict[str, Any]:
         w = self.env_cfg["reward_weights"]
         r = 0.0
 
@@ -526,9 +529,8 @@ class CarlaEnv(gym.Env):
         # 重置观察者视角
         self._place_spectator_above_vehicle()
 
-        # 向前走几步
-        # for count in range(1024):
-        #     self.step([0.1,0])
+        # 路径id+1
+        self.current_path_id +=1
         return obs, info
 
     def render(self) -> Optional[np.ndarray]:

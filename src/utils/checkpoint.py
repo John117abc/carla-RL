@@ -125,7 +125,7 @@ def load_checkpoint(model, filepath, optimizer=None, device=None):
     map_location = device if device is not None else lambda storage, loc: storage
     checkpoint = torch.load(filepath, map_location=map_location)
 
-    # === 加载模型 ===
+    # 加载模型
     saved_model_state = checkpoint['model_state_dict']
 
     if isinstance(model, dict):
@@ -139,7 +139,7 @@ def load_checkpoint(model, filepath, optimizer=None, device=None):
         # 单模型模式
         model.load_state_dict(saved_model_state)
 
-    # === 加载优化器===
+    # 加载优化器
     saved_optim_state = checkpoint.get('optimizer_state_dict')
     if optimizer is not None and saved_optim_state is not None:
         if isinstance(optimizer, dict):

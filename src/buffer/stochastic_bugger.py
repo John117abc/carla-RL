@@ -337,7 +337,7 @@ class CurriculumBuffer(PriorityBuffer):
                 )
 
 
-class StochasticBufferManager:
+class StochasticBuffer:
     def __init__(self,
                  min_start_train: int = 256,
                  total_capacity: int = 1000000):

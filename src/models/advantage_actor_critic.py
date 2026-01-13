@@ -5,7 +5,6 @@ import torch.nn.functional as F
 from torch.distributions import Normal
 from src.utils import get_logger
 
-
 logger = get_logger('actor_critic')
 
 def mlp(sizes, activation=nn.ReLU, output_activation=nn.Identity):
@@ -60,9 +59,9 @@ class ActorNetwork(nn.Module):
         log_prob -= (2 * (action - F.softplus(2 * action))).sum(dim=-1, keepdim=True)
 
         # logger.info(f"mean:{mean}")
-        # logger.info(f"std:{std}")
-        # logger.info(f"action:{action}")
-        # logger.info(f"log_prob:{log_prob}")
+        logger.info(f"std:{std}")
+        logger.info(f"action:{action}")
+        logger.info(f"log_prob:{log_prob}")
 
         return action_scaled, log_prob, mean
 
@@ -105,7 +104,7 @@ class CriticNetwork(nn.Module):
         obs_dim = np.prod(observation_space.shape)
         self.net = mlp([obs_dim, hidden_dim, hidden_dim, 1], activation=nn.ReLU)
 
-        # 初始化输出层（可选）
+        # 初始化输出层
         self.net[-2].weight.data.uniform_(-3e-3, 3e-3)
         self.net[-2].bias.data.uniform_(-3e-3, 3e-3)
 

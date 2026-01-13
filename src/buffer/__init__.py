@@ -1,3 +1,4 @@
 # src/agents/__init__.py
-from .stochastic_bugger_manage import StochasticBufferManager
-__all__ = ['StochasticBufferManager']
+from .stochastic_bugger import StochasticBuffer
+from .trajectory_buffer import Trajectory,TrajectoryBuffer
+__all__ = ['StochasticBuffer','Trajectory','TrajectoryBuffer']

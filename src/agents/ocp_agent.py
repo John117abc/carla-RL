@@ -12,8 +12,8 @@ from typing import Dict, Any, Tuple,List, Union
 from .base_agent import BaseAgent
 from src.models.advantage_actor_critic import ActorNetwork, CriticNetwork
 from src.utils import save_checkpoint,load_checkpoint,get_logger
-from src.buffer import StochasticBufferManager
-
+from src.buffer import Trajectory,TrajectoryBuffer
+from src.envs.carla_env import CarlaEnv
 
 logger = get_logger('ocp_agent')
 
@@ -68,8 +68,8 @@ class OcpAgent(BaseAgent):
         self.batch_size = self.ocp_config['batch_size']
 
         # 初始化缓冲区
-        self.buffer = StochasticBufferManager(min_start_train = self.ocp_config['min_start_train'],
-                                              total_capacity = self.ocp_config['total_capacity'])
+        self.buffer = TrajectoryBuffer(min_start_train = self.ocp_config['min_start_train'],
+                                       total_capacity = self.ocp_config['total_capacity'])
 
     def select_action(self, obs: Any, deterministic: bool = False) -> np.ndarray:
         """
@@ -163,11 +163,11 @@ class OcpAgent(BaseAgent):
         )
 
     def load(self, path: str) -> None:
-        # 再创建优化器
+        # 再创建优化器，不加载critic
         checkpoint = load_checkpoint(
-            model={'actor': self.actor, 'critic': self.critic},
+            model={'actor': self.actor},
             filepath=path,
-            optimizer={'actor_optim': self.actor_optimizer, 'critic_optim': self.critic_optimizer},
+            optimizer={'actor_optim': self.actor_optimizer},
             device=self.device
         )
         return checkpoint
@@ -258,3 +258,71 @@ class OcpAgent(BaseAgent):
             ], dim=0)
 
         return state_all, state_ego, state_other, state_road, state_ref
+
+
+    def collect_trajectory(self,env:CarlaEnv, horizon=25):
+        """
+        收集轨迹
+        :param env: 环境
+        :param horizon: 收集轨迹中的步数
+        :return: 轨迹
+        """
+        states, actions, rewards, infos = [], [], [], []
+        state,_ = env.reset()
+        initial_state = state.copy()
+        for t in range(horizon):
+            action = self.select_action(state)
+            actions.append(action)
+            states.append(state)
+            next_state, reward_dict,  terminated, truncated, info = env.step(action)
+            done = info['collision'] or info['off_route'] or info['TimeLimit.truncated']
+            rewards.append(reward_dict)
+            infos.append(info)
+
+            state = next_state
+            if done:
+                break
+
+        # 计算 total_cost 和 total_constraint
+        total_cost, total_constraint = self.compute_total_cost_and_constraint(states, actions)
+
+        return Trajectory(
+            initial_state=initial_state,
+            states=states,
+            actions=actions,
+            rewards=rewards,
+            infos=infos,
+            total_cost=total_cost,
+            total_constraint=total_constraint,
+            path_id=env.current_path_id,
+            horizon=len(states)
+        )
+
+    def compute_total_cost_and_constraint(self,states,action):
+        """
+        计算这条轨迹的效用值和约束
+        :param states:
+        :param action:
+        :return:
+        """
+        # 解包状态
+        state_all, state_ego, state_other, state_road, state_ref = self.unpack_observation(states, True)
+
+        # 获取 Q, R, M 矩阵
+        Q = torch.from_numpy(self.Q_matrix).to(self.device).float()
+        R = torch.from_numpy(self.R_matrix).to(self.device).float()
+        M = torch.from_numpy(self.M_matrix).to(self.device).float()
+
+        # 计算 cost components
+        tracking_error = ((state_ref - state_ego) @ Q) * (state_ref - state_ego)
+        control_energy = (action @ R) * action
+        l_current = tracking_error.mean() + control_energy.mean()
+
+        # 计算约束项
+        diff = state_ego.unsqueeze(1) - state_other
+        dist_sq = (diff @ M).pow(2).sum(dim=-1)
+        ge_car = torch.relu(self.other_car_min_distance ** 2 - dist_sq).mean()
+        ge_road = torch.relu(-((state_ego - state_road) @ M).pow(2).sum(dim=-1) + self.road_min_distance ** 2)
+        constraint = self.init_penalty * (ge_car.mean() + ge_road.mean())
+
+        return l_current,constraint

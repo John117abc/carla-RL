@@ -13,11 +13,11 @@ from src.utils import (load_config,get_logger,
                        setup_code_environment)
 from src.agents import OcpAgent
 
-# === 添加项目源码路径 ===
+# 添加项目源码路径
 # sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
 import gymnasium as gym
-from src.envs.carla_env import CarlaEnv  # 假设你的环境类在这里
+from src.envs.carla_env import CarlaEnv
 
 logger = get_logger('train_a2c')
 
@@ -74,41 +74,43 @@ def main():
             logger.info(f"初始观测类型: {type(obs)}, 形状/结构: {get_obs_shape(obs)}")
             total_reward = 0.0
             done = False
-            while not done:
-                action = agent.select_action(obs)
-                next_obs, reward, _, _, info = env.step(action)
-                next_obs = next_obs['ocp_obs']
-                done = info['collision'] or info['off_route'] or info['TimeLimit.truncated']
-                total_reward += reward['total_reward']
-
-                # 数据加入buffer
-                agent.buffer.handle_new_experience((obs, action, reward, _, done, info))
-                obs = next_obs
-
-                # 如果达到buffer可以训练的数量，则开始进行训练
-                loss = None
-                if agent.buffer.should_start_training():
-                    loss =  agent.update()
-
-                # 更新惩罚参数
-                agent.update_penalty(env.step_count)
-                # 打印关键信息
-                if global_step % train_config["log_interval"] == 0:
-                    logger.info(f"  Step {global_step}: reward={reward['total_reward']:.3f}, total={total_reward:.2f}")
-                    if 'speed' in info:
-                        logger.info(f"    速度: {info['speed']:.2f} km/h")
-                    if loss is not None:
-                        logger.info(f"训练损失: actor_loss:{loss['actor_loss']:.5f},critic_loss:{loss['critic_loss']:.5f},"
-                                    f"惩罚参数：{agent.init_penalty:.5f}")
-                        loss.update({
-                            'global_step':global_step
-                        })
-                        history.append(loss)
-                global_step += 1
-                if done:
-                    logger.info(f"  ⏹️  Episode 结束 (info={info})")
-                    break
-            episode += 1
+            # 记录轨迹
+            agent.collect_trajectory(env = env,horizon = env.env_cfg["termination"]["max_episode_steps"])
+            # while not done:
+            #     action = agent.select_action(obs)
+            #     next_obs, reward, _, _, info = env.step(action)
+            #     next_obs = next_obs['ocp_obs']
+            #     done = info['collision'] or info['off_route'] or info['TimeLimit.truncated']
+            #     total_reward += reward['total_reward']
+            #
+            #     # 数据加入buffer
+            #     agent.buffer.handle_new_experience((obs, action, reward, _, done, info))
+            #     obs = next_obs
+            #
+            #     # 如果达到buffer可以训练的数量，则开始进行训练
+            #     loss = None
+            #     if agent.buffer.should_start_training():
+            #         loss =  agent.update()
+            #
+            #     # 更新惩罚参数
+            #     agent.update_penalty(env.step_count)
+            #     # 打印关键信息
+            #     if global_step % train_config["log_interval"] == 0:
+            #         logger.info(f"  Step {global_step}: reward={reward['total_reward']:.3f}, total={total_reward:.2f}")
+            #         if 'speed' in info:
+            #             logger.info(f"    速度: {info['speed']:.2f} km/h")
+            #         if loss is not None:
+            #             logger.info(f"训练损失: actor_loss:{loss['actor_loss']:.5f},critic_loss:{loss['critic_loss']:.5f},"
+            #                         f"惩罚参数：{agent.init_penalty:.5f}")
+            #             loss.update({
+            #                 'global_step':global_step
+            #             })
+            #             history.append(loss)
+            #     global_step += 1
+            #     if done:
+            #         logger.info(f"  ⏹️  Episode 结束 (info={info})")
+            #         break
+            # episode += 1
 
             logger.info(f"✅ 第 {episode} 轮完成，总奖励: {total_reward:.2f}")
 

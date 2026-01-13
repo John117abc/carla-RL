@@ -11,7 +11,7 @@ import numpy as np
 import cv2
 from src.utils import load_config,get_logger
 
-# # === 添加 CARLA 路径（请根据你的实际路径修改）===
+# # 添加 CARLA 路径（请根据你的实际路径修改）
 # CARLA_ROOT = "/home/user/CARLA_0.9.16"  # 👈 请替换为你的 CARLA 根目录
 # sys.path.append(os.path.join(CARLA_ROOT, 'PythonAPI'))
 # sys.path.append(os.path.join(CARLA_ROOT, 'PythonAPI/carla'))

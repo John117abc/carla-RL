@@ -36,6 +36,6 @@ rl:
     hidden_dim: 256
     other_car_min_distance: 1.0   # 与周车最小距离
     road_min_distance: 0.5    # 与路边缘最小距离
-    min_start_train: 128    # 最小启动训练样本数
-    total_capacity: 500000  # 缓冲区容量
+    min_start_train: 128    # 最小启动训练样本数(轨迹数)
+    total_capacity: 50000  # 缓冲区容量(轨迹数)
     batch_size: 128

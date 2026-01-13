@@ -13,7 +13,7 @@ from src.utils import (load_config,get_logger,
                        setup_code_environment)
 from src.agents import A2CAgent
 
-# === 添加项目源码路径 ===
+# 添加项目源码路径
 # sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
 import gymnasium as gym
