@@ -11,8 +11,8 @@ rl:
   save_freq: 1            # 每多少回合保存一次模型
   continue_a2c: True    # 是否继续训练，如果需要继续训练，则需要填写模型地址
   model_path_a2c: 'checkpoints/20260112/a2c-v1.0_Town06_Opt_204520_episode=40.pth'
-  continue_ocp: False    # 是否继续训练，如果需要继续训练，则需要填写模型地址
-  model_path_ocp:
+  continue_ocp: True    # 是否继续训练，如果需要继续训练，则需要填写模型地址
+  model_path_ocp: 'checkpoints/20260113/ocp-v1.0_Town06_Opt_115826_episode=1.pth'
 
   A2C:
     lr_actor: 3e-4
@@ -21,13 +21,14 @@ rl:
     ent_coef: 0.01
     vf_coef: 0.5
     max_grad_norm: 0.5
-    use_gae: False
-    gae_lambda: 0.95
     hidden_dim: 256
+    min_start_train: 128    # 最小启动训练样本数
+    total_capacity: 500000  # 缓冲区容量
+    batch_size: 128
 
   OCP:
     amplifier_c: 1.1
-    amplifier_m: 10 # 10回合更新一次m
+    amplifier_m: 1000 # x更新一次m
     lr_actor: 1e-3
     lr_critic: 1e-3
     init_penalty: 1.0  # 初始惩罚系数

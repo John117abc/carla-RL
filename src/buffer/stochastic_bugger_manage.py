@@ -540,8 +540,8 @@ class StochasticBufferManager:
         if total_size == 0:
             return []
 
-        # todo 由于缺少其它样本的判断，先取第一个
-        weights = [1.0, 0.0, 0.0, 0.0]  # Safety, Performance, Diversity, Curriculum
+        # todo 由于缺少其它样本的判断，先取部分
+        weights = [0.7, 0.0, 0.3, 0.0]  # Safety, Performance, Diversity, Curriculum
         samples = []
 
         # 确保每个缓冲区有足够样本

@@ -84,16 +84,12 @@ def main():
                 done = info['collision'] or info['off_route'] or info['TimeLimit.truncated']
                 total_reward += reward['total_reward']
 
-                # 构造 batch（单步）
-                batch = {
-                    "obs": torch.as_tensor(obs, dtype=torch.float32).unsqueeze(0).to(device),
-                    "action": torch.as_tensor(action, dtype=torch.float32).unsqueeze(0).to(device),
-                    "reward": torch.as_tensor([reward['total_reward']], dtype=torch.float32).to(device),
-                    "next_obs": torch.as_tensor(next_obs, dtype=torch.float32).unsqueeze(0).to(device),
-                    "done": torch.as_tensor([done], dtype=torch.bool).to(device),
-                }
-
-                metrics = agent.update(batch)
+                # 数据加入buffer
+                agent.buffer.handle_new_experience((obs, action, reward, next_obs, done, info))
+                # 如果达到buffer可以训练的数量，则开始进行训练
+                metrics = None
+                if agent.buffer.should_start_training():
+                    metrics =  agent.update()
                 obs = next_obs
 
                 global_step+=1
@@ -103,10 +99,12 @@ def main():
                     if 'speed' in info:
                         logger.info(f"    速度: {info['speed']:.2f} km/h")
                     # 记录日志
-                    history.append(metrics)
-
-                # 可选：保存图像（调试用）
-                # save_image(obs, now_step)
+                    if metrics is not None:
+                        logger.info(f"训练损失: actor_loss:{metrics['actor_loss']},critic_loss:{metrics['critic_loss']}")
+                        metrics.update({
+                            'global_step':global_step
+                        })
+                        history.append(metrics)
 
                 if done:
                     logger.info(f"  ⏹️  Episode 结束 (info={info})")
@@ -118,11 +116,15 @@ def main():
             # 保存模型
             if episode % train_config["save_freq"] == 0:
                 logger.info(f"开始保存模型：  Step {global_step}: reward={reward['total_reward']:.3f}, total={total_reward:.2f}")
-                agent.save(rl_config,
-                           global_step,
-                           episode,
-                           env_config['world']['map'],
-                           env.meas_normalizer.state_dict())
+                save_info = {
+                    'rl_config':rl_config,
+                    'global_step':global_step,
+                    'episode':episode,
+                    'map':env_config['world']['map'],
+                    'history_loss':history,
+                    'meas_normalizer':env.meas_normalizer.state_dict()
+                }
+                agent.save(save_info)
 
     except Exception as e:
         logger.error(f"❌ 环境运行出错: {e}")

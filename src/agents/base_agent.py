@@ -43,13 +43,11 @@ class BaseAgent(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def update(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
+    def update(self) -> Dict[str, float]:
         """
         使用一个批次的经验更新智能体参数。
 
         Args:
-            batch (Dict[str, torch.Tensor]): 从经验回放缓冲区采样的批次数据，
-                通常包含 'obs', 'action', 'reward', 'next_obs', 'done' 等键。
 
         Returns:
             metrics (Dict[str, float]): 训练指标字典，如 loss、q_value 等，
@@ -58,12 +56,12 @@ class BaseAgent(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def save(self, path: str) -> None:
+    def save(self, save_info: Dict[str, Any]) -> None:
         """
         保存模型权重到指定路径。
 
         Args:
-            path (str): 保存路径（如 checkpoints/agent.pth）。
+            save_info (str): 保存信息。
         """
         raise NotImplementedError
 

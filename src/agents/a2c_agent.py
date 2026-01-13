@@ -7,11 +7,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, List, Union
 
 from .base_agent import BaseAgent
 from src.models.advantage_actor_critic import ActorNetwork,CriticNetwork
 from src.utils import save_checkpoint,load_checkpoint,get_logger
+from src.buffer import StochasticBufferManager
 
 logger = get_logger('a2c_agent')
 
@@ -50,18 +51,14 @@ class A2CAgent(BaseAgent):
         self.ent_coef = self.a2c_config['ent_coef']
         self.vf_coef = self.a2c_config['vf_coef']
         self.max_grad_norm = self.a2c_config['max_grad_norm']
-        self.use_gae = self.a2c_config['use_gae']
-        self.gae_lambda = self.a2c_config['gae_lambda']
 
-        # 用于 GAE 的缓存（如果启用）
-        self._rollout_cache = {
-            "obs": [],
-            "actions": [],
-            "log_probs": [],
-            "rewards": [],
-            "dones": [],
-            "values": [],
-        }
+        # 采样数量
+        self.batch_size = self.a2c_config['batch_size']
+
+        # 初始化缓冲区
+        self.buffer = StochasticBufferManager(min_start_train = self.a2c_config['min_start_train'],
+                                              total_capacity = self.a2c_config['total_capacity'])
+
 
     def select_action(self, obs: Any, deterministic: bool = False) -> np.ndarray:
         """
@@ -119,25 +116,25 @@ class A2CAgent(BaseAgent):
         }
         return loss, metrics
 
-    def update(
-        self,
-        batch: Dict[str, torch.Tensor],
-    ) -> Dict[str, float]:
+    def update(self) -> Dict[str, float]:
         """
         执行一次 A2C 更新。
-        batch 应包含: obs, action, reward, next_obs, done
         """
-        obs = batch["obs"]
-        actions = batch["action"]
-        rewards = batch["reward"]
-        next_obs = batch["next_obs"]
-        dones = batch["done"]
+        batch = self.buffer.sample_batch(self.batch_size)
+        obs, actions, rewards, next_obs, dones ,_ = zip(*np.asarray(batch,dtype=object).reshape(-1, 6))
+        rewards = np.array([r['total_reward'] for r in rewards])
+
+        # 转为tensor
+        obs = torch.from_numpy(np.asarray(obs)).to(self.device).float()
+        actions = torch.from_numpy(np.asarray(actions)).to(self.device).float()
+        rewards = torch.from_numpy(np.asarray(rewards)).to(self.device).float()
+        next_obs = torch.from_numpy(np.asarray(next_obs)).to(self.device).float()
+        dones = torch.from_numpy(np.asarray(dones)).to(self.device).float()
 
         loss, metrics = self.compute_loss(obs, actions, rewards, next_obs, dones)
 
         # 优化 Actor
         self.actor_optimizer.zero_grad()
-        # 注意：loss 已包含 actor 和 critic 部分，但通常分开优化更稳定
         values = self.critic(obs)
         with torch.no_grad():
             next_values = self.critic(next_obs)
@@ -158,25 +155,16 @@ class A2CAgent(BaseAgent):
         self.critic_optimizer.step()
 
         metrics.update({
-            "actor_loss": actor_loss.item(),
-            "critic_loss": critic_loss.item(),
+            "actor_loss": actor_loss.detach().item(),
+            "critic_loss": critic_loss.detach().item(),
             "entropy": entropy.mean().item(),
         })
         return metrics
 
-    def save(self,
-             rl_config:Dict[str, Any],
-             global_step:int,
-             episode:int,
-             map_name:str,
-             meas_normalizer:Dict[str, Any]) -> None:
+    def save(self,save_info: Dict[str, Any]) -> None:
         """
         保存模型参数
-        :param rl_config: 超参数
-        :param global_step: 总计运行步数
-        :param episode: 运行回合数
-        :param map_name: 地图名称
-        :param meas_normalizer: measurements观察归一化数据
+        :param save_info: 参数数据
         """
         actor_model = self.actor
         critic_model = self.critic
@@ -184,15 +172,16 @@ class A2CAgent(BaseAgent):
         critic_optimizer = self.critic_optimizer
         model = {'actor': actor_model, 'critic': critic_model}
         optimizer = {'actor_optim': actor_optimizer, 'critic_optim': critic_optimizer}
-        extra_info = {'config': rl_config, 'global_step': global_step,'meas_normalizer':meas_normalizer}
-        met = {'episode': episode}
+        extra_info = {'config': save_info['rl_config'], 'global_step': save_info['global_step'],'history':save_info['history_loss'],
+                      'meas_normalizer':save_info['meas_normalizer']}
+        met = {'episode': save_info['episode']}
         save_checkpoint(
             model=model,
-            model_name='a2c-v1.0',
+            model_name='ocp-v1.0',
             optimizer=optimizer,
             extra_info=extra_info,
             metrics=met,
-            env_name=map_name
+            env_name=save_info['map']
         )
 
     def load(self, path: str) -> None:
@@ -217,3 +206,70 @@ class A2CAgent(BaseAgent):
                 done = terminated or truncated
             total_rewards.append(episode_reward)
         return float(np.mean(total_rewards)), float(np.std(total_rewards))
+
+    def unpack_observation(self, obs: Union[List, np.ndarray], batched: bool = False):
+        """
+        解包 observation 数据，支持单样本和批量样本
+
+        Args:
+            obs:
+                - 若 batched=False: [ego, other, road, ref]
+                  其中 ego/other/road/ref 为 array-like (list, np.ndarray)
+                - 若 batched=True: [sample_1, sample_2, ..., sample_B]
+                  其中 sample_i = [ego_i, other_i, road_i, ref_i]
+            batched: 是否为批量数据
+
+        Returns:
+            state_all: [D] if not batched, or [B, D] if batched
+            state_ego, state_other, state_road, state_ref: 各部分张量（在 self.device 上）
+        """
+
+        def to_tensor(data, is_batch=False):
+            """将 list 或 np.ndarray 转为 tensor"""
+            if isinstance(data, torch.Tensor):
+                tensor = data
+            else:
+                # 先转为 numpy array避免 list of ndarray
+                arr = np.array(data, dtype=np.float32)
+                tensor = torch.from_numpy(arr)
+            return tensor.to(self.device)
+
+        if batched:
+            ego_list = [sample[0] for sample in obs]
+            other_list = [sample[1] for sample in obs]
+            road_list = [sample[2] for sample in obs]
+            ref_list = [sample[3] for sample in obs]
+
+            state_ego = to_tensor(ego_list)
+            state_other = to_tensor(other_list)
+            state_road = to_tensor(road_list)
+            state_ref = to_tensor(ref_list)
+
+            B = state_ego.shape[0]
+            state_ego_flat = state_ego.view(B, -1)
+            state_other_flat = state_other.view(B, -1)
+            state_road_flat = state_road.view(B, -1)
+            state_ref_flat = state_ref.view(B, -1)
+
+            state_all = torch.cat([
+                state_ego_flat,
+                state_other_flat,
+                state_road_flat,
+                state_ref_flat
+            ], dim=1)  # [B, D]
+
+        else:
+
+            state_ego = to_tensor(obs[0])
+            state_other = to_tensor(obs[1])
+            state_road = to_tensor(obs[2])
+            state_ref = to_tensor(obs[3])
+
+            state_all = torch.cat([
+                state_ego.view(-1),
+                state_other.view(-1),
+                state_road.view(-1),
+                state_ref.view(-1)
+            ], dim=0)
+
+        return state_all, state_ego, state_other, state_road, state_ref

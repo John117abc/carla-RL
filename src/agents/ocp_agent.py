@@ -49,6 +49,8 @@ class OcpAgent(BaseAgent):
         # 超参数
         self.init_penalty = self.ocp_config['init_penalty']
         self.max_penalty = self.ocp_config['max_penalty']
+        self.amplifier_c = self.ocp_config['amplifier_c']
+        self.amplifier_m = self.ocp_config['amplifier_m']
         self.other_car_min_distance = self.ocp_config['other_car_min_distance']
         self.road_min_distance = self.ocp_config['road_min_distance']
 
@@ -81,56 +83,14 @@ class OcpAgent(BaseAgent):
             action = action.cpu().numpy().flatten()
         return np.clip(action, self.action_space.low, self.action_space.high)
 
-    def compute_loss(
-        self,
-        obs: torch.Tensor,
-        actions: torch.Tensor,
-        rewards: torch.Tensor,
-        next_obs: torch.Tensor,
-        dones: torch.Tensor,
-    ) -> Tuple[torch.Tensor, Dict[str, float]]:
-        """
-        计算 A2C 损失：策略梯度 + 价值损失 + 熵正则。
-        使用单步 TD 优势：A = r + γV(s') - V(s)
-        """
-        # 当前状态价值
-        values = self.critic(obs)
-        # 下一状态价值（用于 bootstrap）
-        with torch.no_grad():
-            next_values = self.critic(next_obs)
-            target_values = rewards + self.gamma * next_values * (1 - dones.float())
-            advantages = target_values - values  # [B]
-
-        # 重新评估动作
-        log_probs, entropy = self.actor.evaluate_actions(obs, actions)
-
-        # 策略损失（最大化 E[logπ(a|s) * A]）
-        actor_loss = -(log_probs * advantages.detach()).mean()
-
-        # 价值损失
-        critic_loss = nn.functional.mse_loss(values, target_values)
-
-        # 总损失
-        loss = actor_loss + self.vf_coef * critic_loss - self.ent_coef * entropy.mean()
-
-        metrics = {
-            "actor_loss": actor_loss.item(),
-            "critic_loss": critic_loss.item(),
-            "entropy": entropy.mean().item(),
-            "advantage_mean": advantages.mean().item(),
-            "value_mean": values.mean().item(),
-        }
-        return loss, metrics
-
     def update(self):
         """
         更新 Actor 和 Critic
         """
         # 从 buffer 采样
-        batch = self.buffer.sample_batch(self.batch_size)  # 假设返回 list of tuples
-        batch = np.asarray(batch,dtype=object).reshape(self.batch_size, 6)
+        batch = self.buffer.sample_batch(self.batch_size)
+        batch = np.asarray(batch,dtype=object).reshape(-1, 6)
         states = batch[:, 0]
-        actions_old = batch[:, 1]
 
         # 解包状态
         state_all,state_ego,state_other,state_road,state_ref = self.unpack_observation(states,True)
@@ -156,36 +116,30 @@ class OcpAgent(BaseAgent):
         constraint = self.init_penalty * (ge_car.mean() + ge_road.mean())
 
         # Actor Loss
-        loss_actor = l_current + constraint
+        actor_loss = l_current + self.init_penalty * constraint
         self.actor_optimizer.zero_grad()
-        loss_actor.backward()
+        actor_loss.backward()
         self.actor_optimizer.step()
 
         with torch.no_grad():
-            v_target = l_current  # ❗仅在特定假设下成立！
+            v_target = l_current
 
         v_pred = self.critic(state_all).mean()
-        loss_critic = self.loss_func(v_pred, v_target.detach())
+        critic_loss = self.loss_func(v_pred, v_target.detach())
 
         self.critic_optimizer.zero_grad()
-        loss_critic.backward()
+        critic_loss.backward()
         self.critic_optimizer.step()
 
-        return loss_actor.item(), loss_critic.item()
+        return {
+            "actor_loss": actor_loss.detach().item(),
+            "critic_loss": critic_loss.detach().item()
+        }
 
-    def save(self,
-             rl_config:Dict[str, Any],
-             global_step:int,
-             episode:int,
-             map_name:str,
-             meas_normalizer:Dict[str, Any]) -> None:
+    def save(self,save_info: Dict[str, Any]) -> None:
         """
         保存模型参数
-        :param rl_config: 超参数
-        :param global_step: 总计运行步数
-        :param episode: 运行回合数
-        :param map_name: 地图名称
-        :param meas_normalizer: measurements观察归一化数据
+        :param save_info: 参数数据
         """
         actor_model = self.actor
         critic_model = self.critic
@@ -193,15 +147,15 @@ class OcpAgent(BaseAgent):
         critic_optimizer = self.critic_optimizer
         model = {'actor': actor_model, 'critic': critic_model}
         optimizer = {'actor_optim': actor_optimizer, 'critic_optim': critic_optimizer}
-        extra_info = {'config': rl_config, 'global_step': global_step,'meas_normalizer':meas_normalizer}
-        met = {'episode': episode}
+        extra_info = {'config': save_info['rl_config'], 'global_step': save_info['global_step'],'history':save_info['history_loss']}
+        met = {'episode': save_info['episode']}
         save_checkpoint(
             model=model,
             model_name='ocp-v1.0',
             optimizer=optimizer,
             extra_info=extra_info,
             metrics=met,
-            env_name=map_name
+            env_name=save_info['map']
         )
 
     def load(self, path: str) -> None:
@@ -225,6 +179,13 @@ class OcpAgent(BaseAgent):
                 done = terminated or truncated
             total_rewards.append(episode_reward)
         return float(np.mean(total_rewards)), float(np.std(total_rewards))
+
+    def update_penalty(self,step_count:int = 0):
+        """
+        更新惩罚参数
+        """
+        if step_count % self.amplifier_m == 0:
+            self.init_penalty = min(self.init_penalty * self.amplifier_c,self.max_penalty)
 
     def unpack_observation(self, obs: Union[List, np.ndarray], batched: bool = False):
         """

@@ -59,9 +59,6 @@ def main():
         if train_config['continue_ocp']:
             logger.info("开始读取智能体参数...")
             checkpoint = agent.load(train_config["model_path_ocp"])
-            if not env.is_eval:
-                # 读取归一化参数
-                env.meas_normalizer.load_state_dict(checkpoint['meas_normalizer'])
 
         logger.info("✅ 环境创建成功！")
         logger.info(f"观测空间: {env.observation_space}")
@@ -88,21 +85,25 @@ def main():
                 agent.buffer.handle_new_experience((obs, action, reward, _, done, info))
                 obs = next_obs
 
-                global_step+=1
-
                 # 如果达到buffer可以训练的数量，则开始进行训练
-                actor_loss,critic_loss = None,None
+                loss = None
                 if agent.buffer.should_start_training():
-                    actor_loss,critic_loss =  agent.update()
+                    loss =  agent.update()
 
+                # 更新惩罚参数
+                agent.update_penalty(env.step_count)
                 # 打印关键信息
                 if global_step % train_config["log_interval"] == 0:
                     logger.info(f"  Step {global_step}: reward={reward['total_reward']:.3f}, total={total_reward:.2f}")
                     if 'speed' in info:
                         logger.info(f"    速度: {info['speed']:.2f} km/h")
-                    if actor_loss is not None and critic_loss is not None:
-                        logger.info(f'训练损失actor_loss:{actor_loss},critic_loss:{critic_loss}')
-
+                    if loss is not None:
+                        logger.info(f"训练损失: actor_loss:{loss['actor_loss']},critic_loss:{loss['critic_loss']}")
+                        loss.update({
+                            'global_step':global_step
+                        })
+                        history.append(loss)
+                global_step += 1
                 if done:
                     logger.info(f"  ⏹️  Episode 结束 (info={info})")
                     break
@@ -113,11 +114,14 @@ def main():
             # 保存模型
             if episode % train_config["save_freq"] == 0:
                 logger.info(f"开始保存模型：  Step {global_step}: reward={reward['total_reward']:.3f}, total={total_reward:.2f}")
-                agent.save(rl_config,
-                           global_step,
-                           episode,
-                           env_config['world']['map'],
-                           env.meas_normalizer.state_dict())
+                save_info = {
+                    'rl_config':rl_config,
+                    'global_step':global_step,
+                    'episode':episode,
+                    'map':env_config['world']['map'],
+                    'history_loss':history
+                }
+                agent.save(save_info)
 
     except Exception as e:
         logger.error(f"❌ 环境运行出错: {e}")
