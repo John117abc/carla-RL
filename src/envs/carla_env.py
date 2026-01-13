@@ -563,13 +563,13 @@ class CarlaEnv(gym.Env):
         path_locations = self.route_planner.get_route()
         # 可视化路径
         for i, loc in enumerate(path_locations):
-            self.world.debug.draw_point(loc, size=0.1, color=carla.Color(0, 255, 0), life_time=60.0)
+            self.world.debug.draw_point(loc, size=0.1, color=carla.Color(0, 255, 0), life_time=240.0)
             if i > 0:
                 self.world.debug.draw_line(
                     path_locations[i - 1], loc,
                     thickness=0.05,
                     color=carla.Color(255, 0, 0),
-                    life_time=60.0
+                    life_time=240.0
                 )
         self.path_locations = path_locations
         logger.info(f"路径规划成功！已规划{len(path_locations)}个坐标点")

@@ -11,8 +11,11 @@ from typing import Dict, Any, Tuple,List, Union
 
 from .base_agent import BaseAgent
 from src.models.advantage_actor_critic import ActorNetwork, CriticNetwork
-from src.utils import save_checkpoint,load_checkpoint
+from src.utils import save_checkpoint,load_checkpoint,get_logger
 from src.buffer import StochasticBufferManager
+
+
+logger = get_logger('ocp_agent')
 
 class OcpAgent(BaseAgent):
     """
@@ -81,6 +84,7 @@ class OcpAgent(BaseAgent):
             else:
                 action, log_prob, _ = self.actor(obs_tensor)
             action = action.cpu().numpy().flatten()
+            # logger.info(f'动作打印：{np.clip(action, self.action_space.low, self.action_space.high)}')
         return np.clip(action, self.action_space.low, self.action_space.high)
 
     def update(self):

@@ -98,7 +98,8 @@ def main():
                     if 'speed' in info:
                         logger.info(f"    速度: {info['speed']:.2f} km/h")
                     if loss is not None:
-                        logger.info(f"训练损失: actor_loss:{loss['actor_loss']},critic_loss:{loss['critic_loss']}")
+                        logger.info(f"训练损失: actor_loss:{loss['actor_loss']:.5f},critic_loss:{loss['critic_loss']:.5f},"
+                                    f"惩罚参数：{agent.init_penalty:.5f}")
                         loss.update({
                             'global_step':global_step
                         })
