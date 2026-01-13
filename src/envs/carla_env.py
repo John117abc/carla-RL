@@ -525,6 +525,10 @@ class CarlaEnv(gym.Env):
         info = {}  # 可扩展
         # 重置观察者视角
         self._place_spectator_above_vehicle()
+
+        # 向前走几步
+        # for count in range(1024):
+        #     self.step([0.1,0])
         return obs, info
 
     def render(self) -> Optional[np.ndarray]:

@@ -58,7 +58,7 @@ class OcpAgent(BaseAgent):
         self.road_min_distance = self.ocp_config['road_min_distance']
 
         # 正定矩阵
-        self.Q_matrix = np.diag([0.04, 0.04, 0.01, 0.01, 0.1, 0.02])
+        self.Q_matrix = np.diag([0.04, 0.04, 0.1, 0.01, 0.1, 0.02])
         self.R_matrix = np.diag([0.1, 0.005])
         self.M_matrix = np.diag([1,1,0,0,0,0])
         # 严格使用s^ref = [δp, δφ, δv ]状态时候的Q
@@ -163,6 +163,7 @@ class OcpAgent(BaseAgent):
         )
 
     def load(self, path: str) -> None:
+        # 再创建优化器
         checkpoint = load_checkpoint(
             model={'actor': self.actor, 'critic': self.critic},
             filepath=path,
