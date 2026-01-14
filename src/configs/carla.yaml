@@ -1,16 +1,37 @@
-host: "localhost"
-port: 2000
-timeout: 10.0
-sync_mode: true
-fixed_delta_seconds: 0.05
-world:
-  traffic_manager:
-    port: 8010
-    hybrid_physics_mode: True
-    synchronous_mode: True
-  weather:
-    cloudiness: 20
-    precipitation: 0
-    sun_altitude_angle: 10
-  map_layer: 4  # 世界层级，级别越高越复杂,最高5级最小1级
-  sampling_resolution: 2.0
+word_01:
+  host: "localhost"
+  port: 2000
+  timeout: 10.0
+  sync_mode: true
+  fixed_delta_seconds: 0.05
+  world:
+    traffic_manager:
+      port: 8010
+      hybrid_physics_mode: True
+      synchronous_mode: True
+    weather:
+      cloudiness: 20
+      precipitation: 0
+      sun_altitude_angle: 10
+    map_layer: 4  # 世界层级，级别越高越复杂,最高5级最小1级
+    sampling_resolution: 2.0
+    notice_world: 'OCP-train'
+
+word_02:
+  host: "localhost"
+  port: 2010
+  timeout: 10.0
+  sync_mode: true
+  fixed_delta_seconds: 0.05
+  world:
+    traffic_manager:
+      port: 8020
+      hybrid_physics_mode: True
+      synchronous_mode: True
+    weather:
+      cloudiness: 20
+      precipitation: 0
+      sun_altitude_angle: 10
+    map_layer: 4  # 世界层级，级别越高越复杂,最高5级最小1级
+    sampling_resolution: 2.0
+    notice_world: 'A2C-train'

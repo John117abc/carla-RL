@@ -58,6 +58,11 @@ class RunningNormalizer:
             x_norm = np.clip(x_norm, self.clip_range[0], self.clip_range[1])
         return x_norm
 
+    def denormalize(self, x_norm):
+        """将归一化后的 x_norm 反归一化回原始尺度"""
+        x = x_norm * np.sqrt(self.var + self.eps) + self.mean
+        return x
+
     def state_dict(self):
         return {
             "mean": self.mean,

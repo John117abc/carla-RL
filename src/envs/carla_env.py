@@ -86,7 +86,8 @@ class CarlaEnv(gym.Env):
         meas_dim = self._get_measurements_dim()
         self.meas_normalizer = RunningNormalizer(shape=(meas_dim,))
 
-        self.ocp_normalizer = RunningNormalizer(shape=(4,6,))
+        # 归一化
+        self.ocp_normalizer = RunningNormalizer(shape=(66,))
 
         # 控制是否更新归一化统计量（评估 时不更新）
         self._is_eval = False
@@ -153,6 +154,17 @@ class CarlaEnv(gym.Env):
 
         # 路径id
         self.current_path_id = 0
+
+    def _init_notice_str_world(self):
+        location = self.vehicle.get_location()
+        # 在车顶上方 5 米处显示文字
+        self.world.debug.draw_string(
+            location + carla.Location(z=5.0),
+            self.carla_cfg["world"]["notice_world"],
+            life_time=60.0,  # 设为0则永久
+            color=carla.Color(255, 0, 0),  # 红色
+            draw_shadow=True
+        )
 
     def _get_measurements_dim(self):
         """
@@ -335,7 +347,15 @@ class CarlaEnv(gym.Env):
 
         if "ocp_obs" in self.env_cfg["obs_type"]:
             # 获取ocp观察信息
-            obs["ocp_obs"] = get_ocp_observation(self.vehicle,self.imu_sensor,self.actors,self.path_locations)
+            ocp_obs = get_ocp_observation(self.vehicle,self.imu_sensor,self.actors,self.path_locations)
+            state_ego_flat = np.asarray(ocp_obs[0])
+            state_other_flat = np.asarray(ocp_obs[1]).flatten()
+            state_road_flat = np.asarray(ocp_obs[2])
+            state_ref_flat = np.asarray(ocp_obs[3])
+            state_all = np.concatenate([state_ego_flat,state_other_flat,state_road_flat,state_ref_flat], axis=0)
+            if not self._is_eval:
+                self.ocp_normalizer.update(state_all[None, :])
+            obs["ocp_obs"] = [state_all,ocp_obs]
         if len(obs) == 1:
             return list(obs.values())[0]
         return obs
@@ -445,11 +465,10 @@ class CarlaEnv(gym.Env):
             return
 
         vehicle_transform = self.vehicle.get_transform()
-        # 设置 spectator 位置：在车后 6 米，高 4 米，朝向车辆
-        offset = carla.Location(x=20.0, y=0.0, z=10.0)
+        offset = carla.Location(x=-5.0, y=-20.0, z=15.0)
         spectator_transform = carla.Transform(
             vehicle_transform.location + offset,
-            carla.Rotation(pitch=-20.0, yaw=vehicle_transform.rotation.yaw, roll=0.0)
+            carla.Rotation(pitch=-30.0, yaw=120.0, roll=0.0)
         )
         self.world.get_spectator().set_transform(spectator_transform)
 
@@ -531,6 +550,10 @@ class CarlaEnv(gym.Env):
 
         # 路径id+1
         self.current_path_id +=1
+
+        # 初始化提示文字，有便与区分不同环境训练
+        self._init_notice_str_world()
+
         return obs, info
 
     def render(self) -> Optional[np.ndarray]:

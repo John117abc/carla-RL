@@ -59,6 +59,11 @@ class A2CAgent(BaseAgent):
         self.buffer = StochasticBuffer(min_start_train = self.a2c_config['min_start_train'],
                                               total_capacity = self.a2c_config['total_capacity'])
 
+        # 记录历史日志数据值
+        self.globe_eps = 0
+        self.history_loss = []
+        self.global_step = 0
+
 
     def select_action(self, obs: Any, deterministic: bool = False) -> np.ndarray:
         """
@@ -170,11 +175,16 @@ class A2CAgent(BaseAgent):
         critic_model = self.critic
         actor_optimizer = self.actor_optimizer
         critic_optimizer = self.critic_optimizer
+
+        self.global_step += save_info['global_step']
+        self.globe_eps += save_info['episode']
+        self.history_loss.append(save_info['history_loss'])
+
         model = {'actor': actor_model, 'critic': critic_model}
         optimizer = {'actor_optim': actor_optimizer, 'critic_optim': critic_optimizer}
-        extra_info = {'config': save_info['rl_config'], 'global_step': save_info['global_step'],'history':save_info['history_loss'],
-                      'meas_normalizer':save_info['meas_normalizer']}
-        met = {'episode': save_info['episode']}
+        extra_info = {'config': save_info['rl_config'], 'global_step': self.global_step,'history':self.history_loss,
+                      'meas_normalizer':save_info['meas_normalizer'],'globe_eps':self.globe_eps}
+        met = {'episode': self.globe_eps}
         save_checkpoint(
             model=model,
             model_name='ocp-v1.0',
@@ -191,6 +201,9 @@ class A2CAgent(BaseAgent):
             optimizer={'actor_optim': self.actor_optimizer, 'critic_optim': self.critic_optimizer},
             device=self.device
         )
+        self.globe_eps = checkpoint['globe_eps']
+        self.history_loss = checkpoint['history']
+        self.global_step = checkpoint['global_step']
         return checkpoint
 
     def eval(self, num_episodes: int = 10) -> Tuple[float, float]:

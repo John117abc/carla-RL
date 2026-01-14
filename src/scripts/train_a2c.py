@@ -41,7 +41,7 @@ def save_image(obs, step: int, save_dir: str = "debug_images"):
 
 def main():
     logger.info('开始读取配置文件...')
-    carla_config = load_config('configs/carla.yaml')
+    carla_config = load_config('configs/carla.yaml')['word_02']
     env_config = load_config('configs/env.yaml')
     sys_config = load_config('configs/sys.yaml')
     rl_config = load_config('configs/rl.yaml')
@@ -100,12 +100,11 @@ def main():
                         logger.info(f"    速度: {info['speed']:.2f} km/h")
                     # 记录日志
                     if metrics is not None:
-                        logger.info(f"训练损失: actor_loss:{metrics['actor_loss']},critic_loss:{metrics['critic_loss']}")
+                        logger.info(f"训练损失: actor_loss:{metrics['actor_loss']:.5f},critic_loss:{metrics['critic_loss']:.5f}")
                         metrics.update({
                             'global_step':global_step
                         })
                         history.append(metrics)
-
                 if done:
                     logger.info(f"  ⏹️  Episode 结束 (info={info})")
                     break

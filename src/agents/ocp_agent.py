@@ -12,9 +12,9 @@ from typing import Dict, Any, Tuple,List, Union
 
 from .base_agent import BaseAgent
 from src.models.advantage_actor_critic import ActorNetwork, CriticNetwork
-from src.utils import save_checkpoint,load_checkpoint,get_logger
-from src.buffer import Trajectory,TrajectoryBuffer
-from src.envs.carla_env import CarlaEnv
+from src.utils import save_checkpoint,load_checkpoint
+from src.buffer import TrajectoryBuffer
+from src.utils import get_logger,RunningNormalizer
 
 logger = get_logger('ocp_agent')
 
@@ -44,8 +44,8 @@ class OcpAgent(BaseAgent):
         self.critic = CriticNetwork(self.observation_space['ocp_obs'],hidden_dim=self.ocp_config['hidden_dim']).to(self.device)
 
         # 优化器
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.ocp_config['lr_actor'])
-        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=self.ocp_config['lr_critic'])
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.ocp_config['lr_actor'],betas=(0.9, 0.999))
+        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=self.ocp_config['lr_critic'],betas=(0.9, 0.999))
 
         # 损失函数
         self.loss_func = nn.MSELoss()
@@ -57,9 +57,10 @@ class OcpAgent(BaseAgent):
         self.amplifier_m = self.ocp_config['amplifier_m']
         self.other_car_min_distance = self.ocp_config['other_car_min_distance']
         self.road_min_distance = self.ocp_config['road_min_distance']
+        self.gamma = self.ocp_config['gamma']
 
         # 正定矩阵
-        self.Q_matrix = np.diag([0.04, 0.04, 0.1, 0.01, 0.0001, 0.02])
+        self.Q_matrix = np.diag([0.04, 0.01, 0.1, 0.01, 0.0001, 0.05])
         self.R_matrix = np.diag([0.1, 0.005])
         self.M_matrix = np.diag([1,1,0,0,0,0])
         # 严格使用s^ref = [δp, δφ, δv ]状态时候的Q
@@ -72,13 +73,19 @@ class OcpAgent(BaseAgent):
         self.buffer = TrajectoryBuffer(min_start_train = self.ocp_config['min_start_train'],
                                        total_capacity = self.ocp_config['total_capacity'])
 
+        # 记录历史日志数据值
+        self.globe_eps = 0
+        self.history_loss = []
+        self.global_step = 0
+
     def select_action(self, obs: Any, deterministic: bool = False) -> np.ndarray:
         """
         根据观测选择动作。
         训练时返回随机动作和 log_prob；评估时返回均值。
         """
         with torch.no_grad():
-            obs_tensor, _, _, _, _ = self.unpack_observation(obs)
+            # 转为tensor
+            obs_tensor = torch.from_numpy(obs[0]).to(self.device).float()
             if deterministic:
                 _, _, action_mean = self.actor(obs_tensor)
                 action = action_mean
@@ -87,7 +94,7 @@ class OcpAgent(BaseAgent):
             action = action.cpu().numpy().flatten()
         return np.clip(action, self.action_space.low, self.action_space.high)
 
-    def update(self):
+    def update(self,normalizer: RunningNormalizer):
         # 采样 N 条完整轨迹
         trajectories = self.buffer.sample_batch(self.batch_size)
 
@@ -99,26 +106,41 @@ class OcpAgent(BaseAgent):
             # traj 包含: init_s, states, actions, refs, etc.
             total_cost = 0
             total_constraint = 0
-
+            flag = 0
+            discount = 1.0
             for t in range(len(traj.states)):
                 s_all, s_ego, s_other, s_road, s_ref = self.unpack_observation(traj.states[t])
                 action, log_prob, _ = self.actor(s_all)
+                if flag ==0:
+                    print("s_ego:", s_ego.cpu().detach().numpy())
+                    print("s_ref:", s_ref.cpu().detach().numpy())
+                    print("action:", action.cpu().detach().numpy())
+                    print("tracking diff:", (s_ref - s_ego).cpu().detach().numpy())
+                    flag = 1
 
                 # 获取 Q, R, M 矩阵
                 Q = torch.from_numpy(self.Q_matrix).to(self.device).float()
                 R = torch.from_numpy(self.R_matrix).to(self.device).float()
                 M = torch.from_numpy(self.M_matrix).to(self.device).float()
 
-                tracking = ((s_ref - s_ego) @ Q * (s_ref - s_ego)).sum()
+                tracking_diff = s_ref - s_ego
+                # 修正角度差，减小误差
+                tracking_diff[4] = (tracking_diff[4] + 180) % 360 - 180
+
+                tracking = (tracking_diff @ Q * tracking_diff).sum()
                 control = (action @ R * action).sum()
-                total_cost += tracking + control
+                total_cost += discount * (tracking + control)
 
                 # 计算约束项
-                diff = s_ego - s_other
-                dist_sq = (diff @ M).pow(2).sum(dim=-1)
+                car_diff = s_ego - s_other
+                # 修正角度差，减小误差
+                car_diff[4] = (car_diff[4] + 180) % 360 - 180
+                dist_sq = (car_diff @ M).pow(2).sum(dim=-1)
                 ge_car = torch.relu(self.other_car_min_distance ** 2 - dist_sq).mean()
                 ge_road = torch.relu(-((s_ego - s_road) @ M).pow(2).sum(dim=-1) + self.road_min_distance ** 2)
-                total_constraint += ge_car + ge_road
+                total_constraint += discount * (ge_car + ge_road)
+
+                discount *= self.gamma
 
             actor_loss = total_cost + self.init_penalty * total_constraint
             actor_losses.append(actor_loss)
@@ -134,8 +156,8 @@ class OcpAgent(BaseAgent):
         self.actor_optimizer.step()
 
         # Critic更新
-        initial_states, _, _, _, _ = self.unpack_observation(initial_states[0])
-        critic_pred = self.critic(initial_states).squeeze()
+        initial_state = torch.from_numpy(initial_states[0][0]).to(self.device).float()
+        critic_pred = self.critic(initial_state).squeeze()
         critic_target = torch.tensor(critic_targets, device=self.device)
         critic_loss = F.mse_loss(critic_pred, critic_target)
 
@@ -156,10 +178,15 @@ class OcpAgent(BaseAgent):
         critic_model = self.critic
         actor_optimizer = self.actor_optimizer
         critic_optimizer = self.critic_optimizer
+        self.global_step += save_info['global_step']
+        self.globe_eps += save_info['episode']
+        self.history_loss.append(save_info['history_loss'])
+
         model = {'actor': actor_model, 'critic': critic_model}
         optimizer = {'actor_optim': actor_optimizer, 'critic_optim': critic_optimizer}
-        extra_info = {'config': save_info['rl_config'], 'global_step': save_info['global_step'],'history':save_info['history_loss']}
-        met = {'episode': save_info['episode']}
+        extra_info = {'config': save_info['rl_config'], 'global_step': self.global_step,'history':self.history_loss,
+                      'ocp_normalizer':save_info['ocp_normalizer'],'globe_eps':self.globe_eps}
+        met = {'episode': self.globe_eps}
         save_checkpoint(
             model=model,
             model_name='ocp-v1.0',
@@ -170,14 +197,17 @@ class OcpAgent(BaseAgent):
         )
 
     def load(self, path: str) -> None:
-        # 再创建优化器，不加载critic
         checkpoint = load_checkpoint(
-            model={'actor': self.actor},
+            model={'actor': self.actor, 'critic': self.critic},
             filepath=path,
-            optimizer={'actor_optim': self.actor_optimizer},
+            optimizer={'actor_optim': self.actor_optimizer, 'critic_optim': self.critic_optimizer},
             device=self.device
         )
+        self.globe_eps = checkpoint['globe_eps']
+        self.history_loss = checkpoint['history']
+        self.global_step = checkpoint['global_step']
         return checkpoint
+
     def eval(self, num_episodes: int = 10) -> Tuple[float, float]:
         total_rewards = []
         for _ in range(num_episodes):

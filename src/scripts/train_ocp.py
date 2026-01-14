@@ -5,10 +5,8 @@
 """
 
 import os
-import torch
 import numpy as np
 import cv2
-import sys
 from src.utils import (load_config,get_logger,
                        setup_code_environment)
 from src.agents import OcpAgent
@@ -41,7 +39,7 @@ def save_image(obs, step: int, save_dir: str = "debug_images"):
 
 def main():
     logger.info('开始读取配置文件...')
-    carla_config = load_config('configs/carla.yaml')
+    carla_config = load_config('configs/carla.yaml')['word_01']
     env_config = load_config('configs/env.yaml')
     sys_config = load_config('configs/sys.yaml')
     rl_config = load_config('configs/rl.yaml')
@@ -59,8 +57,11 @@ def main():
         if train_config['continue_ocp']:
             logger.info("开始读取智能体参数...")
             checkpoint = agent.load(train_config["model_path_ocp"])
+            if not env.is_eval:
+                # 读取归一化参数
+                env.ocp_normalizer.load_state_dict(checkpoint['ocp_normalizer'])
 
-        logger.info("✅ 环境创建成功！")
+        logger.info("环境创建成功！")
         logger.info(f"观测空间: {env.observation_space}")
         logger.info(f"动作空间: {env.action_space}")
 
@@ -68,7 +69,7 @@ def main():
         global_step = 0
         episode = 0
         while episode < num_episodes:
-            logger.info(f"\n▶️  开始第 {episode + 1} 轮测试...")
+            logger.info(f"\n开始第 {episode + 1} 轮测试...")
             state, info = env.reset()
             state = state['ocp_obs']
             logger.info(f"初始观测类型: {type(state)}, 形状/结构: {get_obs_shape(state)}")
@@ -84,7 +85,7 @@ def main():
                 total_reward += reward['total_reward']
                 # 数据加入buffer
                 actions.append(action)
-                states.append(state)
+                states.append(state[1])
                 rewards.append(reward)
                 infos.append(info)
                 state = next_state
@@ -96,9 +97,10 @@ def main():
                     logger.info(f"  Step {global_step}: reward={reward['total_reward']:.3f}, total={total_reward:.2f}")
                     if 'speed' in info:
                         logger.info(f"    速度: {info['speed']:.2f} km/h")
+
                 global_step += 1
                 if done:
-                    logger.info(f"  ⏹️  Episode 结束 (info={info})")
+                    logger.info(f"  Episode 结束 (info={info})")
                     break
 
             # 计算 total_cost 和 total_constraint
@@ -111,8 +113,8 @@ def main():
             # 更新参数
             loss = None
             if agent.buffer.should_start_training():
-                loss = agent.update()
-            logger.info(f"✅ 第 {episode} 轮完成，总奖励: {total_reward:.2f}")
+                loss = agent.update(env.ocp_normalizer)
+            logger.info(f"第 {episode} 轮完成，总奖励: {total_reward:.2f}")
 
             if loss is not None:
                 logger.info(f"训练损失: actor_loss:{loss['actor_loss']:.5f},critic_loss:{loss['critic_loss']:.5f},"
@@ -124,27 +126,28 @@ def main():
 
             episode += 1
 
-            # # 保存模型
-            # if episode % train_config["save_freq"] == 0:
-            #     logger.info(f"开始保存模型：  Step {global_step}: reward={reward['total_reward']:.3f}, total={total_reward:.2f}")
-            #     save_info = {
-            #         'rl_config':rl_config,
-            #         'global_step':global_step,
-            #         'episode':episode,
-            #         'map':env_config['world']['map'],
-            #         'history_loss':history
-            #     }
-            #     agent.save(save_info)
+            # 保存模型
+            if episode % train_config["save_freq"] == 0:
+                logger.info(f"开始保存模型：  Step {global_step}: reward={reward['total_reward']:.3f}, total={total_reward:.2f}")
+                save_info = {
+                    'rl_config':rl_config,
+                    'global_step':global_step,
+                    'episode':episode,
+                    'map':env_config['world']['map'],
+                    'history_loss':history,
+                    'ocp_normalizer': env.ocp_normalizer.state_dict()
+                }
+                agent.save(save_info)
 
     except Exception as e:
-        logger.error(f"❌ 环境运行出错: {e}")
+        logger.error(f"环境运行出错: {e}")
         import traceback
         traceback.print_exc()
 
     finally:
-        logger.info("\n🧹 正在关闭环境...")
+        logger.info("\n正在关闭环境...")
         env.close()
-        logger.info("👋 测试结束。")
+        logger.info("测试结束。")
 
 
 def get_obs_shape(obs):
