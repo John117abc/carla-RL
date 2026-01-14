@@ -12,7 +12,7 @@ from typing import Dict, Any, Tuple, List, Union
 from .base_agent import BaseAgent
 from src.models.advantage_actor_critic import ActorNetwork,CriticNetwork
 from src.utils import save_checkpoint,load_checkpoint,get_logger
-from src.buffer import StochasticBuffer
+from src.buffer import TrajectoryBuffer
 
 logger = get_logger('a2c_agent')
 
@@ -43,8 +43,8 @@ class A2CAgent(BaseAgent):
         self.critic = CriticNetwork(self.observation_space['measurements'],hidden_dim=self.a2c_config['hidden_dim']).to(self.device)
 
         # 优化器
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.a2c_config['lr_actor'])
-        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=self.a2c_config['lr_critic'])
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.a2c_config['lr_actor'],betas=(0.9, 0.999))
+        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=self.a2c_config['lr_critic'],betas=(0.9, 0.999))
 
         # 超参数
         self.gamma = self.a2c_config['gamma']
@@ -56,8 +56,8 @@ class A2CAgent(BaseAgent):
         self.batch_size = self.a2c_config['batch_size']
 
         # 初始化缓冲区
-        self.buffer = StochasticBuffer(min_start_train = self.a2c_config['min_start_train'],
-                                              total_capacity = self.a2c_config['total_capacity'])
+        self.buffer = TrajectoryBuffer(min_start_train = self.a2c_config['min_start_train'],
+                                        total_capacity = self.a2c_config['total_capacity'])
 
         # 记录历史日志数据值
         self.globe_eps = 0
@@ -80,76 +80,47 @@ class A2CAgent(BaseAgent):
             action = action.cpu().numpy().flatten()
         return np.clip(action, self.action_space.low, self.action_space.high)
 
-    def compute_loss(
-        self,
-        obs: torch.Tensor,
-        actions: torch.Tensor,
-        rewards: torch.Tensor,
-        next_obs: torch.Tensor,
-        dones: torch.Tensor,
-    ) -> Tuple[torch.Tensor, Dict[str, float]]:
-        """
-        计算 A2C 损失：策略梯度 + 价值损失 + 熵正则。
-        使用单步 TD 优势：A = r + γV(s') - V(s)
-        """
-        # 当前状态价值
-        values = self.critic(obs)
-        # 下一状态价值（用于 bootstrap）
-        with torch.no_grad():
-            next_values = self.critic(next_obs)
-            target_values = rewards + self.gamma * next_values * (1 - dones.float())
-            advantages = target_values - values  # [B]
-
-        # 重新评估动作
-        log_probs, entropy = self.actor.evaluate_actions(obs, actions)
-
-        # 策略损失（最大化 E[logπ(a|s) * A]）
-        actor_loss = -(log_probs * advantages.detach()).mean()
-
-        # 价值损失
-        critic_loss = nn.functional.mse_loss(values, target_values)
-
-        # 总损失
-        loss = actor_loss + self.vf_coef * critic_loss - self.ent_coef * entropy.mean()
-
-        metrics = {
-            "actor_loss": actor_loss.item(),
-            "critic_loss": critic_loss.item(),
-            "entropy": entropy.mean().item(),
-            "advantage_mean": advantages.mean().item(),
-            "value_mean": values.mean().item(),
-        }
-        return loss, metrics
-
     def update(self) -> Dict[str, float]:
         """
-        执行一次 A2C 更新。
+        标准 A2C 单步更新。
+        输入应为一个 rollout batch: [B, ...]
         """
-        batch = self.buffer.sample_batch(self.batch_size)
-        obs, actions, rewards, next_obs, dones ,_ = zip(*np.asarray(batch,dtype=object).reshape(-1, 6))
-        rewards = np.array([r['total_reward'] for r in rewards])
+        trajectories = self.buffer.sample_batch(self.batch_size)
 
-        # 转为tensor
-        obs = torch.from_numpy(np.asarray(obs)).to(self.device).float()
-        actions = torch.from_numpy(np.asarray(actions)).to(self.device).float()
-        rewards = torch.from_numpy(np.asarray(rewards)).to(self.device).float()
-        next_obs = torch.from_numpy(np.asarray(next_obs)).to(self.device).float()
-        dones = torch.from_numpy(np.asarray(dones)).to(self.device).float()
+        all_obs = []
+        all_actions = []
+        all_rewards = []
+        all_next_obs = []
+        all_dones = []
 
-        loss, metrics = self.compute_loss(obs, actions, rewards, next_obs, dones)
+        for traj in trajectories:
+            all_obs.extend(traj.states)
+            all_actions.extend(traj.actions)
+            all_rewards.extend(step['total_reward'] for step in traj.rewards)
+            all_next_obs.extend(traj.next_states)
+            all_dones.extend(traj.dones)
 
-        # 优化 Actor
-        self.actor_optimizer.zero_grad()
+        obs = torch.as_tensor(np.asarray(all_obs), dtype=torch.float32, device=self.device)
+        actions = torch.as_tensor(np.asarray(all_actions), dtype=torch.float32, device=self.device)
+        rewards = torch.as_tensor(np.asarray(all_rewards), dtype=torch.float32, device=self.device)
+        next_obs = torch.as_tensor(np.asarray(all_next_obs), dtype=torch.float32, device=self.device)
+        dones = torch.as_tensor(np.asarray(all_dones), dtype=torch.float32, device=self.device)
+
         values = self.critic(obs)
         with torch.no_grad():
             next_values = self.critic(next_obs)
-            target_values = rewards + self.gamma * next_values * (1 - dones.float())
+            target_values = rewards + self.gamma * next_values * (1 - dones)
             advantages = target_values - values
 
+        # 动作评估
         log_probs, entropy = self.actor.evaluate_actions(obs, actions)
+
+        # 损失
         actor_loss = -(log_probs * advantages.detach()).mean()
         critic_loss = nn.functional.mse_loss(values, target_values)
+        entropy_mean = entropy.mean()
 
+        self.actor_optimizer.zero_grad()
         actor_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
         self.actor_optimizer.step()
@@ -159,12 +130,13 @@ class A2CAgent(BaseAgent):
         torch.nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
         self.critic_optimizer.step()
 
-        metrics.update({
-            "actor_loss": actor_loss.detach().item(),
-            "critic_loss": critic_loss.detach().item(),
-            "entropy": entropy.mean().item(),
-        })
-        return metrics
+        return {
+            "actor_loss": actor_loss.item(),
+            "critic_loss": critic_loss.item(),
+            "entropy": entropy_mean.item(),
+            "advantage_mean": advantages.mean().item(),
+            "value_mean": values.mean().item(),
+        }
 
     def save(self,save_info: Dict[str, Any]) -> None:
         """

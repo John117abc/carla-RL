@@ -149,7 +149,7 @@ class CarlaEnv(gym.Env):
         self._init_map_layers()
 
         # 初始化路径规划器
-        self.route_planner = RoutePlanner(self.world,self.carla_cfg["world"]["sampling_resolution"])
+        self.route_planner = None
         self.path_locations = None
 
         # 路径id
@@ -248,13 +248,6 @@ class CarlaEnv(gym.Env):
             RuntimeError(f'无法初始化自车:x:{spawn_point.location.x} y:{spawn_point.location.y}')
 
         self.vehicle.set_autopilot(False,tm_port=self.tm_port)
-        if self.carla_cfg["sync_mode"]:
-            settings = self.world.get_settings()
-            settings.synchronous_mode = True
-            settings.fixed_delta_seconds = self.carla_cfg["fixed_delta_seconds"]
-            self.world.apply_settings(settings)
-            self.world.tick()
-
         logger.info(f"主车已生成，位置：{spawn_point.location}")
 
     def _setup_sensors(self):
@@ -422,13 +415,6 @@ class CarlaEnv(gym.Env):
         """
         生成背景交通车辆
         """
-
-        # 清除周车
-        for actor in self.actors:
-            if actor is not None and actor.is_alive:
-                actor.destroy()
-        self.actors = []
-
         blueprints = self.world.get_blueprint_library().filter('vehicle.*')
         blueprints = [bp for bp in blueprints if int(bp.get_attribute('number_of_wheels')) == 4]
 
@@ -514,46 +500,77 @@ class CarlaEnv(gym.Env):
 
         return obs, reward, terminated, truncated, info
 
+    def _destroy_all_sensors(self):
+        for sensor in [self.camera_sensor, self.collision_sensor,
+                       self.lane_invasion_sensor, self.obstacle_sensor, self.imu_sensor]:
+            if sensor is not None:
+                sensor.destroy()
+        # 重置引用
+        self.camera_sensor = None
+        self.collision_sensor = None
+        self.lane_invasion_sensor = None
+        self.obstacle_sensor = None
+        self.imu_sensor = None
+
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
         super().reset(seed=seed)
+        try:
+            # 销毁所有旧资源
+            if self.vehicle is not None:
+                self._destroy_all_sensors()
+                self.vehicle.destroy()
+                self.vehicle = None
 
-        # 清理旧车辆与传感器
-        if self.vehicle is not None:
-            if self.camera_sensor:
-                self.camera_sensor.destroy()
-            if self.collision_sensor:
-                self.collision_sensor.destroy()
-            if self.lane_invasion_sensor:
-                self.lane_invasion_sensor.destroy()
-            self.vehicle.destroy()
+            # 清除周车
+            for actor in self.actors:
+                if actor is not None and actor.is_alive:
+                    actor.destroy()
+            self.actors = []
 
-        # 生成新车
-        if self.env_cfg["actors"]["random_place"]:
-            self._spawn_ego_vehicle()
-        else:
-            self._spawn_ego_vehicle(BIRTH_POINT[self.env_cfg["world"]["map"]])
+            # 生成新车
+            if self.env_cfg["actors"]["random_place"]:
+                self._spawn_ego_vehicle()
+            else:
+                self._spawn_ego_vehicle(BIRTH_POINT[self.env_cfg["world"]["map"]])
 
-        self._setup_sensors()
-        # 生成周车
-        self._spawn_background_traffic()
+            self._setup_sensors()
+            # 生成周车
+            self._spawn_background_traffic()
 
-        # 重置计数器
-        self.step_count = 0
+            # 重置计数器
+            self.step_count = 0
 
-        # 规划静态路径
-        self.route_plane(end_x = -229.562531,end_y = -15.150213,end_z = 0.300000)
+            # 规划静态路径
+            self.route_planner = RoutePlanner(self.world, self.carla_cfg["world"]["sampling_resolution"])
+            self.route_plane(end_x = -229.562531,end_y = -15.150213,end_z = 0.300000)
 
-        obs = self._get_observation()
-        info = {}  # 可扩展
-        # 重置观察者视角
-        self._place_spectator_above_vehicle()
+            obs = self._get_observation()
+            info = {}  # 可扩展
+            # 重置观察者视角
+            self._place_spectator_above_vehicle()
 
-        # 路径id+1
-        self.current_path_id +=1
+            # 路径id+1
+            self.current_path_id +=1
 
-        # 初始化提示文字，有便与区分不同环境训练
-        self._init_notice_str_world()
+            # 初始化提示文字，有便与区分不同环境训练
+            self._init_notice_str_world()
 
+            # 确保同步模式正确
+            if self.carla_cfg["sync_mode"]:
+                settings = self.world.get_settings()
+                if not settings.synchronous_mode or settings.fixed_delta_seconds != self.carla_cfg["fixed_delta_seconds"]:
+                    settings.synchronous_mode = True
+                    settings.fixed_delta_seconds = self.carla_cfg["fixed_delta_seconds"]
+                    self.world.apply_settings(settings)
+
+            # tick 一次确保状态稳定
+            if self.carla_cfg["sync_mode"]:
+                self.world.tick()
+
+        except Exception as e:
+            logger.error(f"重置环境失败: {e}")
+            self.close()
+            raise
         return obs, info
 
     def render(self) -> Optional[np.ndarray]:
@@ -568,14 +585,11 @@ class CarlaEnv(gym.Env):
         return None
 
     def close(self):
+        # 销毁所有旧资源
         if self.vehicle is not None:
-            if self.camera_sensor:
-                self.camera_sensor.destroy()
-            if self.collision_sensor:
-                self.collision_sensor.destroy()
-            if self.lane_invasion_sensor:
-                self.lane_invasion_sensor.destroy()
+            self._destroy_all_sensors()
             self.vehicle.destroy()
+            self.vehicle = None
 
         # 恢复异步模式
         if self.carla_cfg["sync_mode"]:
@@ -592,13 +606,13 @@ class CarlaEnv(gym.Env):
         path_locations = self.route_planner.get_route()
         # 可视化路径
         for i, loc in enumerate(path_locations):
-            self.world.debug.draw_point(loc, size=0.1, color=carla.Color(0, 255, 0), life_time=240.0)
+            self.world.debug.draw_point(loc, size=0.1, color=carla.Color(0, 255, 0), life_time=60.0)
             if i > 0:
                 self.world.debug.draw_line(
                     path_locations[i - 1], loc,
                     thickness=0.05,
                     color=carla.Color(255, 0, 0),
-                    life_time=240.0
+                    life_time=60.0
                 )
         self.path_locations = path_locations
         logger.info(f"路径规划成功！已规划{len(path_locations)}个坐标点")

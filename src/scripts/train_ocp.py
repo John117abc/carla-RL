@@ -17,7 +17,7 @@ from src.buffer import Trajectory
 import gymnasium as gym
 from src.envs.carla_env import CarlaEnv
 
-logger = get_logger('train_a2c')
+logger = get_logger('train_ocp')
 
 
 def save_image(obs, step: int, save_dir: str = "debug_images"):
@@ -46,13 +46,13 @@ def main():
     train_config = rl_config['rl']
     device = setup_code_environment(sys_config)
     history = []
+    logger.info("🚀 正在初始化 CARLA 环境...")
+    env = CarlaEnv(
+        render_mode=None,
+        carla_config=carla_config,
+        env_config=env_config
+    )
     try:
-        logger.info("🚀 正在初始化 CARLA 环境...")
-        env = CarlaEnv(
-            render_mode=None,
-            carla_config=carla_config,
-            env_config=env_config
-        )
         agent = OcpAgent(env=env, rl_config=rl_config, device=device)
         if train_config['continue_ocp']:
             logger.info("开始读取智能体参数...")
@@ -106,7 +106,8 @@ def main():
             # 计算 total_cost 和 total_constraint
             total_cost, total_constraint = agent.compute_total_cost_and_constraint(states, actions)
             trajectory = Trajectory(initial_state=initial_state,states=states,actions=actions,rewards=rewards,infos=infos,
-                                    total_cost=total_cost,total_constraint=total_constraint,path_id=env.current_path_id,horizon=len(states))
+                                    total_cost=total_cost,total_constraint=total_constraint,path_id=env.current_path_id,
+                                    horizon=len(states))
             # 加入buffer
             agent.buffer.handle_new_trajectory(trajectory)
 

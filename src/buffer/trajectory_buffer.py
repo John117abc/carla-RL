@@ -3,7 +3,7 @@ import random
 import heapq
 import itertools
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass,field
 from typing import List, Any
 
 @dataclass
@@ -17,7 +17,15 @@ class Trajectory:
     total_constraint: float     # 整条轨迹的约束违反量（ge_car + ge_road）
     path_id: int                # 路径 ID（用于 diversity）
     horizon: int                # T
+    dones: List[bool]           # 终止
+    next_states: List[np.ndarray]       # 当前状态的下一个状态
 
+    dones: List[bool] = field(default_factory=list)
+    next_states: List[np.ndarray] = field(default_factory=list)
+    total_cost: float = 9999
+    total_constraint: float = 9999
+    path_id: int = -1
+    horizon: int = -1
 
 class TrajectoryPriorityBuffer:
     """基于轨迹的优先级缓冲区"""

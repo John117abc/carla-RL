@@ -111,12 +111,12 @@ class OcpAgent(BaseAgent):
             for t in range(len(traj.states)):
                 s_all, s_ego, s_other, s_road, s_ref = self.unpack_observation(traj.states[t])
                 action, log_prob, _ = self.actor(s_all)
-                if flag ==0:
-                    print("s_ego:", s_ego.cpu().detach().numpy())
-                    print("s_ref:", s_ref.cpu().detach().numpy())
-                    print("action:", action.cpu().detach().numpy())
-                    print("tracking diff:", (s_ref - s_ego).cpu().detach().numpy())
-                    flag = 1
+                # if flag ==0:
+                #     print("s_ego:", s_ego.cpu().detach().numpy())
+                #     print("s_ref:", s_ref.cpu().detach().numpy())
+                #     print("action:", action.cpu().detach().numpy())
+                #     print("tracking diff:", (s_ref - s_ego).cpu().detach().numpy())
+                #     flag = 1
 
                 # 获取 Q, R, M 矩阵
                 Q = torch.from_numpy(self.Q_matrix).to(self.device).float()

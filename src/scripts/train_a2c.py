@@ -5,19 +5,17 @@
 """
 
 import os
-import torch
 import numpy as np
 import cv2
-import sys
 from src.utils import (load_config,get_logger,
                        setup_code_environment)
 from src.agents import A2CAgent
-
+from src.buffer import Trajectory
 # 添加项目源码路径
 # sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
 import gymnasium as gym
-from src.envs.carla_env import CarlaEnv  # 假设你的环境类在这里
+from src.envs.carla_env import CarlaEnv
 
 logger = get_logger('train_a2c')
 
@@ -48,22 +46,22 @@ def main():
     train_config = rl_config['rl']
     device = setup_code_environment(sys_config)
     history = []
+    logger.info("🚀 正在初始化 CARLA 环境...")
+    env = CarlaEnv(
+        render_mode=None,
+        carla_config=carla_config,
+        env_config=env_config
+    )
     try:
-        logger.info("🚀 正在初始化 CARLA 环境...")
-        env = CarlaEnv(
-            render_mode=None,
-            carla_config=carla_config,
-            env_config=env_config
-        )
         agent = A2CAgent(env=env, rl_config=rl_config, device=device)
-        if train_config['continue_a2c']:
+        if train_config['continue_ocp']:
             logger.info("开始读取智能体参数...")
-            checkpoint = agent.load(train_config["model_path_a2c"])
+            checkpoint = agent.load(train_config["model_path_ocp"])
             if not env.is_eval:
                 # 读取归一化参数
-                env.meas_normalizer.load_state_dict(checkpoint['meas_normalizer'])
-            
-        logger.info("✅ 环境创建成功！")
+                env.ocp_normalizer.load_state_dict(checkpoint['ocp_normalizer'])
+
+        logger.info("环境创建成功！")
         logger.info(f"观测空间: {env.observation_space}")
         logger.info(f"动作空间: {env.action_space}")
 
@@ -71,46 +69,60 @@ def main():
         global_step = 0
         episode = 0
         while episode < num_episodes:
-            logger.info(f"\n▶️  开始第 {episode + 1} 轮测试...")
-            obs, info = env.reset()
-            obs = obs['measurements']
-            logger.info(f"初始观测类型: {type(obs)}, 形状/结构: {get_obs_shape(obs)}")
+            logger.info(f"\n开始第 {episode + 1} 轮测试...")
+            state, info = env.reset()
+            state = state['measurements']
+            logger.info(f"初始观测类型: {type(state)}, 形状/结构: {get_obs_shape(state)}")
             total_reward = 0.0
             done = False
+            states, actions, rewards, infos, dones,next_states = [], [], [], [], [], []
+            initial_state = state.copy()
             while not done:
-                action = agent.select_action(obs)
+                action = agent.select_action(state)
                 next_obs, reward, _, _, info = env.step(action)
-                next_obs = next_obs['measurements']
+                next_state = next_obs['measurements']
                 done = info['collision'] or info['off_route'] or info['TimeLimit.truncated']
                 total_reward += reward['total_reward']
-
                 # 数据加入buffer
-                agent.buffer.handle_new_experience((obs, action, reward, next_obs, done, info))
-                # 如果达到buffer可以训练的数量，则开始进行训练
-                metrics = None
-                if agent.buffer.should_start_training():
-                    metrics =  agent.update()
-                obs = next_obs
+                actions.append(action)
+                states.append(state)
+                rewards.append(reward)
+                infos.append(info)
+                dones.append(done)
+                next_states.append(next_state)
 
-                global_step+=1
+                state = next_state
+
+                # 更新参数
+                loss = None
+                if agent.buffer.should_start_training():
+                    loss = agent.update()
+
                 # 打印关键信息
                 if global_step % train_config["log_interval"] == 0:
+                    logger.info(f"第 {episode} 轮完成，总奖励: {total_reward:.2f}")
                     logger.info(f"  Step {global_step}: reward={reward['total_reward']:.3f}, total={total_reward:.2f}")
                     if 'speed' in info:
                         logger.info(f"    速度: {info['speed']:.2f} km/h")
-                    # 记录日志
-                    if metrics is not None:
-                        logger.info(f"训练损失: actor_loss:{metrics['actor_loss']:.5f},critic_loss:{metrics['critic_loss']:.5f}")
-                        metrics.update({
-                            'global_step':global_step
+                    if loss is not None:
+                        logger.info(f"训练损失: actor_loss:{loss['actor_loss']:.5f},critic_loss:{loss['critic_loss']:.5f}")
+                        loss.update({
+                            'global_step': global_step
                         })
-                        history.append(metrics)
-                if done:
-                    logger.info(f"  ⏹️  Episode 结束 (info={info})")
-                    break
-            episode += 1
+                        history.append(loss)
 
-            logger.info(f"✅ 第 {episode} 轮完成，总奖励: {total_reward:.2f}")
+                global_step += 1
+                if done:
+                    logger.info(f"  Episode 结束 (info={info})")
+                    break
+
+            trajectory = Trajectory(initial_state=initial_state,states=states,actions=actions,
+                                    rewards=rewards,infos=infos,path_id=env.current_path_id,
+                                    horizon=len(states),dones=dones,next_states = next_states)
+            # 加入buffer
+            agent.buffer.handle_new_trajectory(trajectory)
+
+            episode += 1
 
             # 保存模型
             if episode % train_config["save_freq"] == 0:
@@ -121,19 +133,19 @@ def main():
                     'episode':episode,
                     'map':env_config['world']['map'],
                     'history_loss':history,
-                    'meas_normalizer':env.meas_normalizer.state_dict()
+                    'meas_normalizer': env.meas_normalizer.state_dict()
                 }
                 agent.save(save_info)
 
     except Exception as e:
-        logger.error(f"❌ 环境运行出错: {e}")
+        logger.error(f"环境运行出错: {e}")
         import traceback
         traceback.print_exc()
 
     finally:
-        logger.info("\n🧹 正在关闭环境...")
+        logger.info("\n正在关闭环境...")
         env.close()
-        logger.info("👋 测试结束。")
+        logger.info("测试结束。")
 
 
 def get_obs_shape(obs):

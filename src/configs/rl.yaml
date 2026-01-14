@@ -15,23 +15,23 @@ rl:
   model_path_ocp: 'checkpoints/20260114/ocp-v1.0_Town06_Opt_101438_episode=192.pth'
 
   A2C:
-    lr_actor: 1e-4
-    lr_critic: 1e-4
-    gamma: 0.99
+    lr_actor: 3e-4
+    lr_critic: 8e-4
+    gamma: 0.95
     ent_coef: 0.01
     vf_coef: 0.5
     max_grad_norm: 0.5
     hidden_dim: 256
-    min_start_train: 128    # 最小启动训练样本数
-    total_capacity: 500000  # 缓冲区容量
-    batch_size: 128
+    min_start_train: 2    # 最小启动训练样本数
+    total_capacity: 5000  # 缓冲区容量
+    batch_size: 1   # 每次采样1个轨迹，只能是1！
 
   OCP:
-    gamma: 0.99
+    gamma: 0.95
     amplifier_c: 1.1
     amplifier_m: 10000 # x更新一次m
-    lr_actor: 1e-4
-    lr_critic: 1e-4
+    lr_actor: 3e-4
+    lr_critic: 8e-4
     init_penalty: 1.0  # 初始惩罚系数
     max_penalty: 10
     hidden_dim: 256
