@@ -52,6 +52,7 @@ def main():
         carla_config=carla_config,
         env_config=env_config
     )
+    action_repeat = env_config['world']['action_repeat']
     try:
         agent = OcpAgent(env=env, rl_config=rl_config, device=device)
         if train_config['continue_ocp']:
@@ -68,6 +69,7 @@ def main():
         num_episodes = train_config["num_episodes"]
         global_step = 0
         episode = 0
+        action = np.zeros(2)
         while episode < num_episodes:
             logger.info(f"\n开始第 {episode + 1} 轮测试...")
             state, info = env.reset()
@@ -78,7 +80,9 @@ def main():
             states, actions, rewards, infos = [], [], [], []
             initial_state = state.copy()
             while not done:
-                action = agent.select_action(state)
+                # 减少坐决策的频率
+                if global_step % action_repeat == 0:
+                    action = agent.select_action(state)
                 next_obs, reward, _, _, info = env.step(action)
                 next_state = next_obs['ocp_obs']
                 done = info['collision'] or info['off_route'] or info['TimeLimit.truncated']

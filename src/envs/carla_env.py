@@ -362,7 +362,7 @@ class CarlaEnv(gym.Env):
         speed_reward = w["speed"] * min(speed, 10.0)
         r += speed_reward
 
-        centering_reward = w["centering"] * lane_inv * 0.5
+        centering_reward = w["centering"] * lane_inv * 5.0
         r -= centering_reward
 
         collision_reward = 0.0

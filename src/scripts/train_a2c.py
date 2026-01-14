@@ -52,6 +52,7 @@ def main():
         carla_config=carla_config,
         env_config=env_config
     )
+    action_repeat = env_config['world']['action_repeat']
     try:
         agent = A2CAgent(env=env, rl_config=rl_config, device=device)
         if train_config['continue_ocp']:
@@ -77,8 +78,11 @@ def main():
             done = False
             states, actions, rewards, infos, dones,next_states = [], [], [], [], [], []
             initial_state = state.copy()
+            action = np.zeros(2)
             while not done:
-                action = agent.select_action(state)
+                # 减少坐决策的频率
+                if global_step % action_repeat == 0:
+                    action = agent.select_action(state)
                 next_obs, reward, _, _, info = env.step(action)
                 next_state = next_obs['measurements']
                 done = info['collision'] or info['off_route'] or info['TimeLimit.truncated']
