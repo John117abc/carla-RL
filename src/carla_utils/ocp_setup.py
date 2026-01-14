@@ -1,17 +1,21 @@
 # src/carla_utils/ocp_setup.py
 import carla
 import numpy as np
+from numpy import ndarray, dtype
 
 import src.envs.sensors
 import math
-from typing import List, Dict, Union
+from typing import List, Dict, Union, Any
+
 
 def get_ocp_observation(ego_vehicle:carla.Vehicle,
                         ego_imu:src.envs.sensors.IMUSensor,
                         other_vehicles: List[carla.Vehicle],
-                        path_locations: List[carla.Location]):
+                        path_locations: List[carla.Location],
+                        world_map: carla.Map):
     """
     获取文章中的各个参考信息
+    :param world_map: 世界地图
     :param ego_vehicle: 自车
     :param ego_imu: imu传感器
     :param other_vehicles: 周车
@@ -24,7 +28,7 @@ def get_ocp_observation(ego_vehicle:carla.Vehicle,
     # 获取周车信息
     ocp_other = get_other_observation(ego_vehicle, other_vehicles)
     # 获取道路信息
-    ocp_road = get_closest_lane_edge_point(ego_vehicle)
+    ocp_road = get_road_edge_points(ego_vehicle, world_map)
     # 获取静态路径信息
     ocp_ref = get_ref_observation(ego_vehicle,path_locations)
     return [ocp_ego,ocp_other,ocp_road,ocp_ref]
@@ -60,7 +64,7 @@ def get_other_observation(
     other_vehicles: List[carla.Vehicle],
     max_num_vehicles: int = 8,
     distance_threshold: float = 50.0
-) -> List[float]:
+) -> list[dict] | ndarray[Any, dtype[Any]]:
     """
     获取自车周围指定距离内最近的若干辆车的状态信息。
     若车辆数不足 max_num_vehicles，则用零值字典填充至固定长度。
@@ -116,7 +120,7 @@ def get_other_observation(
     return np.array(padded_result)
 
 
-def get_closest_lane_edge_point(ego_vehicle: carla.Vehicle) -> carla.Location:
+def get_closest_lane_edge_point(ego_vehicle: carla.Vehicle) -> ndarray[Any, dtype[Any]]:
     """
     获取自车到左右车道边缘中**更近的那个边缘点**的世界坐标。
 
@@ -173,8 +177,8 @@ def get_closest_lane_edge_point(ego_vehicle: carla.Vehicle) -> carla.Location:
 def get_ref_observation(
     ego_vehicle: carla.Vehicle,
     path_locations: List[carla.Location],
-    default_longitudinal_velocity: float = 5.0  # 默认纵向速度（m/s），可根据任务调整
-) -> List[float]:
+    default_longitudinal_velocity: float = 2.0  # 默认纵向速度（m/s），可根据任务调整
+) -> ndarray[Any, dtype[Any]] | None:
     """
     获取自车到参考路径中最近点的状态信息。
 
@@ -201,7 +205,11 @@ def get_ref_observation(
         if distance < min_distance:
             min_distance = distance
             ref_location = loc
-
+    # 为了舒适性+4因为直线距离转弯很不舒服
+    ref_index = path_locations.index(ref_location) + 4
+    if ref_index > len(path_locations):
+        ref_index = path_locations.index(ref_location)
+    ref_location = path_locations[ref_index]
     # 假设参考路径的航向角由前后点差分得到
     ref_yaw_deg = 0.0
     if len(path_locations) >= 2:
@@ -229,3 +237,67 @@ def get_ref_observation(
     yaw = ref_yaw_deg
 
     return np.array([x, y, longitudinal_velocity,0, yaw,0])
+
+
+
+def get_road_edge_points(ego_vehicle: carla.Vehicle,world_map: carla.Map):
+    """
+    获取当前道路最外侧边缘的近似点（基于最外侧车道中心线偏移）
+    :param world_map: 世界map
+    :param ego_vehicle: 自车
+    :return: carla.Location，表示道路边缘上离自车最近的点（近似）
+    """
+    # 获取车辆当前位置的 waypoint
+    vehicle_loc = ego_vehicle.get_location()
+    wp = world_map.get_waypoint(vehicle_loc, project_to_road=True, lane_type=carla.LaneType.Driving)
+
+    def get_one_road_edge_points(current_wp,direction):
+        # 向指定方向遍历到最外侧车道
+        if direction == 'right':
+            while True:
+                next_wp = current_wp.get_right_lane()
+                if next_wp is None or next_wp.lane_type != carla.LaneType.Driving:
+                    break
+                current_wp = next_wp
+            # 最右侧车道的右边界 ≈ 道路右边缘
+            lane_width = current_wp.lane_width
+            # 从车道中心向右偏移 lane_width/2 得到边缘
+            right_vec = current_wp.transform.get_right_vector()
+            edge_location = current_wp.transform.location + carla.Location(
+                x=right_vec.x * lane_width / 2,
+                y=right_vec.y * lane_width / 2,
+                z=0.0
+            )
+            return edge_location
+
+        elif direction == 'left':
+            while True:
+                next_wp = current_wp.get_left_lane()
+                if next_wp is None or next_wp.lane_type != carla.LaneType.Driving:
+                    break
+                current_wp = next_wp
+            # 最左侧车道的左边界 ≈ 道路左边缘
+            lane_width = current_wp.lane_width
+            left_vec = current_wp.transform.get_right_vector()  # 注意：左 = -right
+            edge_location = current_wp.transform.location - carla.Location(
+                x=left_vec.x * lane_width / 2,
+                y=left_vec.y * lane_width / 2,
+                z=0.0
+            )
+            return edge_location
+        return None
+
+    # 获取左右两侧道路边缘点
+    right_edge = get_one_road_edge_points(wp, 'right')
+    left_edge = get_one_road_edge_points(wp, 'left')
+
+    # 计算自车到两个边缘的距离，取最近的
+    dist_right = vehicle_loc.distance(right_edge)
+    dist_left = vehicle_loc.distance(left_edge)
+
+    if dist_right < dist_left:
+        nearest_road_edge = right_edge
+    else:
+        nearest_road_edge = left_edge
+
+    return [nearest_road_edge.x,nearest_road_edge.y,0,0,0,0]

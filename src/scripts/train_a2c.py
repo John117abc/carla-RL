@@ -134,7 +134,6 @@ def main():
                 save_info = {
                     'rl_config':rl_config,
                     'global_step':global_step,
-                    'episode':episode,
                     'map':env_config['world']['map'],
                     'history_loss':history,
                     'meas_normalizer': env.meas_normalizer.state_dict()

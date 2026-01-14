@@ -92,6 +92,9 @@ class CarlaEnv(gym.Env):
         # 控制是否更新归一化统计量（评估 时不更新）
         self._is_eval = False
 
+        # ocp观察模式是否为debug模式
+        self._ocp_debug = False
+
         # 周车
         self.actors = []
 
@@ -340,7 +343,7 @@ class CarlaEnv(gym.Env):
 
         if "ocp_obs" in self.env_cfg["obs_type"]:
             # 获取ocp观察信息
-            ocp_obs = get_ocp_observation(self.vehicle,self.imu_sensor,self.actors,self.path_locations)
+            ocp_obs = get_ocp_observation(self.vehicle,self.imu_sensor,self.actors,self.path_locations,self.world.get_map())
             state_ego_flat = np.asarray(ocp_obs[0])
             state_other_flat = np.asarray(ocp_obs[1]).flatten()
             state_road_flat = np.asarray(ocp_obs[2])
@@ -349,9 +352,36 @@ class CarlaEnv(gym.Env):
             if not self._is_eval:
                 self.ocp_normalizer.update(state_all[None, :])
             obs["ocp_obs"] = [state_all,ocp_obs]
+            # 如果是debug模式，在训练页面上显示和各个点的连线
+            if self._ocp_debug:
+                self._debug_ocp(ocp_obs)
         if len(obs) == 1:
             return list(obs.values())[0]
         return obs
+
+    def _debug_ocp(self,ocp_obs):
+        """
+        如果启动ocp的debug模式，会在地图上显示自车与ref的连线
+        周车的连线，道路边缘的连线
+        """
+        ego_location = self.vehicle.get_location()
+        road_location = ocp_obs[2]
+        # 自车与道路边缘的连线
+        self.world.debug.draw_line(
+            ego_location, carla.Location(x=road_location[0],y=road_location[1]),
+            thickness=0.05,
+            color=carla.Color(255, 0, 0),
+            life_time=10.0
+        )
+
+        # 自车与参考路径的连线
+        ref_location = ocp_obs[3]
+        self.world.debug.draw_line(
+            ego_location, carla.Location(x=ref_location[0],y=ref_location[1]),
+            thickness=0.05,
+            color=carla.Color(0, 255, 0),
+            life_time=10.0
+        )
 
     def _compute_reward(self,lane_inv,collision,obstacle) -> dict[str, Any]:
         w = self.env_cfg["reward_weights"]

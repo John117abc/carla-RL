@@ -137,7 +137,6 @@ def main():
                 save_info = {
                     'rl_config':rl_config,
                     'global_step':global_step,
-                    'episode':episode,
                     'map':env_config['world']['map'],
                     'history_loss':history,
                     'ocp_normalizer': env.ocp_normalizer.state_dict()

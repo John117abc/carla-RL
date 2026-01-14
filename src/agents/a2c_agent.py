@@ -149,7 +149,7 @@ class A2CAgent(BaseAgent):
         critic_optimizer = self.critic_optimizer
 
         self.global_step += save_info['global_step']
-        self.globe_eps += save_info['episode']
+        self.globe_eps += self.base_config['save_freq']
         self.history_loss.append(save_info['history_loss'])
 
         model = {'actor': actor_model, 'critic': critic_model}
@@ -159,7 +159,7 @@ class A2CAgent(BaseAgent):
         met = {'episode': self.globe_eps}
         save_checkpoint(
             model=model,
-            model_name='ocp-v1.0',
+            model_name='a2c-v1.0',
             optimizer=optimizer,
             extra_info=extra_info,
             metrics=met,

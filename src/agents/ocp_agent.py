@@ -115,7 +115,7 @@ class OcpAgent(BaseAgent):
                 #     print("s_ego:", s_ego.cpu().detach().numpy())
                 #     print("s_ref:", s_ref.cpu().detach().numpy())
                 #     print("action:", action.cpu().detach().numpy())
-                #     print("tracking diff:", (s_ref - s_ego).cpu().detach().numpy())
+                #     print("tracking diff:", (s_ego - s_ref).cpu().detach().numpy())
                 #     flag = 1
 
                 # 获取 Q, R, M 矩阵
@@ -123,11 +123,11 @@ class OcpAgent(BaseAgent):
                 R = torch.from_numpy(self.R_matrix).to(self.device).float()
                 M = torch.from_numpy(self.M_matrix).to(self.device).float()
 
-                tracking_diff = s_ref - s_ego
+                tracking_diff = s_ego - s_ref
                 # 修正角度差，减小误差
                 tracking_diff[4] = (tracking_diff[4] + 180) % 360 - 180
 
-                tracking = (tracking_diff @ Q * tracking_diff).sum()
+                tracking = (tracking_diff * Q * tracking_diff).sum()
                 control = (action @ R * action).sum()
                 total_cost += discount * (tracking + control)
 
@@ -136,8 +136,10 @@ class OcpAgent(BaseAgent):
                 # 修正角度差，减小误差
                 car_diff[4] = (car_diff[4] + 180) % 360 - 180
                 dist_sq = (car_diff @ M).pow(2).sum(dim=-1)
-                ge_car = torch.relu(self.other_car_min_distance ** 2 - dist_sq).mean()
-                ge_road = torch.relu(-((s_ego - s_road) @ M).pow(2).sum(dim=-1) + self.road_min_distance ** 2)
+                ge_car = torch.relu(-dist_sq - self.other_car_min_distance ** 2)
+
+                dist_sq_road = ((s_ego - s_road)** 2).sum()
+                ge_road = torch.relu(-dist_sq_road - self.road_min_distance ** 2)
                 total_constraint += discount * (ge_car + ge_road)
 
                 discount *= self.gamma
@@ -179,7 +181,7 @@ class OcpAgent(BaseAgent):
         actor_optimizer = self.actor_optimizer
         critic_optimizer = self.critic_optimizer
         self.global_step += save_info['global_step']
-        self.globe_eps += save_info['episode']
+        self.globe_eps += self.base_config['save_freq']
         self.history_loss.append(save_info['history_loss'])
 
         model = {'actor': actor_model, 'critic': critic_model}
