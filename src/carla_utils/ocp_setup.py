@@ -178,7 +178,7 @@ def get_closest_lane_edge_point(ego_vehicle: carla.Vehicle) -> ndarray[Any, dtyp
 def get_ref_observation(
     ego_vehicle: carla.Vehicle,
     path_locations: List[carla.Location],
-    default_longitudinal_velocity: float = 2.0  # 默认纵向速度（m/s），可根据任务调整
+    default_longitudinal_velocity: float =20.0  # 默认纵向速度（m/s），可根据任务调整
 ) -> ndarray[Any, dtype[Any]] | None:
     """
     获取自车到参考路径中最近点的状态信息。

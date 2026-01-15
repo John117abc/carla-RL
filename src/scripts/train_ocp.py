@@ -52,7 +52,6 @@ def main():
         carla_config=carla_config,
         env_config=env_config
     )
-    action_repeat = env_config['world']['action_repeat']
     try:
         agent = OcpAgent(env=env, rl_config=rl_config, device=device)
         if train_config['continue_ocp']:
@@ -69,7 +68,6 @@ def main():
         num_episodes = train_config["num_episodes"]
         global_step = 0
         episode = 0
-        action = np.zeros(2)
         while episode < num_episodes:
             logger.info(f"\n开始第 {episode + 1} 轮测试...")
             state, info = env.reset()
@@ -77,12 +75,10 @@ def main():
             logger.info(f"初始观测类型: {type(state)}, 形状/结构: {get_obs_shape(state)}")
             total_reward = 0.0
             done = False
-            states, actions, rewards, infos = [], [], [], []
+            states, actions, rewards, infos ,log_probs= [], [], [], [],[]
             initial_state = state.copy()
             while not done:
-                # 减少做决策的频率
-                if global_step % action_repeat == 0:
-                    action = agent.select_action(state)
+                action,log_prob = agent.select_action(state)
                 next_obs, reward, _, _, info = env.step(action)
                 next_state = next_obs['ocp_obs']
                 done = info['collision'] or info['off_route'] or info['TimeLimit.truncated']
@@ -91,6 +87,7 @@ def main():
                 actions.append(action)
                 states.append(state[1])
                 rewards.append(reward)
+                log_probs.append(log_prob)
                 infos.append(info)
                 state = next_state
 
@@ -102,16 +99,15 @@ def main():
                     if 'speed' in info:
                         logger.info(f"    速度: {info['speed']:.2f} km/h")
 
-                global_step += 1
                 if done:
                     logger.info(f"  Episode 结束 (info={info})")
                     break
-
+                global_step += 1
             # 计算 total_cost 和 total_constraint
             total_cost, total_constraint = agent.compute_total_cost_and_constraint(states, actions)
             trajectory = Trajectory(initial_state=initial_state,states=states,actions=actions,rewards=rewards,infos=infos,
                                     total_cost=total_cost,total_constraint=total_constraint,path_id=env.current_path_id,
-                                    horizon=len(states))
+                                    horizon=len(states),log_probs = log_probs)
             # 加入buffer
             agent.buffer.handle_new_trajectory(trajectory)
 

@@ -52,7 +52,6 @@ def main():
         carla_config=carla_config,
         env_config=env_config
     )
-    action_repeat = env_config['world']['action_repeat']
     try:
         agent = A2CAgent(env=env, rl_config=rl_config, device=device)
         if train_config['continue_a2c']:
@@ -77,12 +76,9 @@ def main():
             total_reward = 0.0
             done = False
             states, actions, rewards, infos, dones,next_states = [], [], [], [], [], []
-            initial_state = state.copy()
-            action = np.zeros(2)
             while not done:
                 # 减少做决策的频率
-                if global_step % action_repeat == 0:
-                    action = agent.select_action(state)
+                action = agent.select_action(state)
                 next_obs, reward, _, _, info = env.step(action)
                 next_state = next_obs['measurements']
                 done = info['TimeLimit.truncated']

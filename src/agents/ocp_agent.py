@@ -10,6 +10,8 @@ import torch.optim as optim
 import torch.nn.functional as F
 from typing import Dict, Any, Tuple,List, Union
 
+from numpy import generic, ndarray, dtype
+
 from .base_agent import BaseAgent
 from src.models.advantage_actor_critic import ActorNetwork, CriticNetwork
 from src.utils import save_checkpoint,load_checkpoint
@@ -60,7 +62,7 @@ class OcpAgent(BaseAgent):
         self.gamma = self.ocp_config['gamma']
 
         # 正定矩阵
-        self.Q_matrix = np.diag([0.04, 0.01, 0.1, 0.01, 0.1, 0.05])
+        self.Q_matrix = np.diag([0.00004, 0.00001, 0.1, 0.01, 0.00001, 0.05])
         self.R_matrix = np.diag([0.1, 0.005])
         self.M_matrix = np.diag([1,1,0,0,0,0])
         # 严格使用s^ref = [δp, δφ, δv ]状态时候的Q
@@ -78,7 +80,7 @@ class OcpAgent(BaseAgent):
         self.history_loss = []
         self.global_step = 0
 
-    def select_action(self, obs: Any, deterministic: bool = False) -> np.ndarray:
+    def select_action(self, obs: Any, deterministic: bool = False):
         """
         根据观测选择动作。
         训练时返回随机动作和 log_prob；评估时返回均值。
@@ -87,12 +89,13 @@ class OcpAgent(BaseAgent):
             # 转为tensor
             obs_tensor = torch.from_numpy(obs[0]).to(self.device).float()
             if deterministic:
-                _, _, action_mean = self.actor(obs_tensor)
+                action_scaled, log_prob, action_mean = self.actor(obs_tensor)
                 action = action_mean
             else:
                 action, log_prob, _ = self.actor(obs_tensor)
             action = action.cpu().numpy().flatten()
-        return np.clip(action, self.action_space.low, self.action_space.high)
+            log_prob = log_prob.cpu().numpy().flatten()
+        return np.clip(action, self.action_space.low, self.action_space.high),log_prob
 
     def update(self):
         # 采样 N 条完整轨迹
@@ -110,35 +113,36 @@ class OcpAgent(BaseAgent):
             s_all, s_ego, s_other, s_road, s_ref = self.unpack_observation(traj.states,True)
 
             action, log_prob, _ = self.actor(s_all)
+            old_log_prob = torch.from_numpy(np.asarray(traj.log_probs)).to(self.device).float()
 
             # 跟踪消耗
             tracking_diff = s_ego - s_ref
-            tracking_diff[4] = (tracking_diff[4] + 180) % 360 - 180  # 角度制 wrap
             Q_diag = torch.from_numpy(np.diag(self.Q_matrix)).to(self.device).float()
             tracking = (tracking_diff * Q_diag * tracking_diff).sum()
 
             # 控制消耗，
-            R_diag = torch.from_numpy(np.diag(self.R_matrix)).to(self.device).float()
-            control = (action * R_diag * action).sum()
+            # R_diag = torch.from_numpy(np.diag(self.R_matrix)).to(self.device).float()
+            control = (log_prob - old_log_prob).sum()
 
-            total_cost += discount * (tracking + control)
+            total_cost += (tracking + control)
 
             # 自车-周车
-            rel_pos_car = s_ego.unsqueeze(1)[:,:,0:2] - s_other[:,:,0:2]
-            M_xy = torch.from_numpy(np.diag(self.M_matrix)[:2]).to(self.device).float()
-            dist_sq_car = (rel_pos_car * M_xy * rel_pos_car).sum()
+            rel_pos_car = s_ego.unsqueeze(1) - s_other
+            rel_pos_car_scale = torch.ones_like(rel_pos_car)
+            rel_pos_car_scale[..., 4] = 1.0 / 360.0
+            rel_pos_car_scaled = rel_pos_car * rel_pos_car_scale
+            M_xy = torch.from_numpy(np.diag(self.M_matrix)).to(self.device).float()
+            dist_sq_car = (rel_pos_car_scaled * M_xy * rel_pos_car_scaled).sum()
             g_car = dist_sq_car - self.other_car_min_distance ** 2
             ge_car = torch.relu(-g_car)
 
             # 道路约束
-            rel_pos_road = s_ego[:,0:2] - s_road[:,0:2]
+            rel_pos_road = s_ego - s_road
             dist_sq_road = (rel_pos_road * M_xy * rel_pos_road).sum()
             g_road = dist_sq_road - self.road_min_distance ** 2
             ge_road = torch.relu(-g_road)
 
-            total_constraint += discount * (ge_car + ge_road)
-
-            # discount *= self.gamma
+            total_constraint += (ge_car + ge_road)
 
             actor_loss = total_cost + self.init_penalty * total_constraint
             actor_losses.append(actor_loss)

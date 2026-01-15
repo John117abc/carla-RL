@@ -19,6 +19,7 @@ class Trajectory:
     horizon: int                # T
     dones: List[bool]           # 终止
     next_states: List[np.ndarray]       # 当前状态的下一个状态
+    log_probs: List[np.ndarray]        # 选择动作的log概率
 
     dones: List[bool] = field(default_factory=list)
     next_states: List[np.ndarray] = field(default_factory=list)
@@ -26,6 +27,7 @@ class Trajectory:
     total_constraint: float = 9999
     path_id: int = -1
     horizon: int = -1
+    log_probs: List[np.ndarray] = field(default_factory=list)
 
 class TrajectoryPriorityBuffer:
     """基于轨迹的优先级缓冲区"""
