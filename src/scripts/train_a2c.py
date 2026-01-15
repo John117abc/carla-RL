@@ -55,12 +55,12 @@ def main():
     action_repeat = env_config['world']['action_repeat']
     try:
         agent = A2CAgent(env=env, rl_config=rl_config, device=device)
-        if train_config['continue_ocp']:
+        if train_config['continue_a2c']:
             logger.info("开始读取智能体参数...")
-            checkpoint = agent.load(train_config["model_path_ocp"])
+            checkpoint = agent.load(train_config["model_path_a2c"])
             if not env.is_eval:
                 # 读取归一化参数
-                env.ocp_normalizer.load_state_dict(checkpoint['ocp_normalizer'])
+                env.ocp_normalizer.load_state_dict(checkpoint['meas_normalizer'])
 
         logger.info("环境创建成功！")
         logger.info(f"观测空间: {env.observation_space}")
@@ -85,7 +85,7 @@ def main():
                     action = agent.select_action(state)
                 next_obs, reward, _, _, info = env.step(action)
                 next_state = next_obs['measurements']
-                done = info['collision'] or info['off_route'] or info['TimeLimit.truncated']
+                done = info['TimeLimit.truncated']
                 total_reward += reward['total_reward']
                 # 数据加入buffer
                 actions.append(action)
@@ -101,7 +101,7 @@ def main():
                 agent.store_transition(state,action,reward,info,done,next_state)
                 loss = None
                 if agent.should_start_training():
-                    loss = agent.update(state,action)
+                    loss = agent.update()
 
                 # 打印关键信息
                 if global_step % train_config["log_interval"] == 0:

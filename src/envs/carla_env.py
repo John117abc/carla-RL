@@ -389,7 +389,11 @@ class CarlaEnv(gym.Env):
 
         v = self.vehicle.get_velocity()
         speed = np.linalg.norm([v.x, v.y, v.z])
-        speed_reward = w["speed"] * min(speed, 10.0)
+        if speed < 2.0:
+            speed_reward = -w["low_speed_penalty"]  # e.g., 2.0
+        else:
+            speed_reward = w["speed"] * min(speed, 10.0)
+
         r += speed_reward
 
         centering_reward = w["centering"] * lane_inv * 5.0
@@ -433,13 +437,11 @@ class CarlaEnv(gym.Env):
         # 碰撞actors和障碍物公用一个终止条件
         if collision > self.env_cfg["termination"]["collision_threshold"] or obstacle:
             info["collision"] = True
-            return True, False, info
 
         if self.step_count >= self.env_cfg["termination"]["max_episode_steps"]:
             info["TimeLimit.truncated"] = True
-            return False, True, info
 
-        return False, False, info
+        return info["collision"] ,info["TimeLimit.truncated"] ,info
 
     def _spawn_background_traffic(self):
         """
@@ -636,13 +638,13 @@ class CarlaEnv(gym.Env):
         path_locations = self.route_planner.get_route()
         # 可视化路径
         for i, loc in enumerate(path_locations):
-            self.world.debug.draw_point(loc, size=0.1, color=carla.Color(0, 255, 0), life_time=60.0)
+            self.world.debug.draw_point(loc, size=0.1, color=carla.Color(0, 255, 0), life_time=240.0)
             if i > 0:
                 self.world.debug.draw_line(
                     path_locations[i - 1], loc,
                     thickness=0.05,
                     color=carla.Color(255, 0, 0),
-                    life_time=60.0
+                    life_time=240.0
                 )
         self.path_locations = path_locations
         logger.info(f"路径规划成功！已规划{len(path_locations)}个坐标点")

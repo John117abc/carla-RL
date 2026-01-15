@@ -12,11 +12,11 @@ rl:
   continue_a2c: False    # 是否继续训练，如果需要继续训练，则需要填写模型地址
   model_path_a2c: 'checkpoints/20260112/a2c-v1.0_Town06_Opt_204520_episode=40.pth'
   continue_ocp: False    # 是否继续训练，如果需要继续训练，则需要填写模型地址
-  model_path_ocp: 'checkpoints/20260114/ocp-v1.0_Town06_Opt_215825_episode=450.pth'
+  model_path_ocp: 'checkpoints/20260115/ocp-v1.0_Town06_Opt_153109_episode=100.pth'
 
   A2C:
-    lr_actor: 3e-4
-    lr_critic: 8e-4
+    lr_actor: 3e-3
+    lr_critic: 8e-3
     gamma: 0.99
     ent_coef: 0.01
     vf_coef: 0.5
@@ -31,9 +31,9 @@ rl:
     amplifier_c: 1.1
     amplifier_m: 10000 # x更新一次m
     lr_actor: 3e-4
-    lr_critic: 8e-4
+    lr_critic: 1e-3
     init_penalty: 1.0  # 初始惩罚系数
-    max_penalty: 10
+    max_penalty: 100
     hidden_dim: 256
     other_car_min_distance: 1.0   # 与周车最小距离
     road_min_distance: 0.5    # 与路边缘最小距离

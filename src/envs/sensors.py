@@ -78,7 +78,6 @@ class CollisionSensor:
         """记录碰撞冲量强度"""
         impulse = event.normal_impulse
         self.intensity = (impulse.x ** 2 + impulse.y ** 2 + impulse.z ** 2) ** 0.5
-        logger.info(f'碰撞强调检测1：{self.intensity}')
 
     def get_intensity(self) -> float:
         """获取并重置碰撞强度"""

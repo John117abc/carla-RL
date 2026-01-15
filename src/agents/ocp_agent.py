@@ -60,7 +60,7 @@ class OcpAgent(BaseAgent):
         self.gamma = self.ocp_config['gamma']
 
         # 正定矩阵
-        self.Q_matrix = np.diag([0.04, 0.01, 0.1, 0.01, 0.0001, 0.05])
+        self.Q_matrix = np.diag([0.04, 0.01, 0.1, 0.01, 0.1, 0.05])
         self.R_matrix = np.diag([0.1, 0.005])
         self.M_matrix = np.diag([1,1,0,0,0,0])
         # 严格使用s^ref = [δp, δφ, δv ]状态时候的Q

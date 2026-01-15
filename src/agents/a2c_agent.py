@@ -81,19 +81,25 @@ class A2CAgent(BaseAgent):
             action = action.cpu().numpy().flatten()
         return np.clip(action, self.action_space.low, self.action_space.high)
 
-    def update(self,obs,action) -> Dict[str, float]:
+    def update(self) -> Dict[str, float]:
         """
         标准 A2C 单步更新。
         输入应为一个 rollout batch: [B, ...]
         """
-        obs = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
-        actions = torch.as_tensor(action, dtype=torch.float32, device=self.device)
+        obs_list,act_list,rew_list,info,done_list,next_state = zip(*self.n_step_batch())
 
+        # 转 tensor
+        obs = torch.as_tensor(np.array(obs_list), dtype=torch.float32, device=self.device)
+        actions = torch.as_tensor(np.array(act_list), dtype=torch.float32, device=self.device)
+        rewards = torch.as_tensor(np.asarray([attr['total_reward'] for attr in rew_list]), dtype=torch.float32, device=self.device)
+        dones = torch.as_tensor(done_list, dtype=torch.bool, device=self.device)
+        next_obs = torch.as_tensor(np.array(next_state), dtype=torch.float32, device=self.device)
+
+        # 计算 returns 和 advantages（单步或 n-step）
         values = self.critic(obs)
-        with torch.no_grad():
-            batch_buffer = self.n_step_batch()
-            target_values = torch.tensor(self.calculate_returns(batch_buffer), dtype=torch.float32).to(self.device)
-            advantages = target_values - values
+        next_values = self.critic(next_obs)
+        target_values = rewards + self.gamma * next_values * (1 - dones.float())
+        advantages = target_values - values
 
         # 动作评估
         log_probs, entropy = self.actor.evaluate_actions(obs, actions)
