@@ -17,14 +17,14 @@ rl:
   A2C:
     lr_actor: 3e-4
     lr_critic: 8e-4
-    gamma: 0.95
+    gamma: 0.99
     ent_coef: 0.01
     vf_coef: 0.5
     max_grad_norm: 0.5
     hidden_dim: 256
-    min_start_train: 2    # 最小启动训练样本数
-    total_capacity: 5000  # 缓冲区容量
-    batch_size: 1   # 每次采样1个轨迹，只能是1！
+    min_start_train: 256    # 最小启动训练样本数
+    total_capacity: 4096  # 缓冲区容量
+    batch_size: 2048   # n-step
 
   OCP:
     gamma: 0.95

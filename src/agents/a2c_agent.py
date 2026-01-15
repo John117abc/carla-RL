@@ -54,10 +54,11 @@ class A2CAgent(BaseAgent):
 
         # 采样数量
         self.batch_size = self.a2c_config['batch_size']
+        self.total_capacity = self.a2c_config['total_capacity']
+        self.min_start_train = self.a2c_config['min_start_train']
 
         # 初始化缓冲区
-        self.buffer = TrajectoryBuffer(min_start_train = self.a2c_config['min_start_train'],
-                                        total_capacity = self.a2c_config['total_capacity'])
+        self.buffer = []
 
         # 记录历史日志数据值
         self.globe_eps = 0
@@ -80,41 +81,22 @@ class A2CAgent(BaseAgent):
             action = action.cpu().numpy().flatten()
         return np.clip(action, self.action_space.low, self.action_space.high)
 
-    def update(self) -> Dict[str, float]:
+    def update(self,obs,action) -> Dict[str, float]:
         """
         标准 A2C 单步更新。
         输入应为一个 rollout batch: [B, ...]
         """
-        trajectories = self.buffer.sample_batch(self.batch_size)
-
-        all_obs = []
-        all_actions = []
-        all_rewards = []
-        all_next_obs = []
-        all_dones = []
-
-        for traj in trajectories:
-            all_obs.extend(traj.states)
-            all_actions.extend(traj.actions)
-            all_rewards.extend(step['total_reward'] for step in traj.rewards)
-            all_next_obs.extend(traj.next_states)
-            all_dones.extend(traj.dones)
-
-        obs = torch.as_tensor(np.asarray(all_obs), dtype=torch.float32, device=self.device)
-        actions = torch.as_tensor(np.asarray(all_actions), dtype=torch.float32, device=self.device)
-        rewards = torch.as_tensor(np.asarray(all_rewards), dtype=torch.float32, device=self.device)
-        next_obs = torch.as_tensor(np.asarray(all_next_obs), dtype=torch.float32, device=self.device)
-        dones = torch.as_tensor(np.asarray(all_dones), dtype=torch.float32, device=self.device)
+        obs = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
+        actions = torch.as_tensor(action, dtype=torch.float32, device=self.device)
 
         values = self.critic(obs)
         with torch.no_grad():
-            next_values = self.critic(next_obs)
-            target_values = rewards + self.gamma * next_values * (1 - dones)
+            batch_buffer = self.n_step_batch()
+            target_values = torch.tensor(self.calculate_returns(batch_buffer), dtype=torch.float32).to(self.device)
             advantages = target_values - values
 
         # 动作评估
         log_probs, entropy = self.actor.evaluate_actions(obs, actions)
-
         # 损失
         actor_loss = -(log_probs * advantages.detach()).mean()
         critic_loss = nn.functional.mse_loss(values, target_values)
@@ -191,6 +173,44 @@ class A2CAgent(BaseAgent):
                 done = terminated or truncated
             total_rewards.append(episode_reward)
         return float(np.mean(total_rewards)), float(np.std(total_rewards))
+
+    # 存储记录
+    def store_transition(self, state,action,reward,info,done,next_state):
+        self.buffer.append((state,action,reward,info,done,next_state))
+        if len(self.buffer) > self.total_capacity:
+            self.buffer.pop(0)
+
+    # 是否能够开始训练
+    def should_start_training(self):
+        return len(self.buffer) > self.min_start_train
+
+    def n_step_batch(self):
+        if self.should_start_training():
+            if len(self.buffer) < self.batch_size:
+                return self.buffer[0:self.min_start_train]
+            else:
+                return self.buffer[0:self.batch_size]
+        else:
+            return None
+
+    def calculate_returns(self,batch_buffer):
+        returns = []
+        G = 0.0
+        # 如果最后一步不是终止状态，用 critic 估计 V(last_state)
+        if not batch_buffer[-1][4]:  # 第4个元素是 done
+            last_state = torch.FloatTensor(batch_buffer[-1][0]).unsqueeze(0).to(self.device)
+            with torch.no_grad():
+                G = self.critic(last_state).item()
+
+        # 从后往前计算
+        for i in reversed(range(len(batch_buffer))):
+            reward = batch_buffer[i][2]
+            G = reward['total_reward'] + self.gamma * G
+            returns.insert(0, G)
+        return returns
+
+    def clean_mem(self):
+        self.buffer.clear()
 
     def unpack_observation(self, obs: Union[List, np.ndarray], batched: bool = False):
         """

@@ -80,7 +80,7 @@ def main():
             initial_state = state.copy()
             action = np.zeros(2)
             while not done:
-                # 减少坐决策的频率
+                # 减少做决策的频率
                 if global_step % action_repeat == 0:
                     action = agent.select_action(state)
                 next_obs, reward, _, _, info = env.step(action)
@@ -98,9 +98,10 @@ def main():
                 state = next_state
 
                 # 更新参数
+                agent.store_transition(state,action,reward,info,done,next_state)
                 loss = None
-                if agent.buffer.should_start_training():
-                    loss = agent.update()
+                if agent.should_start_training():
+                    loss = agent.update(state,action)
 
                 # 打印关键信息
                 if global_step % train_config["log_interval"] == 0:
@@ -119,12 +120,6 @@ def main():
                 if done:
                     logger.info(f"  Episode 结束 (info={info})")
                     break
-
-            trajectory = Trajectory(initial_state=initial_state,states=states,actions=actions,
-                                    rewards=rewards,infos=infos,path_id=env.current_path_id,
-                                    horizon=len(states),dones=dones,next_states = next_states)
-            # 加入buffer
-            agent.buffer.handle_new_trajectory(trajectory)
 
             episode += 1
 

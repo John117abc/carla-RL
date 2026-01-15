@@ -80,7 +80,7 @@ def main():
             states, actions, rewards, infos = [], [], [], []
             initial_state = state.copy()
             while not done:
-                # 减少坐决策的频率
+                # 减少做决策的频率
                 if global_step % action_repeat == 0:
                     action = agent.select_action(state)
                 next_obs, reward, _, _, info = env.step(action)
