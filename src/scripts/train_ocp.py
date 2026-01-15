@@ -118,7 +118,7 @@ def main():
             # 更新参数
             loss = None
             if agent.buffer.should_start_training():
-                loss = agent.update(env.ocp_normalizer)
+                loss = agent.update()
             logger.info(f"第 {episode} 轮完成，总奖励: {total_reward:.2f}")
 
             if loss is not None:

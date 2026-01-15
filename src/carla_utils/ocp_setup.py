@@ -28,7 +28,8 @@ def get_ocp_observation(ego_vehicle:carla.Vehicle,
     # 获取周车信息
     ocp_other = get_other_observation(ego_vehicle, other_vehicles)
     # 获取道路信息
-    ocp_road = get_road_edge_points(ego_vehicle, world_map)
+    ocp_road = get_road_edge_points(ego_vehicle, world_map)       # 道路边缘
+    # ocp_road = get_closest_lane_edge_point(ego_vehicle)     # 车道边缘
     # 获取静态路径信息
     ocp_ref = get_ref_observation(ego_vehicle,path_locations)
     return [ocp_ego,ocp_other,ocp_road,ocp_ref]

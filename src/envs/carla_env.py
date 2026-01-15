@@ -93,7 +93,7 @@ class CarlaEnv(gym.Env):
         self._is_eval = False
 
         # ocp观察模式是否为debug模式
-        self._ocp_debug = False
+        self._ocp_debug = True
 
         # 周车
         self.actors = []
@@ -369,18 +369,18 @@ class CarlaEnv(gym.Env):
         # 自车与道路边缘的连线
         self.world.debug.draw_line(
             ego_location, carla.Location(x=road_location[0],y=road_location[1]),
-            thickness=0.05,
+            thickness=0.1,
             color=carla.Color(255, 0, 0),
-            life_time=10.0
+            life_time=0.5
         )
 
         # 自车与参考路径的连线
         ref_location = ocp_obs[3]
         self.world.debug.draw_line(
             ego_location, carla.Location(x=ref_location[0],y=ref_location[1]),
-            thickness=0.05,
+            thickness=0.1,
             color=carla.Color(0, 255, 0),
-            life_time=10.0
+            life_time=0.5
         )
 
     def _compute_reward(self,lane_inv,collision,obstacle) -> dict[str, Any]:
@@ -483,10 +483,24 @@ class CarlaEnv(gym.Env):
             return
 
         vehicle_transform = self.vehicle.get_transform()
-        offset = carla.Location(x=-5.0, y=-20.0, z=15.0)
+        # 侧视角
+        # offset = carla.Location(x=-5.0, y=-20.0, z=15.0)
+        # spectator_transform = carla.Transform(
+        #     vehicle_transform.location + offset,
+        #     carla.Rotation(pitch=-30.0, yaw=120.0, roll=0.0)
+        # )
+
+        # 后视角
+        # offset = carla.Location(x=6.0, y=0.0, z=10.0)
+        # spectator_transform = carla.Transform(
+        #     vehicle_transform.location + offset,
+        #     carla.Rotation(pitch=-20.0, yaw=vehicle_transform.rotation.yaw, roll=0.0)
+        # )
+        # 上帝视角
+        offset = carla.Location(x=-40.0, y=0.0, z=50.0)
         spectator_transform = carla.Transform(
             vehicle_transform.location + offset,
-            carla.Rotation(pitch=-30.0, yaw=120.0, roll=0.0)
+            carla.Rotation(pitch=270.0, yaw=vehicle_transform.rotation.yaw, roll=-90.0)
         )
         self.world.get_spectator().set_transform(spectator_transform)
 
@@ -638,11 +652,11 @@ class CarlaEnv(gym.Env):
         path_locations = self.route_planner.get_route()
         # 可视化路径
         for i, loc in enumerate(path_locations):
-            self.world.debug.draw_point(loc, size=0.1, color=carla.Color(0, 255, 0), life_time=240.0)
+            self.world.debug.draw_point(loc, size=0.01, color=carla.Color(0, 255, 0), life_time=240.0)
             if i > 0:
                 self.world.debug.draw_line(
                     path_locations[i - 1], loc,
-                    thickness=0.05,
+                    thickness=0.1,
                     color=carla.Color(255, 0, 0),
                     life_time=240.0
                 )

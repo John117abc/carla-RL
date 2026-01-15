@@ -94,7 +94,7 @@ class OcpAgent(BaseAgent):
             action = action.cpu().numpy().flatten()
         return np.clip(action, self.action_space.low, self.action_space.high)
 
-    def update(self,normalizer: RunningNormalizer):
+    def update(self):
         # 采样 N 条完整轨迹
         trajectories = self.buffer.sample_batch(self.batch_size)
 
@@ -107,38 +107,38 @@ class OcpAgent(BaseAgent):
             total_cost = 0
             total_constraint = 0
             discount = 1.0
-            for t in range(len(traj.states)):
-                s_all, s_ego, s_other, s_road, s_ref = self.unpack_observation(traj.states[t])
-                action, log_prob, _ = self.actor(s_all)
+            s_all, s_ego, s_other, s_road, s_ref = self.unpack_observation(traj.states,True)
 
-                # 跟踪消耗
-                tracking_diff = s_ego - s_ref
-                tracking_diff[4] = (tracking_diff[4] + 180) % 360 - 180  # 角度制 wrap
-                Q_diag = torch.from_numpy(np.diag(self.Q_matrix)).to(self.device).float()
-                tracking = (tracking_diff * Q_diag * tracking_diff).sum()
+            action, log_prob, _ = self.actor(s_all)
 
-                # 控制消耗，
-                R_diag = torch.from_numpy(np.diag(self.R_matrix)).to(self.device).float()
-                control = (action * R_diag * action).sum()
+            # 跟踪消耗
+            tracking_diff = s_ego - s_ref
+            tracking_diff[4] = (tracking_diff[4] + 180) % 360 - 180  # 角度制 wrap
+            Q_diag = torch.from_numpy(np.diag(self.Q_matrix)).to(self.device).float()
+            tracking = (tracking_diff * Q_diag * tracking_diff).sum()
 
-                total_cost += discount * (tracking + control)
+            # 控制消耗，
+            R_diag = torch.from_numpy(np.diag(self.R_matrix)).to(self.device).float()
+            control = (action * R_diag * action).sum()
 
-                # 自车-周车
-                rel_pos_car = s_ego[:2] - s_other[:,0:2]
-                M_xy = torch.from_numpy(np.diag(self.M_matrix)[:2]).to(self.device).float()
-                dist_sq_car = (rel_pos_car * M_xy * rel_pos_car).sum()
-                g_car = dist_sq_car - self.other_car_min_distance ** 2
-                ge_car = torch.relu(-g_car)
+            total_cost += discount * (tracking + control)
 
-                # 道路约束
-                rel_pos_road = s_ego[:2] - s_road[:2]
-                dist_sq_road = (rel_pos_road * M_xy * rel_pos_road).sum()
-                g_road = dist_sq_road - self.road_min_distance ** 2
-                ge_road = torch.relu(-g_road)
+            # 自车-周车
+            rel_pos_car = s_ego.unsqueeze(1)[:,:,0:2] - s_other[:,:,0:2]
+            M_xy = torch.from_numpy(np.diag(self.M_matrix)[:2]).to(self.device).float()
+            dist_sq_car = (rel_pos_car * M_xy * rel_pos_car).sum()
+            g_car = dist_sq_car - self.other_car_min_distance ** 2
+            ge_car = torch.relu(-g_car)
 
-                total_constraint += discount * (ge_car + ge_road)
+            # 道路约束
+            rel_pos_road = s_ego[:,0:2] - s_road[:,0:2]
+            dist_sq_road = (rel_pos_road * M_xy * rel_pos_road).sum()
+            g_road = dist_sq_road - self.road_min_distance ** 2
+            ge_road = torch.relu(-g_road)
 
-                discount *= self.gamma
+            total_constraint += discount * (ge_car + ge_road)
+
+            # discount *= self.gamma
 
             actor_loss = total_cost + self.init_penalty * total_constraint
             actor_losses.append(actor_loss)
