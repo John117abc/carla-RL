@@ -32,6 +32,7 @@ class CarlaEnv(gym.Env):
         carla_config: Dict[str, Any],
         env_config: Dict[str, Any],
         render_mode: Optional[str] = None,
+        is_eval: bool = False
     ):
         super().__init__()
         self.carla_cfg = carla_config
@@ -90,7 +91,7 @@ class CarlaEnv(gym.Env):
         self.ocp_normalizer = RunningNormalizer(shape=(66,))
 
         # 控制是否更新归一化统计量（评估 时不更新）
-        self._is_eval = False
+        self._is_eval = is_eval
 
         # ocp观察模式是否为debug模式
         self._ocp_debug = True
@@ -496,6 +497,7 @@ class CarlaEnv(gym.Env):
         #     vehicle_transform.location + offset,
         #     carla.Rotation(pitch=-20.0, yaw=vehicle_transform.rotation.yaw, roll=0.0)
         # )
+
         # 上帝视角
         offset = carla.Location(x=-40.0, y=0.0, z=50.0)
         spectator_transform = carla.Transform(
@@ -543,8 +545,8 @@ class CarlaEnv(gym.Env):
         obs = self._get_observation()
         reward = self._compute_reward(lane_inv,collision,obstacle)
         terminated, truncated, info = self._check_termination(lane_inv,collision,obstacle)
-
-        return obs, reward, terminated, truncated, info
+        info.update(reward)
+        return obs, reward['total_reward'], terminated, truncated, info
 
     def _destroy_all_sensors(self):
         for sensor in [self.camera_sensor, self.collision_sensor,

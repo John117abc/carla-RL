@@ -83,22 +83,23 @@ class TrajectoryPriorityBuffer:
 
 class SafetyCriticalTrajectoryBuffer(TrajectoryPriorityBuffer):
     def calculate_priority(self, traj: Trajectory) -> float:
-        # 整条轨迹的最大碰撞风险
-        max_collision_risk = max(
-            info.get('collision', False) or (r['collision_reward'] < -0.5)
-            for r, info in zip(traj.rewards, traj.infos)
-        )
+        # 方法1：仅用 info 判断是否发生过碰撞（推荐）
+        has_collision = any(info.get('collision', False) for info in traj.infos)
+
+        # 方法2（可选）：如果 collision 不全，也可检查 route violation 等
+        # off_route = any(info.get('off_route', False) for info in traj.infos)
 
         total_constraint = traj.total_constraint
         avg_speed = np.mean([info.get('speed', 0.0) for info in traj.infos])
 
-        priority = 0.1
-        if max_collision_risk:
+        if has_collision:
             priority = 10.0
         elif total_constraint > 0.5:
             priority = 7.0
         elif avg_speed > 25.0:
             priority = 3.0
+        else:
+            priority = 0.1
 
         return max(0.1, min(10.0, priority))
 
@@ -133,8 +134,8 @@ class PerformanceTrajectoryBuffer(TrajectoryPriorityBuffer):
 
         # 额外奖励：全程高速 + 无碰撞 + 在右车道
         speeds = [info.get('speed', 0.0) for info in traj.infos]
-        on_road_rewards = [r['centering_reward'] for r in traj.rewards]
-        right_lane_rewards = [r['right_lane_reward'] for r in traj.rewards]
+        on_road_rewards = [info.get('centering_reward') for info in traj.infos]
+        right_lane_rewards = [info.get('right_lane_reward') for info in traj.infos]
         collisions = [info.get('collision', False) for info in traj.infos]
 
         if (np.mean(speeds) > 20.0 and
@@ -177,8 +178,8 @@ class DiversityTrajectoryBuffer(TrajectoryPriorityBuffer):
 
     def _create_scenario_fingerprint(self, traj: Trajectory) -> str:
         avg_speed = np.mean([info.get('speed', 0.0) for info in traj.infos])
-        avg_on_road = np.mean([r['centering_reward'] for r in traj.rewards])
-        avg_right_lane = np.mean([r['right_lane_reward'] for r in traj.rewards])
+        avg_on_road = np.mean([info.get('centering_reward') for info in traj.infos])
+        avg_right_lane = np.mean([info.get('right_lane_reward') for info in traj.infos])
         has_collision = any(info.get('collision', False) for info in traj.infos)
 
         speed_level = "high" if avg_speed > 20 else ("medium" if avg_speed > 10 else "low")
@@ -244,12 +245,12 @@ class CurriculumTrajectoryBuffer(TrajectoryPriorityBuffer):
         difficulty += min(traj.total_constraint * 2.0, 3.0)
 
         # 3. 脱离道路程度
-        avg_centering = np.mean([r['centering_reward'] for r in traj.rewards])
+        avg_centering = np.mean([info.get('centering_reward') for info in traj.infos])
         if avg_centering < 0.5:
             difficulty += 2.0
 
         # 4. 车道错误
-        avg_right_lane = np.mean([r['right_lane_reward'] for r in traj.rewards])
+        avg_right_lane = np.mean([info.get('right_lane_reward') for info in traj.infos])
         if avg_right_lane < 0.5:
             difficulty += 1.0
 

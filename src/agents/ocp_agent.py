@@ -109,7 +109,6 @@ class OcpAgent(BaseAgent):
             # traj 包含: init_s, states, actions, refs, etc.
             total_cost = 0
             total_constraint = 0
-            discount = 1.0
             s_all, s_ego, s_other, s_road, s_ref = self.unpack_observation(traj.states,True)
 
             action, log_prob, _ = self.actor(s_all)
@@ -209,17 +208,22 @@ class OcpAgent(BaseAgent):
         self.global_step = checkpoint['global_step']
         return checkpoint
 
-    def eval(self, num_episodes: int = 10) -> Tuple[float, float]:
+    def eval(self, num_episodes: int = 10,action_repeat: int = 5) -> Tuple[float, float]:
         total_rewards = []
         for _ in range(num_episodes):
             obs, _ = self.env.reset()
             episode_reward = 0.0
             done = False
+            step = 0
+            action = None
             while not done:
-                action = self.select_action(obs, deterministic=True)
+                if step % action_repeat == 0:
+                    action,_ = self.select_action(obs['ocp_obs'])
                 obs, reward, terminated, truncated, _ = self.env.step(action)
-                episode_reward += reward
-                done = terminated or truncated
+                episode_reward += reward['total_reward']
+                # 不计算环境步，按照只有碰撞才停止
+                done = terminated
+                step +=1
             total_rewards.append(episode_reward)
         return float(np.mean(total_rewards)), float(np.std(total_rewards))
 

@@ -1,4 +1,11 @@
+import matplotlib as mpl
+mpl.rcParams.update({
+    'font.sans-serif': ['Noto Sans CJK JP'],  # 或 WenQuanYi Zen Hei + 避免 \u2212
+    'axes.unicode_minus': False,
+    'mathtext.fontset': 'stix'
+})
 import matplotlib.pyplot as plt
+import numpy as np
 
 
 class Plotter:
@@ -22,32 +29,44 @@ class Plotter:
         """绘制训练过程中各个指标的变化情况"""
         # 绘制总奖励随轮次变化的图表
         plt.figure(figsize=(10, 6))
-        plt.plot(self.history['episode'], self.history['reward'], label='Total Reward', color='green')
-        plt.xlabel('Episode')
-        plt.ylabel('Reward')
-        plt.title('Training Reward Curve')
+        actor_loss = [s['actor_loss'] for s in self.history[0]]
+        critic_loss = [s['critic_loss'] for s in self.history[0]]
+        global_step = [s['global_step'] for s in self.history[0]]
+        plt.plot(global_step, actor_loss, label='actor 损失', color='green')
+        plt.xlabel('step')
+        plt.ylabel('actor_loss')
+        plt.title('cator损失表')
         plt.grid(True)
         plt.legend()
         plt.show()
 
-        # 绘制步骤数和平均损失随轮次变化的双轴图表
-        fig, ax1 = plt.subplots(figsize=(10, 6))
-
-        color = 'tab:blue'
-        ax1.set_xlabel('Episode')
-        ax1.set_ylabel('Avg_return', color=color)
-        ax1.plot(self.history['episode'], self.history['loss_critic'], color=color, label='returns')
-        ax1.tick_params(axis='y', labelcolor=color)
-
-        # ax2 = ax1.twinx()
-        # color = 'tab:red'
-        # ax2.set_ylabel('Avg Loss', color=color)
-        # ax2.plot(self.history['episode'], self.history['avg_loss'], color=color, label='Loss')
-        # ax2.tick_params(axis='y', labelcolor=color)
-
-        plt.title('Returns and Loss over Episodes')
-        fig.tight_layout()  # 自动调整子图参数，使之填充整个图像区域
+        plt.figure(figsize=(10, 6))
+        plt.plot(global_step, critic_loss, label='critic 损失', color='blue')
+        plt.xlabel('step')
+        plt.ylabel('critic_loss')
+        plt.title('critic损失表')
+        plt.grid(True)
+        plt.legend()
         plt.show()
+
+        # # 绘制步骤数和平均损失随轮次变化的双轴图表
+        # fig, ax1 = plt.subplots(figsize=(10, 6))
+        #
+        # color = 'tab:blue'
+        # ax1.set_xlabel('Episode')
+        # ax1.set_ylabel('Avg_return', color=color)
+        # ax1.plot(self.history['episode'], self.history['loss_critic'], color=color, label='returns')
+        # ax1.tick_params(axis='y', labelcolor=color)
+        #
+        # # ax2 = ax1.twinx()
+        # # color = 'tab:red'
+        # # ax2.set_ylabel('Avg Loss', color=color)
+        # # ax2.plot(self.history['episode'], self.history['avg_loss'], color=color, label='Loss')
+        # # ax2.tick_params(axis='y', labelcolor=color)
+        #
+        # plt.title('Returns and Loss over Episodes')
+        # fig.tight_layout()  # 自动调整子图参数，使之填充整个图像区域
+        # plt.show()
 
 
 # 示例用法：

@@ -82,7 +82,7 @@ def main():
                 next_obs, reward, _, _, info = env.step(action)
                 next_state = next_obs['ocp_obs']
                 done = info['collision'] or info['off_route'] or info['TimeLimit.truncated']
-                total_reward += reward['total_reward']
+                total_reward += reward
                 # 数据加入buffer
                 actions.append(action)
                 states.append(state[1])
@@ -95,7 +95,7 @@ def main():
                 agent.update_penalty(env.step_count)
                 # 打印关键信息
                 if global_step % train_config["log_interval"] == 0:
-                    logger.info(f"  Step {global_step}: reward={reward['total_reward']:.3f}, total={total_reward:.2f}")
+                    logger.info(f"  Step {global_step}: reward={reward:.3f}, total={total_reward:.2f}")
                     if 'speed' in info:
                         logger.info(f"    速度: {info['speed']:.2f} km/h")
 
@@ -105,9 +105,15 @@ def main():
                 global_step += 1
             # 计算 total_cost 和 total_constraint
             total_cost, total_constraint = agent.compute_total_cost_and_constraint(states, actions)
-            trajectory = Trajectory(initial_state=initial_state,states=states,actions=actions,rewards=rewards,infos=infos,
-                                    total_cost=total_cost,total_constraint=total_constraint,path_id=env.current_path_id,
-                                    horizon=len(states),log_probs = log_probs)
+            trajectory = Trajectory(initial_state=initial_state,
+                                    states=states,actions=actions,
+                                    rewards=rewards,
+                                    infos=infos,
+                                    total_cost=total_cost,
+                                    total_constraint=total_constraint,
+                                    path_id=env.current_path_id,
+                                    horizon=len(states),
+                                    log_probs = log_probs)
             # 加入buffer
             agent.buffer.handle_new_trajectory(trajectory)
 
