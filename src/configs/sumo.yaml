@@ -1,0 +1,6 @@
+default:
+  sumo_gui: False
+  sumo_config_file: '../envs/carla_sumo_env/town06_opt_env/Town06_opt.sumocfg'
+  vehicle_type: 'vehicle.tesla.model3'
+  sumo_host: '127.0.0.1'
+  sumo_post: 8813

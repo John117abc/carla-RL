@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<routes xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/routes_file.xsd">
+
+    <!-- 定义车辆类型（避免 DEFAULT_VEHTYPE 警告） -->
+    <vType id="vehicle.tesla.model3" length="4.8" maxSpeed="1" />
+    <vType id="vehicle.nissan.micra" length="3.9" maxSpeed="1" />
+    <vType id="vehicle.audi.a2"      length="4.2" maxSpeed="1" />
+
+    <!-- 交通流：使用已定义的 vType -->
+    <flow id="flow1" type="vehicle.tesla.model3"
+          begin="0" end="999999"
+          departLane="random" departPos="random" departSpeed="random"
+          speedFactor="0.8" vehsPerHour="200">
+        <route edges="-39 -40"/>
+    </flow>
+
+    <flow id="flow2" type="vehicle.nissan.micra"
+          begin="0" end="999999"
+          departLane="random" departPos="random" departSpeed="random"
+          speedFactor="0.75" vehsPerHour="150">
+        <route edges="-39 -40"/>
+    </flow>
+
+    <flow id="flow3" type="vehicle.audi.a2"
+          begin="0" end="999999"
+          departLane="random" departPos="random" departSpeed="random"
+          speedFactor="0.82" vehsPerHour="100">
+        <route edges="-39 -40"/>
+    </flow>
+
+</routes>

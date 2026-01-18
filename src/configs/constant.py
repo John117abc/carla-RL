@@ -32,5 +32,11 @@ LAYERS_TO_REMOVE_4 = [
 
 # 出生点
 BIRTH_POINT = {
-    "Town06_Opt": 6
+    # "Town02_Opt": 6,
+    "Town06_Opt":[carla.Location(x=106.3154, y=237.56, z=0.6),  # 最左侧车道中心
+                           carla.Location(x=106.3154, y=241.06, z=0.6),
+                           carla.Location(x=106.3154, y=244.56, z=0.6),
+                           carla.Location(x=106.3154, y=248.06, z=0.6),
+                           carla.Location(x=106.3154, y=251.56, z=0.6)],
+    # "Town07_Opt": {x,y,z,yaw}
 }

@@ -180,12 +180,16 @@ class OcpAgent(BaseAgent):
         critic_optimizer = self.critic_optimizer
         self.global_step += save_info['global_step']
         self.globe_eps += self.base_config['save_freq']
-        self.history_loss.append(save_info['history_loss'])
+        self.history_loss.extend(save_info['history_loss'])
 
         model = {'actor': actor_model, 'critic': critic_model}
         optimizer = {'actor_optim': actor_optimizer, 'critic_optim': critic_optimizer}
-        extra_info = {'config': save_info['rl_config'], 'global_step': self.global_step,'history':self.history_loss,
-                      'ocp_normalizer':save_info['ocp_normalizer'],'globe_eps':self.globe_eps}
+        extra_info = {'config': save_info['rl_config'],
+                      'global_step': self.global_step,
+                      'history':self.history_loss,
+                      'ocp_normalizer':save_info['ocp_normalizer'],
+                      'globe_eps':self.globe_eps}
+
         met = {'episode': self.globe_eps}
         save_checkpoint(
             model=model,

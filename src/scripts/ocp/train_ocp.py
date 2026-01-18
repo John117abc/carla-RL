@@ -45,11 +45,17 @@ def main():
     rl_config = load_config('configs/rl.yaml')
     train_config = rl_config['rl']
     device = setup_code_environment(sys_config)
+    # 启用sumo控制交通
+    sumo_config = None
+    if env_config['traffic']['enable_sumo']:
+        sumo_config = load_config('configs/sumo.yaml')
+
     history = []
     logger.info("🚀 正在初始化 CARLA 环境...")
     env = CarlaEnv(
         render_mode=None,
         carla_config=carla_config,
+        sumo_config=sumo_config,
         env_config=env_config
     )
     try:
@@ -135,12 +141,12 @@ def main():
 
             # 保存模型
             if episode % train_config["save_freq"] == 0:
-                logger.info(f"开始保存模型：  Step {global_step}: reward={reward['total_reward']:.3f}, total={total_reward:.2f}")
+                logger.info(f"开始保存模型：  Step {global_step}: total={total_reward:.2f}")
                 save_info = {
                     'rl_config':rl_config,
                     'global_step':global_step,
                     'map':env_config['world']['map'],
-                    'history_loss':history,
+                    'history_loss':history.copy(),
                     'ocp_normalizer': env.ocp_normalizer.state_dict()
                 }
                 agent.save(save_info)

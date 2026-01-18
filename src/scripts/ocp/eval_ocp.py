@@ -40,9 +40,6 @@ def main():
         if eval_config['continue_ocp']:
             logger.info("开始读取智能体参数...")
             checkpoint = agent.load(eval_config["model_path_ocp"])
-            if not env.is_eval:
-                # 读取归一化参数
-                env.ocp_normalizer.load_state_dict(checkpoint['ocp_normalizer'])
             logger.info('开始绘制图像')
             plotter = Plotter()
             plotter.load_history(checkpoint['history'])
