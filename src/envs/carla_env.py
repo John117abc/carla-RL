@@ -10,7 +10,7 @@ from typing import Dict, Any, Tuple, Optional, Union, List
 
 from src.envs.sensors import CameraSensor, CollisionSensor, LaneInvasionSensor,ObstacleSensor,IMUSensor
 from src.carla_utils import get_compass,world_to_vehicle_frame,RoutePlanner,get_ocp_observation
-from src.utils import get_logger,RunningNormalizer
+from src.utils import get_logger,RunningNormalizer,normalize_ocp__scenario_relative
 from src.configs.constant import (LAYERS_TO_REMOVE_1,
                                   LAYERS_TO_REMOVE_2,
                                   LAYERS_TO_REMOVE_3,
@@ -78,31 +78,32 @@ class CarlaEnv(gym.Env):
             logger.error(f"⚠️ TrafficManager 初始化失败（可能端口被占用）: {e}")
 
         # 初始化 SUMO 仿真
-        self.simulation_step_length = self.carla_cfg["fixed_delta_seconds"]  # 确保与 CARLA 同步
-        self.cfg_file = sumo_config['default']['sumo_config_file']
-        self.sumo_gui = sumo_config['default']['sumo_gui']
-        self.sumo_host = sumo_config['default']['sumo_host']
-        self.sumo_port = sumo_config['default']['sumo_post']
+        if self.env_cfg['traffic']['enable_sumo']:
+            self.simulation_step_length = self.carla_cfg["fixed_delta_seconds"]  # 确保与 CARLA 同步
+            self.cfg_file = sumo_config['default']['sumo_config_file']
+            self.sumo_gui = sumo_config['default']['sumo_gui']
+            self.sumo_host = sumo_config['default']['sumo_host']
+            self.sumo_port = sumo_config['default']['sumo_post']
 
-        self.carla_simulation = CarlaSimulation(host=self.carla_host, port=self.carla_port, step_length=self.simulation_step_length)
-        self.sumo_simulation = SumoSimulation(
-            self.cfg_file,
-            self.simulation_step_length,
-            host=self.sumo_host,
-            port=self.sumo_port,
-            sumo_gui=self.sumo_gui,
-            client_order=1
-        )
+            self.carla_simulation = CarlaSimulation(host=self.carla_host, port=self.carla_port, step_length=self.simulation_step_length)
+            self.sumo_simulation = SumoSimulation(
+                self.cfg_file,
+                self.simulation_step_length,
+                host=self.sumo_host,
+                port=self.sumo_port,
+                sumo_gui=self.sumo_gui,
+                client_order=1
+            )
 
-        # 创建同步器
-        self.synchronization = SimulationSynchronization(
-            self.sumo_simulation,
-            self.carla_simulation,
-            'none', # 交通信号灯管理
-            False,  # sync_vehicle_color
-            False,   # sync_lights
-            False
-        )
+            # 创建同步器
+            self.synchronization = SimulationSynchronization(
+                self.sumo_simulation,
+                self.carla_simulation,
+                'none', # 交通信号灯管理
+                False,  # sync_vehicle_color
+                False,   # sync_lights
+                False
+            )
 
         # 天气
         weather = carla.WeatherParameters(
@@ -126,9 +127,6 @@ class CarlaEnv(gym.Env):
         # 归一化处理
         meas_dim = self._get_measurements_dim()
         self.meas_normalizer = RunningNormalizer(shape=(meas_dim,))
-
-        # 归一化
-        self.ocp_normalizer = RunningNormalizer(shape=(66,))
 
         # 控制是否更新归一化统计量（评估 时不更新）
         self._is_eval = is_eval
@@ -418,18 +416,16 @@ class CarlaEnv(gym.Env):
             meas_normalized = self.meas_normalizer.normalize(meas_array)
 
             obs["measurements"] = meas_normalized
-
         if "ocp_obs" in self.env_cfg["obs_type"]:
             # 获取ocp观察信息
             ocp_obs = get_ocp_observation(self.vehicle,self.imu_sensor,self.actors,self.path_locations,self.world.get_map())
-            state_ego_flat = np.asarray(ocp_obs[0])
-            state_other_flat = np.asarray(ocp_obs[1]).flatten()
-            state_road_flat = np.asarray(ocp_obs[2])
-            state_ref_flat = np.asarray(ocp_obs[3])
+            normalize_ocp = normalize_ocp__scenario_relative(ocp_obs)
+            state_ego_flat = np.asarray(normalize_ocp[0])
+            state_other_flat = np.asarray(normalize_ocp[1]).flatten()
+            state_road_flat = np.asarray(normalize_ocp[2])
+            state_ref_flat = np.asarray(normalize_ocp[3])
             state_all = np.concatenate([state_ego_flat,state_other_flat,state_road_flat,state_ref_flat], axis=0)
-            if not self._is_eval:
-                self.ocp_normalizer.update(state_all[None, :])
-            obs["ocp_obs"] = [state_all,ocp_obs]
+            obs["ocp_obs"] = [state_all,normalize_ocp]
             # 如果是debug模式，在训练页面上显示和各个点的连线
             if self._ocp_debug:
                 self._debug_ocp(ocp_obs)

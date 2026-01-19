@@ -16,7 +16,7 @@ from .base_agent import BaseAgent
 from src.models.advantage_actor_critic import ActorNetwork, CriticNetwork
 from src.utils import save_checkpoint,load_checkpoint
 from src.buffer import TrajectoryBuffer
-from src.utils import get_logger,RunningNormalizer
+from src.utils import get_logger
 
 logger = get_logger('ocp_agent')
 
@@ -62,7 +62,7 @@ class OcpAgent(BaseAgent):
         self.gamma = self.ocp_config['gamma']
 
         # 正定矩阵
-        self.Q_matrix = np.diag([0.00004, 0.00001, 0.1, 0.01, 0.00001, 0.05])
+        self.Q_matrix = np.diag([0.04, 0.04, 0.01, 0.01, 0.1, 0.02])
         self.R_matrix = np.diag([0.1, 0.005])
         self.M_matrix = np.diag([1,1,0,0,0,0])
         # 严格使用s^ref = [δp, δφ, δv ]状态时候的Q
@@ -126,12 +126,18 @@ class OcpAgent(BaseAgent):
             total_cost += (tracking + control)
 
             # 自车-周车
+            # rel_pos_car = s_ego.unsqueeze(1) - s_other
+            # rel_pos_car_scale = torch.ones_like(rel_pos_car)
+            # rel_pos_car_scale[..., 4] = 1.0 / 360.0
+            # rel_pos_car_scaled = rel_pos_car * rel_pos_car_scale
+            # M_xy = torch.from_numpy(np.diag(self.M_matrix)).to(self.device).float()
+            # dist_sq_car = (rel_pos_car_scaled * M_xy * rel_pos_car_scaled).sum()
+            # g_car = dist_sq_car - self.other_car_min_distance ** 2
+            # ge_car = torch.relu(-g_car)
+
             rel_pos_car = s_ego.unsqueeze(1) - s_other
-            rel_pos_car_scale = torch.ones_like(rel_pos_car)
-            rel_pos_car_scale[..., 4] = 1.0 / 360.0
-            rel_pos_car_scaled = rel_pos_car * rel_pos_car_scale
             M_xy = torch.from_numpy(np.diag(self.M_matrix)).to(self.device).float()
-            dist_sq_car = (rel_pos_car_scaled * M_xy * rel_pos_car_scaled).sum()
+            dist_sq_car = (rel_pos_car * M_xy * rel_pos_car).sum()
             g_car = dist_sq_car - self.other_car_min_distance ** 2
             ge_car = torch.relu(-g_car)
 
@@ -187,7 +193,6 @@ class OcpAgent(BaseAgent):
         extra_info = {'config': save_info['rl_config'],
                       'global_step': self.global_step,
                       'history':self.history_loss,
-                      'ocp_normalizer':save_info['ocp_normalizer'],
                       'globe_eps':self.globe_eps}
 
         met = {'episode': self.globe_eps}

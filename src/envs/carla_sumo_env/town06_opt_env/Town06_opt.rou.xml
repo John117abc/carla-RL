@@ -11,21 +11,21 @@
     <flow id="flow1" type="vehicle.tesla.model3"
           begin="0" end="999999"
           departLane="random" departPos="random" departSpeed="random"
-          speedFactor="0.8" vehsPerHour="200">
+          speedFactor="0.8" vehsPerHour="20">
         <route edges="-39 -40"/>
     </flow>
 
     <flow id="flow2" type="vehicle.nissan.micra"
           begin="0" end="999999"
           departLane="random" departPos="random" departSpeed="random"
-          speedFactor="0.75" vehsPerHour="150">
+          speedFactor="0.75" vehsPerHour="15">
         <route edges="-39 -40"/>
     </flow>
 
     <flow id="flow3" type="vehicle.audi.a2"
           begin="0" end="999999"
           departLane="random" departPos="random" departSpeed="random"
-          speedFactor="0.82" vehsPerHour="100">
+          speedFactor="0.82" vehsPerHour="10">
         <route edges="-39 -40"/>
     </flow>
 

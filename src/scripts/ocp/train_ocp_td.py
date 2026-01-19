@@ -8,7 +8,8 @@ import os
 import numpy as np
 import cv2
 from src.utils import (load_config,get_logger,
-                       setup_code_environment)
+                       setup_code_environment,
+                       average_ocp_list)
 from src.agents import OcpAgent
 from src.buffer import Trajectory
 # 添加项目源码路径
@@ -45,6 +46,7 @@ def main():
     rl_config = load_config('configs/rl.yaml')
     train_config = rl_config['rl']
     device = setup_code_environment(sys_config)
+    action_repeat = env_config['world']['action_repeat']
     # 启用sumo控制交通
     sumo_config = None
     if env_config['traffic']['enable_sumo']:
@@ -63,9 +65,6 @@ def main():
         if train_config['continue_ocp']:
             logger.info("开始读取智能体参数...")
             checkpoint = agent.load(train_config["model_path_ocp"])
-            # if not env.is_eval:
-            #     # 读取归一化参数
-            #     env.ocp_normalizer.load_state_dict(checkpoint['ocp_normalizer'])
 
         logger.info("环境创建成功！")
         logger.info(f"观测空间: {env.observation_space}")
@@ -75,59 +74,86 @@ def main():
         global_step = 0
         episode = 0
         while episode < num_episodes:
-            logger.info(f"\n开始第 {episode + 1} 轮测试...")
             state, info = env.reset()
             state = state['ocp_obs']
-            logger.info(f"初始观测类型: {type(state)}, 形状/结构: {get_obs_shape(state)}")
             total_reward = 0.0
             done = False
-            states, actions, rewards, infos ,log_probs= [], [], [], [],[]
+            states, actions, rewards, infos, log_probs = [], [], [], [], []
             initial_state = state.copy()
-            while not done:
-                action,log_prob = agent.select_action(state)
-                next_obs, reward, _, _, info = env.step(action)
-                next_state = next_obs['ocp_obs']
-                done = info['collision'] or info['off_route'] or info['TimeLimit.truncated']
-                total_reward += reward
-                # 数据加入buffer
-                actions.append(action)
-                states.append(state[1])
-                rewards.append(reward)
-                log_probs.append(log_prob)
-                infos.append(info)
-                state = next_state
-
-                # 更新惩罚参数
-                agent.update_penalty(env.step_count)
-                # 打印关键信息
-                if global_step % train_config["log_interval"] == 0:
-                    logger.info(f"  Step {global_step}: reward={reward:.3f}, total={total_reward:.2f}")
-                    if 'speed' in info:
-                        logger.info(f"    速度: {info['speed']:.2f} km/h")
-
-                if done:
-                    logger.info(f"  Episode 结束 (info={info})")
-                    break
-                global_step += 1
-            # 计算 total_cost 和 total_constraint
-            total_cost, total_constraint = agent.compute_total_cost_and_constraint(states, actions)
-            trajectory = Trajectory(initial_state=initial_state,
-                                    states=states,actions=actions,
-                                    rewards=rewards,
-                                    infos=infos,
-                                    total_cost=total_cost,
-                                    total_constraint=total_constraint,
-                                    path_id=env.current_path_id,
-                                    horizon=len(states),
-                                    log_probs = log_probs)
-            # 加入buffer
-            agent.buffer.handle_new_trajectory(trajectory)
-
-            # 更新参数
+            episode_step = 0
+            global_step += 1  # global_step代表“决策步”数
             loss = None
-            if agent.buffer.should_start_training():
-                loss = agent.update()
-            logger.info(f"第 {episode} 轮完成，总奖励: {total_reward:.2f}")
+            while not done:
+                # 决策时刻
+                if episode_step % action_repeat == 0:
+                    action, log_prob = agent.select_action(state)
+
+                    # 初始化累计 reward 和临时 info 列表
+                    accumulated_reward = 0.0
+                    temp_infos = []
+                    accumulated_state = []
+                    # 执行 action_repeat 次动作
+                    for _ in range(action_repeat):
+                        accumulated_state.append(state[1])
+                        if done:
+                            break
+                        next_obs, reward, _, _, info = env.step(action)
+                        next_state = next_obs['ocp_obs']
+                        done = info['collision'] or info['off_route'] or info['TimeLimit.truncated']
+
+                        accumulated_reward += reward
+                        temp_infos.append(info)
+                        total_reward += reward
+                        episode_step += 1  # 环境 step
+
+                        # 更新参数
+                        if agent.buffer.should_start_training():
+                            loss = agent.update()
+
+                        # 记录原始 step 日志
+                        if (global_step * action_repeat + episode_step) % train_config["log_interval"] == 0:
+                            logger.info(f"  EnvStep {episode_step}: reward={reward:.3f}")
+
+                    #收集一个“决策周期”的 transition
+                    states.append(average_ocp_list(accumulated_state))
+                    actions.append(action)
+                    rewards.append(accumulated_reward)
+                    log_probs.append(log_prob)
+                    # 合并 info：可以用最后一步，或自定义（如是否有 collision）
+                    final_info = temp_infos[-1] if temp_infos else info
+                    infos.append(final_info)
+
+                    # 更新状态
+                    state = next_state
+
+                    # 更新惩罚参数
+                    agent.update_penalty(env.step_count)  # env.step_count 是环境总步数
+
+                    global_step += 1  # 决策步 +1
+
+                    # 检查是否结束
+                    if done:
+                        logger.info(f"  Episode 结束 (info={final_info})")
+                        break
+
+                else:
+                    raise RuntimeError("逻辑错误：非决策步不应在此循环中")
+
+            # 构建 trajectory（现在 states/actions/rewards 都是决策步级别的）
+            total_cost, total_constraint = agent.compute_total_cost_and_constraint(states, actions)
+            trajectory = Trajectory(
+                initial_state=initial_state,
+                states=states,
+                actions=actions,
+                rewards=rewards,
+                infos=infos,
+                total_cost=total_cost,
+                total_constraint=total_constraint,
+                path_id=env.current_path_id,
+                horizon=len(states),
+                log_probs=log_probs
+            )
+            agent.buffer.handle_new_trajectory(trajectory)
 
             if loss is not None:
                 logger.info(f"训练损失: actor_loss:{loss['actor_loss']:.5f},critic_loss:{loss['critic_loss']:.5f},"
@@ -147,7 +173,6 @@ def main():
                     'global_step':global_step,
                     'map':env_config['world']['map'],
                     'history_loss':history.copy(),
-                    # 'ocp_normalizer': env.ocp_normalizer.state_dict()
                 }
                 agent.save(save_info)
 
