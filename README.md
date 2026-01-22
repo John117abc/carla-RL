@@ -32,7 +32,7 @@
 ### 1. 系统要求
 - Linux/macOS（推荐 Ubuntu 20.04+）
 - Python 3.8+
-- [CARLA Simulator 1.0+](https://carla.org/)
+- [CARLA Simulator 0.9.16+](https://carla.org/)
 - [SUMO 1.16+](https://sumo.dlr.de/docs/Installing/index.html)
 
 ### 2. 安装依赖
