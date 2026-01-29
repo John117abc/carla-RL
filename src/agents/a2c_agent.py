@@ -91,11 +91,11 @@ class A2CAgent(BaseAgent):
         # 转 tensor
         obs = torch.as_tensor(np.array(obs_list), dtype=torch.float32, device=self.device)
         actions = torch.as_tensor(np.array(act_list), dtype=torch.float32, device=self.device)
-        rewards = torch.as_tensor(np.asarray([attr['total_reward'] for attr in rew_list]), dtype=torch.float32, device=self.device)
+        rewards = torch.as_tensor(np.asarray(rew_list), dtype=torch.float32, device=self.device)
         dones = torch.as_tensor(done_list, dtype=torch.bool, device=self.device)
         next_obs = torch.as_tensor(np.array(next_state), dtype=torch.float32, device=self.device)
 
-        # 计算 returns 和 advantages（单步或 n-step）
+        # 计算 returns 和 advantages
         values = self.critic(obs)
         next_values = self.critic(next_obs)
         target_values = rewards + self.gamma * next_values * (1 - dones.float())
@@ -193,9 +193,9 @@ class A2CAgent(BaseAgent):
     def n_step_batch(self):
         if self.should_start_training():
             if len(self.buffer) < self.batch_size:
-                return self.buffer[0:self.min_start_train]
+                return self.buffer[len(self.buffer) - self.min_start_train :len(self.buffer)]
             else:
-                return self.buffer[0:self.batch_size]
+                return self.buffer[len(self.buffer) - self.batch_size :len(self.buffer)]
         else:
             return None
 
