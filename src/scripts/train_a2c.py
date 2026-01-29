@@ -77,12 +77,11 @@ def main():
             done = False
             states, actions, rewards, infos, dones,next_states = [], [], [], [], [], []
             while not done:
-                # 减少做决策的频率
                 action = agent.select_action(state)
                 next_obs, reward, _, _, info = env.step(action)
                 next_state = next_obs['measurements']
                 done = info['TimeLimit.truncated']
-                total_reward += reward['total_reward']
+                total_reward += reward
                 # 数据加入buffer
                 actions.append(action)
                 states.append(state)

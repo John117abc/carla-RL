@@ -628,14 +628,18 @@ class CarlaEnv(gym.Env):
         self.vehicle.apply_control(ctrl)
 
         # 推进仿真
-        if not self.enable_sumo:
-            if self.carla_cfg["sync_mode"]:
+        if self.carla_cfg["sync_mode"]:
+            if self.enable_sumo:
+                # SUMO + CARLA 同步模式：先同步数据，再推进 CARLA
+                self.synchronization.tick()
                 self.world.tick()
             else:
-                self.world.wait_for_tick()
+                self.world.tick()
         else:
-            if self.carla_cfg["sync_mode"]:
+            if self.enable_sumo:
                 self.synchronization.tick()
+            else:
+                self.world.wait_for_tick()
 
         self.step_count += 1
 

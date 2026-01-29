@@ -274,12 +274,12 @@ class CurriculumTrajectoryBuffer(TrajectoryPriorityBuffer):
                 )
 
 class TrajectoryBuffer:
-    def __init__(self, min_start_train: int = 32, total_capacity: int = 10000):  # 注意：trajectory 数量远少于 step
+    def __init__(self, min_start_train: int = 32, total_capacity: int = 10000):  # trajectory 数量远少于 step
         self.buffers = [
-            SafetyCriticalTrajectoryBuffer(int(total_capacity * 0.25)),
-            PerformanceTrajectoryBuffer(int(total_capacity * 0.3)),
-            DiversityTrajectoryBuffer(int(total_capacity * 0.25)),
-            CurriculumTrajectoryBuffer(int(total_capacity * 0.2))
+            SafetyCriticalTrajectoryBuffer(int(total_capacity * 0.25)),     # 安全样本缓冲区
+            PerformanceTrajectoryBuffer(int(total_capacity * 0.3)),     # 高性能样本缓冲区
+            DiversityTrajectoryBuffer(int(total_capacity * 0.25)),      # 探索性缓冲区
+            CurriculumTrajectoryBuffer(int(total_capacity * 0.2))       # 学习缓冲区
         ]
         self.total_capacity = total_capacity
         self.min_start_train = min_start_train
