@@ -44,12 +44,11 @@ def main():
     sys_config = load_config('configs/sys.yaml')
     rl_config = load_config('configs/rl.yaml')
     train_config = rl_config['rl']
-    device = setup_code_environment(sys_config)
     # 启用sumo控制交通
     sumo_config = None
     if env_config['traffic']['enable_sumo']:
         sumo_config = load_config('configs/sumo.yaml')
-
+    device = setup_code_environment(sys_config)
     history = []
     logger.info("🚀 正在初始化 CARLA 环境...")
     env = CarlaEnv(
@@ -109,6 +108,7 @@ def main():
                     logger.info(f"  Episode 结束 (info={info})")
                     break
                 global_step += 1
+
             # 计算 total_cost 和 total_constraint
             total_cost, total_constraint = agent.compute_total_cost_and_constraint(states, actions)
             trajectory = Trajectory(initial_state=initial_state,

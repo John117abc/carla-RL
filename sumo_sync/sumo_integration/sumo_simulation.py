@@ -398,10 +398,13 @@ class SumoSimulation(object):
         if results is None:
             # 车辆已从 SUMO 中移除
             return None
-        type_id = results[traci.constants.VAR_TYPE]
+
+        type_id = results.get(traci.constants.VAR_TYPE)
         if type_id is None:
-            print(f"Warning: Vehicle {actor_id} missing VAR_TYPE, skipping.")
+            print(f"Warning: Vehicle {actor_id} has no VAR_TYPE in subscription results. "
+                  f"Available keys: {list(results.keys())}")
             return None
+
         vclass = SumoActorClass(results[traci.constants.VAR_VEHICLECLASS])
         color = results[traci.constants.VAR_COLOR]
 

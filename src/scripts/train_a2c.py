@@ -44,11 +44,17 @@ def main():
     sys_config = load_config('configs/sys.yaml')
     rl_config = load_config('configs/rl.yaml')
     train_config = rl_config['rl']
+    # 启用sumo控制交通
+    sumo_config = None
+    if env_config['traffic']['enable_sumo']:
+        sumo_config = load_config('configs/sumo.yaml')
+
     device = setup_code_environment(sys_config)
     history = []
     logger.info("🚀 正在初始化 CARLA 环境...")
     env = CarlaEnv(
         render_mode=None,
+        sumo_config=sumo_config,
         carla_config=carla_config,
         env_config=env_config
     )
@@ -84,9 +90,14 @@ def main():
                 total_reward += reward
                 state = next_state
 
-                agent.store_transition(state[0],action,reward,info,done,value)
-                loss = None
+                agent.store_transition(state,action,reward,info,done,value)
 
+                global_step += 1
+                if done:
+                    logger.info(f"  Episode 结束 (info={info})")
+                    break
+
+            loss = None
             # 更新参数
             if agent.should_start_training():
                 loss = agent.update()
@@ -94,8 +105,6 @@ def main():
             # 打印关键信息
             if global_step % train_config["log_interval"] == 0:
                 logger.info(f"第 {episode} 轮完成，总奖励: {total_reward:.2f}")
-                logger.info(
-                    f"  Step {global_step}: reward={reward['total_reward']:.3f}, total={total_reward:.2f}")
                 if 'speed' in info:
                     logger.info(f"    速度: {info['speed']:.2f} km/h")
                 if loss is not None:
@@ -106,10 +115,6 @@ def main():
                     })
                     history.append(loss)
 
-            global_step += 1
-            if done:
-                logger.info(f"  Episode 结束 (info={info})")
-                break
             episode += 1
 
             # 保存模型

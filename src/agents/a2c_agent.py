@@ -73,7 +73,7 @@ class A2CAgent(BaseAgent):
         """
         with torch.no_grad():
             # 转为tensor
-            obs_tensor = torch.from_numpy(obs[0]).to(self.device).float()
+            obs_tensor = torch.from_numpy(obs).to(self.device).float()
             if deterministic:
                 action_scaled, log_prob, action_mean = self.actor(obs_tensor)
                 action = action_mean
@@ -85,7 +85,7 @@ class A2CAgent(BaseAgent):
 
     def calculate_value(self, obs: Any):
         with torch.no_grad():
-            obs_tensor = torch.from_numpy(obs[0]).to(self.device).float()
+            obs_tensor = torch.from_numpy(obs).to(self.device).float()
             return self.critic(obs_tensor).cpu().detach().numpy()
 
     def update(self) -> Dict[str, float]:
@@ -93,24 +93,24 @@ class A2CAgent(BaseAgent):
         标准 A2C 单步更新。
         输入应为一个 rollout batch: [B, ...]
         """
-        obs_list,act_list,rew_list,info,done_list,values = zip(*self.n_step_batch())
+        obs_list,act_list,rew_list,info,done_list,values_list = zip(*self.n_step_batch())
 
         # 转 tensor
         obs = torch.as_tensor(np.array(obs_list), dtype=torch.float32, device=self.device)
         actions = torch.as_tensor(np.array(act_list), dtype=torch.float32, device=self.device)
         rewards = torch.as_tensor(np.asarray(rew_list), dtype=torch.float32, device=self.device)
         dones = torch.as_tensor(done_list, dtype=torch.bool, device=self.device)
-        values = torch.as_tensor(np.array(values), dtype=torch.float32, device=self.device)
+        values = torch.as_tensor(np.array(values_list), dtype=torch.float32, device=self.device)
 
         # 计算 n-step TD 回报
-        returns = self.compute_nstep_returns(rewards, dones, values, self.gamma, 5)
-        advantages = returns - values  # A_t = R_t^{(n)} - V(s_t)
+        returns = self.compute_nstep_returns(rew_list, done_list, values_list, self.gamma, 5)
+        advantages = torch.as_tensor(np.array(returns - values_list), dtype=torch.float32, device=self.device)  # A_t = R_t^{(n)} - V(s_t)
         target_values = self.critic(obs)
 
         # 动作评估
         log_probs, entropy = self.actor.evaluate_actions(obs, actions)
         # 损失
-        actor_loss = -(log_probs * advantages.detach()).mean()
+        actor_loss = -(log_probs * advantages).mean()
         critic_loss = nn.functional.mse_loss(values, target_values)
         entropy_mean = entropy.mean()
 
@@ -241,7 +241,7 @@ class A2CAgent(BaseAgent):
         # 将 next_value 加到末尾，方便索引
         extended_values = values
         extended_rewards = np.concatenate([rewards, np.zeros(n_steps)])
-        extended_dones = np.concatenate([dones, np.ones(n_steps)])  # 假设后面都终止（安全）
+        extended_dones = np.concatenate([dones, np.ones(n_steps)])
 
         for t in range(T):
             R = 0.0

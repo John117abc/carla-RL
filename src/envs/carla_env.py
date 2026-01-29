@@ -29,7 +29,7 @@ logger = get_logger(name='carla_env')
 class CarlaEnv(gym.Env):
     """
     CARLA 环境封装，兼容 Gymnasium 0.28+。
-    支持连续/离散动作空间，多模态观测（图像 + 测量值）。
+    支持连续/离散动作空间，多模态观测。
     """
 
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 20}
@@ -633,11 +633,16 @@ class CarlaEnv(gym.Env):
                 # SUMO + CARLA 同步模式：先同步数据，再推进 CARLA
                 self.synchronization.tick()
                 self.world.tick()
+                # 清理sumo的actors
+                if self.step_count +1 % 1000 == 0:
+                    self._cleanup_finished_vehicles()
             else:
                 self.world.tick()
         else:
             if self.enable_sumo:
                 self.synchronization.tick()
+                if self.step_count +1 % 1000 == 0:
+                    self._cleanup_finished_vehicles()
             else:
                 self.world.wait_for_tick()
 
@@ -684,6 +689,80 @@ class CarlaEnv(gym.Env):
                 pass  # 或者 logger.debug(f"跳过已销毁车辆 {v.id}: {e}")
 
         logger.info(f"已销毁 {destroyed_count} 辆周车（共尝试 {len(npc_vehicles)} 辆）")
+
+    def _cleanup_finished_vehicles(self):
+        """
+        安全清理已完成行程的 SUMO 背景车辆及其 CARLA 映射。
+        适用于长期 RL 训练，防止内存溢出和同步崩溃。
+        """
+        try:
+            # 获取当前所有 SUMO 车辆 ID
+            sumo_vehicle_ids = traci.vehicle.getIDList()
+        except Exception as e:
+            print(f"[Cleanup] Failed to get SUMO vehicle list: {e}")
+            return
+
+        # 主车标识前缀
+        EGO_PREFIXES = ("ego")
+
+        for veh_id in sumo_vehicle_ids:
+            # 跳过主车
+            if any(veh_id.startswith(prefix) for prefix in EGO_PREFIXES):
+                continue
+
+            try:
+                # 判断车辆是否“已完成”
+                # 检查是否在最后一条 edge 上（通用，兼容旧版 SUMO）
+                route = traci.vehicle.getRoute(veh_id)
+                current_edge = traci.vehicle.getRoadID(veh_id)
+
+                if not route or not current_edge:
+                    # 车辆可能已 teleport 到无效 edge（如 ':xxx'），视为可清理
+                    should_remove = True
+                else:
+                    # 检查当前 edge 是否是 route 的最后一个
+                    last_edge = route[-1]
+                    second_last_edge = route[-2] if len(route) >= 2 else last_edge
+                    should_remove = (current_edge == last_edge or current_edge == second_last_edge)
+
+                # 检查速度是否接近 0（防止未到终点但堵死）
+                if should_remove:
+                    speed = traci.vehicle.getSpeed(veh_id)
+                    if speed > 1.0:  # 还在移动，暂不删
+                        should_remove = False
+
+                # 执行安全移除
+                if should_remove:
+                    # 1. 销毁 CARLA 对应的 actor
+                    if hasattr(self, 'sumo2carla_ids') and veh_id in self.sumo2carla_ids:
+                        carla_id = self.sumo2carla_ids[veh_id]
+                        try:
+                            carla_actor = self.carla_world.get_actor(carla_id)
+                            if carla_actor is not None and carla_actor.is_alive:
+                                carla_actor.destroy()
+                        except Exception as e:
+                            print(f"[Cleanup] Failed to destroy CARLA actor {carla_id}: {e}")
+
+                        # 清理双向映射
+                        self.sumo2carla_ids.pop(veh_id, None)
+                        if hasattr(self, 'carla2sumo_ids'):
+                            self.carla2sumo_ids.pop(carla_id, None)
+
+                    # 从 SUMO 移除车辆
+                    try:
+                        traci.vehicle.remove(veh_id, reason=traci.constants.REMOVE_ARRIVED)
+                        traci.vehicle.unsubscribe(veh_id)  # 取消订阅，减少开销
+                        print(f"[Cleanup] Removed finished vehicle: {veh_id}")
+                    except traci.exceptions.TraCIException:
+                        pass  # 可能已被移除
+
+            except traci.exceptions.TraCIException as e:
+                # 车辆可能在检查后瞬间被 SUMO 删除（race condition）
+                print(f"[Cleanup] Vehicle {veh_id} disappeared during cleanup: {e}")
+                continue
+            except Exception as e:
+                print(f"[Cleanup] Unexpected error for {veh_id}: {e}")
+                continue
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
         super().reset(seed=seed)
