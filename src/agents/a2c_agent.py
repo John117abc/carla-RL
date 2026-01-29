@@ -66,40 +66,46 @@ class A2CAgent(BaseAgent):
         self.global_step = 0
 
 
-    def select_action(self, obs: Any, deterministic: bool = False) -> np.ndarray:
+    def select_action(self, obs: Any, deterministic: bool = False):
         """
         根据观测选择动作。
         训练时返回随机动作和 log_prob；评估时返回均值。
         """
         with torch.no_grad():
-            obs_tensor = torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
+            # 转为tensor
+            obs_tensor = torch.from_numpy(obs[0]).to(self.device).float()
             if deterministic:
-                _, _, action_mean = self.actor(obs_tensor)
+                action_scaled, log_prob, action_mean = self.actor(obs_tensor)
                 action = action_mean
             else:
                 action, log_prob, _ = self.actor(obs_tensor)
             action = action.cpu().numpy().flatten()
-        return np.clip(action, self.action_space.low, self.action_space.high)
+            log_prob = log_prob.cpu().numpy().flatten()
+        return np.clip(action, self.action_space.low, self.action_space.high),log_prob
+
+    def calculate_value(self, obs: Any):
+        with torch.no_grad():
+            obs_tensor = torch.from_numpy(obs[0]).to(self.device).float()
+            return self.critic(obs_tensor).cpu().detach().numpy()
 
     def update(self) -> Dict[str, float]:
         """
         标准 A2C 单步更新。
         输入应为一个 rollout batch: [B, ...]
         """
-        obs_list,act_list,rew_list,info,done_list,next_state = zip(*self.n_step_batch())
+        obs_list,act_list,rew_list,info,done_list,values = zip(*self.n_step_batch())
 
         # 转 tensor
         obs = torch.as_tensor(np.array(obs_list), dtype=torch.float32, device=self.device)
         actions = torch.as_tensor(np.array(act_list), dtype=torch.float32, device=self.device)
         rewards = torch.as_tensor(np.asarray(rew_list), dtype=torch.float32, device=self.device)
         dones = torch.as_tensor(done_list, dtype=torch.bool, device=self.device)
-        next_obs = torch.as_tensor(np.array(next_state), dtype=torch.float32, device=self.device)
+        values = torch.as_tensor(np.array(values), dtype=torch.float32, device=self.device)
 
-        # 计算 returns 和 advantages
-        values = self.critic(obs)
-        next_values = self.critic(next_obs)
-        target_values = rewards + self.gamma * next_values * (1 - dones.float())
-        advantages = target_values - values
+        # 计算 n-step TD 回报
+        returns = self.compute_nstep_returns(rewards, dones, values, self.gamma, 5)
+        advantages = returns - values  # A_t = R_t^{(n)} - V(s_t)
+        target_values = self.critic(obs)
 
         # 动作评估
         log_probs, entropy = self.actor.evaluate_actions(obs, actions)
@@ -173,7 +179,7 @@ class A2CAgent(BaseAgent):
             episode_reward = 0.0
             done = False
             while not done:
-                action = self.select_action(obs, deterministic=True)
+                action,_ = self.select_action(obs, deterministic=True)
                 obs, reward, terminated, truncated, _ = self.env.step(action)
                 episode_reward += reward
                 done = terminated or truncated
@@ -181,8 +187,8 @@ class A2CAgent(BaseAgent):
         return float(np.mean(total_rewards)), float(np.std(total_rewards))
 
     # 存储记录
-    def store_transition(self, state,action,reward,info,done,next_state):
-        self.buffer.append((state,action,reward,info,done,next_state))
+    def store_transition(self, state,action,reward,info,done,value):
+        self.buffer.append((state,action,reward,info,done,value))
         if len(self.buffer) > self.total_capacity:
             self.buffer.pop(0)
 
@@ -217,6 +223,42 @@ class A2CAgent(BaseAgent):
 
     def clean_mem(self):
         self.buffer.clear()
+
+    def compute_nstep_returns(self,rewards, dones, values, gamma, n_steps):
+        """
+        计算 n-step TD 回报 R_t^{(n)} = r_t + γr_{t+1} + ... + γ^{n-1}r_{t+n-1} + γ^n V(s_{t+n})
+        输入:
+            rewards: [T]       (T = ROLLOUT_STEPS)
+            dones:   [T]       (bool, 表示是否终止)
+            values:  [T]       (V(s_t))
+            gamma: discount factor
+            n_steps: n
+        输出:
+            returns: [T]       (每个 t 对应的 n-step 回报，若超出则用更短的)
+        """
+        T = len(rewards)
+        returns = np.zeros(T)
+        # 将 next_value 加到末尾，方便索引
+        extended_values = values
+        extended_rewards = np.concatenate([rewards, np.zeros(n_steps)])
+        extended_dones = np.concatenate([dones, np.ones(n_steps)])  # 假设后面都终止（安全）
+
+        for t in range(T):
+            R = 0.0
+            discount = 1.0
+            # 最多往前看 n_steps 步，但不能超过 T
+            steps = min(n_steps, T - t)
+            for i in range(steps):
+                R += discount * extended_rewards[t + i]
+                discount *= gamma
+                if extended_dones[t + i]:  # 如果提前终止，不再加后续奖励或 bootstrap
+                    break
+            else:
+                # 如果没有 break（即未提前终止），加上 bootstrap 项
+                if not extended_dones[t + steps - 1]:
+                    R += discount * extended_values[t + steps]
+            returns[t] = R
+        return returns
 
     def unpack_observation(self, obs: Union[List, np.ndarray], batched: bool = False):
         """

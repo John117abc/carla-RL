@@ -75,47 +75,41 @@ def main():
             logger.info(f"初始观测类型: {type(state)}, 形状/结构: {get_obs_shape(state)}")
             total_reward = 0.0
             done = False
-            states, actions, rewards, infos, dones,next_states = [], [], [], [], [], []
             while not done:
-                action = agent.select_action(state)
+                action,_ = agent.select_action(state)
+                value = agent.calculate_value(state)
                 next_obs, reward, _, _, info = env.step(action)
                 next_state = next_obs['measurements']
                 done = info['TimeLimit.truncated']
                 total_reward += reward
-                # 数据加入buffer
-                actions.append(action)
-                states.append(state)
-                rewards.append(reward)
-                infos.append(info)
-                dones.append(done)
-                next_states.append(next_state)
-
                 state = next_state
 
-                # 更新参数
-                agent.store_transition(state,action,reward,info,done,next_state)
+                agent.store_transition(state[0],action,reward,info,done,value)
                 loss = None
-                if agent.should_start_training():
-                    loss = agent.update()
 
-                # 打印关键信息
-                if global_step % train_config["log_interval"] == 0:
-                    logger.info(f"第 {episode} 轮完成，总奖励: {total_reward:.2f}")
-                    logger.info(f"  Step {global_step}: reward={reward['total_reward']:.3f}, total={total_reward:.2f}")
-                    if 'speed' in info:
-                        logger.info(f"    速度: {info['speed']:.2f} km/h")
-                    if loss is not None:
-                        logger.info(f"训练损失: actor_loss:{loss['actor_loss']:.5f},critic_loss:{loss['critic_loss']:.5f}")
-                        loss.update({
-                            'global_step': global_step
-                        })
-                        history.append(loss)
+            # 更新参数
+            if agent.should_start_training():
+                loss = agent.update()
 
-                global_step += 1
-                if done:
-                    logger.info(f"  Episode 结束 (info={info})")
-                    break
+            # 打印关键信息
+            if global_step % train_config["log_interval"] == 0:
+                logger.info(f"第 {episode} 轮完成，总奖励: {total_reward:.2f}")
+                logger.info(
+                    f"  Step {global_step}: reward={reward['total_reward']:.3f}, total={total_reward:.2f}")
+                if 'speed' in info:
+                    logger.info(f"    速度: {info['speed']:.2f} km/h")
+                if loss is not None:
+                    logger.info(
+                        f"训练损失: actor_loss:{loss['actor_loss']:.5f},critic_loss:{loss['critic_loss']:.5f}")
+                    loss.update({
+                        'global_step': global_step
+                    })
+                    history.append(loss)
 
+            global_step += 1
+            if done:
+                logger.info(f"  Episode 结束 (info={info})")
+                break
             episode += 1
 
             # 保存模型
