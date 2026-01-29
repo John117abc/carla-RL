@@ -395,8 +395,13 @@ class SumoSimulation(object):
         Accessor for sumo actor.
         """
         results = traci.vehicle.getSubscriptionResults(actor_id)
-
+        if results is None:
+            # 车辆已从 SUMO 中移除
+            return None
         type_id = results[traci.constants.VAR_TYPE]
+        if type_id is None:
+            print(f"Warning: Vehicle {actor_id} missing VAR_TYPE, skipping.")
+            return None
         vclass = SumoActorClass(results[traci.constants.VAR_VEHICLECLASS])
         color = results[traci.constants.VAR_COLOR]
 

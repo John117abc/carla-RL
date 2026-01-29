@@ -170,6 +170,11 @@ class SimulationSynchronization(object):
 
             carla_actor = self.carla.get_actor(carla_actor_id)
             sumo_actor = self.sumo.get_actor(sumo_actor_id)
+            if sumo_actor is None:
+                # 车辆已消失，从映射中移除，避免后续再查
+                if sumo_actor_id in self.sumo2carla_ids:
+                    del self.sumo2carla_ids[sumo_actor_id]
+                continue  # 跳过该车辆同步
 
             sumo_transform = BridgeHelper.get_sumo_transform(carla_actor.get_transform(),
                                                              carla_actor.bounding_box.extent)
