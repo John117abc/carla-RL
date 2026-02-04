@@ -65,7 +65,7 @@ def main():
             checkpoint = agent.load(train_config["model_path_a2c"])
             if not env.is_eval:
                 # 读取归一化参数
-                env.ocp_normalizer.load_state_dict(checkpoint['meas_normalizer'])
+                env.meas_normalizer.load_state_dict(checkpoint['meas_normalizer'])
 
         logger.info("环境创建成功！")
         logger.info(f"观测空间: {env.observation_space}")
@@ -119,7 +119,7 @@ def main():
 
             # 保存模型
             if episode % train_config["save_freq"] == 0:
-                logger.info(f"开始保存模型：  Step {global_step}: reward={reward['total_reward']:.3f}, total={total_reward:.2f}")
+                logger.info(f"开始保存模型：  Step {global_step}, total={total_reward:.2f}")
                 save_info = {
                     'rl_config':rl_config,
                     'global_step':global_step,

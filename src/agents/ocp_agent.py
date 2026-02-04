@@ -103,16 +103,14 @@ class OcpAgent(BaseAgent):
 
         actor_losses = []
         critic_targets = []
-        initial_states = []
-
+        state_alls = []
         for traj in trajectories:
             # traj 包含: init_s, states, actions, refs, etc.
             total_cost = 0
             total_constraint = 0
             s_all, s_ego, s_other, s_road, s_ref = self.unpack_observation(traj.states,True)
 
-            action, log_prob, _ = self.actor(s_all)
-            old_log_prob = torch.from_numpy(np.asarray(traj.log_probs)).to(self.device).float()
+            action, _, _ = self.actor(s_all)
 
             # 跟踪消耗
             tracking_diff = s_ego - s_ref
@@ -120,8 +118,8 @@ class OcpAgent(BaseAgent):
             tracking = (tracking_diff * Q_diag * tracking_diff).sum()
 
             # 控制消耗，
-            # R_diag = torch.from_numpy(np.diag(self.R_matrix)).to(self.device).float()
-            control = (log_prob - old_log_prob).sum()
+            R_diag = torch.from_numpy(np.diag(self.R_matrix)).to(self.device).float()
+            control = (action * R_diag * action).sum()
 
             total_cost += (tracking + control)
 
@@ -152,8 +150,9 @@ class OcpAgent(BaseAgent):
             actor_loss = total_cost + self.init_penalty * total_constraint
             actor_losses.append(actor_loss)
 
-            initial_states.append(traj.initial_state)
             critic_targets.append(total_cost)
+            state_alls.append(s_all.detach())
+
 
         # Actor更新
         actor_loss = torch.stack(actor_losses).mean()
@@ -162,8 +161,7 @@ class OcpAgent(BaseAgent):
         self.actor_optimizer.step()
 
         # Critic更新
-        initial_state = torch.from_numpy(initial_states[0][0]).to(self.device).float()
-        critic_pred = self.critic(initial_state).squeeze()
+        critic_pred = self.critic(torch.cat(state_alls, dim=0)).squeeze()
         critic_target = torch.tensor(critic_targets, device=self.device)
         critic_loss = F.mse_loss(critic_pred, critic_target)
 

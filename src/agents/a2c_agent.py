@@ -89,31 +89,36 @@ class A2CAgent(BaseAgent):
             return self.critic(obs_tensor).cpu().detach().numpy()
 
     def update(self) -> Dict[str, float]:
-        """
-        标准 A2C 单步更新。
-        输入应为一个 rollout batch: [B, ...]
-        """
-        obs_list,act_list,rew_list,info,done_list,values_list = zip(*self.n_step_batch())
+        batch = self.n_step_batch()
+        if not batch:
+            return {}  # 或 raise
 
-        # 转 tensor
+        obs_list, act_list, rew_list, info_list, done_list, values_list = zip(*batch)
+
+        # 确保 reward 是标量
+        rewards = np.array([r if isinstance(r, (int, float)) else r.get('total_reward', 0.0) for r in rew_list],
+                           dtype=np.float32)
+        dones = np.array(done_list, dtype=bool)
+        values = np.array(values_list, dtype=np.float32)
+
         obs = torch.as_tensor(np.array(obs_list), dtype=torch.float32, device=self.device)
         actions = torch.as_tensor(np.array(act_list), dtype=torch.float32, device=self.device)
-        rewards = torch.as_tensor(np.asarray(rew_list), dtype=torch.float32, device=self.device)
-        dones = torch.as_tensor(done_list, dtype=torch.bool, device=self.device)
-        values = torch.as_tensor(np.array(values_list), dtype=torch.float32, device=self.device)
 
-        # 计算 n-step TD 回报
-        returns = self.compute_nstep_returns(rew_list, done_list, values_list, self.gamma, 5)
-        advantages = torch.as_tensor(np.array(returns - values_list), dtype=torch.float32, device=self.device)  # A_t = R_t^{(n)} - V(s_t)
-        target_values = self.critic(obs)
+        # 计算 n-step returns
+        returns = self.compute_nstep_returns(rewards, dones, values, self.gamma, n_steps=5)
+        returns = torch.as_tensor(returns, dtype=torch.float32, device=self.device)
 
-        # 动作评估
+        # Critic loss: fit to returns
+        current_values = self.critic(obs).squeeze(-1)
+        critic_loss = nn.functional.mse_loss(current_values, returns)
+
+        # Actor loss
         log_probs, entropy = self.actor.evaluate_actions(obs, actions)
-        # 损失
+        advantages = returns - current_values.detach()  # 使用当前 critic 估计的 V(s) 更一致（可选）
+        # 或者仍用 old values: advantages = returns - torch.as_tensor(values, device=self.device)
         actor_loss = -(log_probs * advantages).mean()
-        critic_loss = nn.functional.mse_loss(values, target_values)
-        entropy_mean = entropy.mean()
 
+        # 优化
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
         torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
@@ -124,12 +129,14 @@ class A2CAgent(BaseAgent):
         torch.nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
         self.critic_optimizer.step()
 
+        self.clean_mem()  # 关键！清空 buffer
+
         return {
             "actor_loss": actor_loss.item(),
             "critic_loss": critic_loss.item(),
-            "entropy": entropy_mean.item(),
+            "entropy": entropy.mean().item(),
             "advantage_mean": advantages.mean().item(),
-            "value_mean": values.mean().item(),
+            "value_mean": current_values.mean().item(),
         }
 
     def save(self,save_info: Dict[str, Any]) -> None:
