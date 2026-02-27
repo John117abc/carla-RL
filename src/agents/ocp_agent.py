@@ -8,9 +8,10 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
+import statistics
+
 from typing import Dict, Any, Tuple,List, Union
 
-from numpy import generic, ndarray, dtype
 
 from .base_agent import BaseAgent
 from src.models.advantage_actor_critic import ActorNetwork, CriticNetwork
@@ -162,7 +163,8 @@ class OcpAgent(BaseAgent):
 
         # Critic更新
         critic_pred = self.critic(torch.cat(state_alls, dim=0)).squeeze()
-        critic_target = torch.tensor(critic_targets, device=self.device)
+        critic_target = torch.stack(critic_targets).mean(dim=0).view(-1).detach()
+        logger.info(f'critic_pred:{critic_pred.shape},critic_target:{critic_target.shape}')
         critic_loss = F.mse_loss(critic_pred, critic_target)
 
         self.critic_optimizer.zero_grad()

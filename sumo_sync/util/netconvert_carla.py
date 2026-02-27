@@ -33,7 +33,7 @@ import lxml.etree as ET  # pylint: disable=import-error
 if 'SUMO_HOME' in os.environ:
     sys.path.append(os.path.join(os.environ['SUMO_HOME'], 'tools'))
 else:
-    sys.exit("please declare environment variable 'SUMO_HOME'")
+    sys.exit("2please declare environment variable 'SUMO_HOME'")
 
 # ==================================================================================================
 # -- imports ---------------------------------------------------------------------------------------

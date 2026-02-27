@@ -14,7 +14,7 @@ def get_logger(
         log_dir: str = "logs",
         level: int = logging.INFO,
         use_console: bool = True,
-        use_file: bool = True
+        use_file: bool = False
 ):
     """
     获取 logger，将同一天、同一模块的日志写入同一个文件。

@@ -23,10 +23,10 @@ import time
 # -- find traci module -----------------------------------------------------------------------------
 # ==================================================================================================
 
-if 'SUMO_HOME' in os.environ:
-    sys.path.append(os.path.join(os.environ['SUMO_HOME'], 'tools'))
-else:
-    sys.exit("please declare environment variable 'SUMO_HOME'")
+# if 'SUMO_HOME' in os.environ:
+#     sys.path.append(os.path.join(os.environ['SUMO_HOME'], 'tools'))
+# else:
+#     sys.exit("3please declare environment variable 'SUMO_HOME'")
 
 # ==================================================================================================
 # -- sumo integration imports ----------------------------------------------------------------------
