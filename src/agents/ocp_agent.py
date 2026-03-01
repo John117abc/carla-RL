@@ -229,7 +229,7 @@ class OcpAgent(BaseAgent):
                 if step % action_repeat == 0:
                     action,_ = self.select_action(obs['ocp_obs'])
                 obs, reward, terminated, truncated, _ = self.env.step(action)
-                episode_reward += reward['total_reward']
+                episode_reward += reward
                 # 不计算环境步，按照只有碰撞才停止
                 done = terminated
                 step +=1

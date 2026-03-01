@@ -38,7 +38,7 @@ class CarlaEnv(gym.Env):
         self,
         carla_config: Dict[str, Any],
         env_config: Dict[str, Any],
-        sumo_config: Dict[str, Any],
+        sumo_config: Dict[str, Any] = None,
         render_mode: Optional[str] = None,
         is_eval: bool = False
     ):

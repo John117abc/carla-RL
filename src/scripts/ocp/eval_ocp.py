@@ -33,6 +33,7 @@ def main():
         render_mode=None,
         carla_config=carla_config,
         env_config=env_config,
+        sumo_config=None,
         is_eval = True
     )
     try:
