@@ -5,14 +5,14 @@ rl:
   # 通用超参
   seed: 42
   num_envs: 1                  # 并行环境数
-  num_episodes: 100    # 训练回合数
+  num_episodes: 5000    # 训练回合数
   total_timesteps: 1_000_000
   log_interval: 100               # 每多少步记录一次日志
-  save_freq: 10            # 每多少回合保存一次模型
+  save_freq: 100            # 每多少回合保存一次模型
   continue_a2c: True    # 是否继续训练，如果需要继续训练，则需要填写模型地址
   model_path_a2c: 'checkpoints/20260131/a2c-v1.0_Town06_Opt_020547_episode=4000.pth'
   continue_ocp: False    # 是否继续训练，如果需要继续训练，则需要填写模型地址
-  model_path_ocp: 'checkpoints/20260228/ocp-v1.0_Town06_Opt_220144_episode=300.pth'
+  model_path_ocp: 'checkpoints/20260301/ocp-v1.0_Town06_Opt_200919_episode=180.pth'
   num_eps_eval: 10    # 评估步数
 
   A2C:
@@ -30,7 +30,7 @@ rl:
   OCP:
     gamma: 0.95
     amplifier_c: 1.1
-    amplifier_m: 10000 # x更新一次m
+    amplifier_m: 1000000 # x更新一次m
     lr_actor: 3e-4
     lr_critic: 1e-3
     init_penalty: 1.0  # 初始惩罚系数

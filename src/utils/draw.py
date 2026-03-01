@@ -29,9 +29,9 @@ class Plotter:
         """绘制训练过程中各个指标的变化情况"""
         # 绘制总奖励随轮次变化的图表
         plt.figure(figsize=(10, 6))
-        actor_loss = [s['actor_loss'] for s in self.history[0]]
-        critic_loss = [s['critic_loss'] for s in self.history[0]]
-        global_step = [s['global_step'] for s in self.history[0]]
+        actor_loss = [s['actor_loss'] for s in self.history]
+        critic_loss = [s['critic_loss'] for s in self.history]
+        global_step = [s['global_step'] for s in self.history]
         plt.plot(global_step, actor_loss, label='actor 损失', color='green')
         plt.xlabel('step')
         plt.ylabel('actor_loss')
