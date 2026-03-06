@@ -8,16 +8,17 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-import statistics
 
 from typing import Dict, Any, Tuple,List, Union
 
 
 from .base_agent import BaseAgent
 from src.models.advantage_actor_critic import ActorNetwork, CriticNetwork
-from src.utils import save_checkpoint,load_checkpoint
+from src.models.bicycle import BicycleModel
+from src.utils import save_checkpoint,load_checkpoint,normalize_ocp_scenario_relative
 from src.buffer import TrajectoryBuffer
 from src.utils import get_logger
+from src.carla_utils import update_other_context
 
 logger = get_logger('ocp_agent')
 
@@ -43,8 +44,10 @@ class OcpAgent(BaseAgent):
         self.ocp_config = rl_config['rl'][rl_algorithm]
 
         # 网络
+        self.dt = self.ocp_config['dt']
         self.actor = ActorNetwork(self.observation_space['ocp_obs'], self.action_space, hidden_dim=self.ocp_config['hidden_dim']).to(self.device)
         self.critic = CriticNetwork(self.observation_space['ocp_obs'],hidden_dim=self.ocp_config['hidden_dim']).to(self.device)
+        self.dynamics_model = BicycleModel(dt=self.dt, L=2.9).to(self.device)
 
         # 优化器
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.ocp_config['lr_actor'],betas=(0.9, 0.999))
@@ -72,6 +75,9 @@ class OcpAgent(BaseAgent):
         # 采样数量
         self.batch_size = self.ocp_config['batch_size']
 
+        # 预测步数
+        self.horizon = self.ocp_config['horizon']
+
         # 初始化缓冲区
         self.buffer = TrajectoryBuffer(min_start_train = self.ocp_config['min_start_train'],
                                        total_capacity = self.ocp_config['total_capacity'])
@@ -98,165 +104,148 @@ class OcpAgent(BaseAgent):
             log_prob = log_prob.cpu().numpy().flatten()
         return np.clip(action, self.action_space.low, self.action_space.high),log_prob
 
-    def update_one_step(self,one_step_stata):
-        s_all = torch.from_numpy(np.array(one_step_stata[0], dtype=np.float32)).to(self.device)
-        s_ego = torch.from_numpy(np.array(one_step_stata[1][0], dtype=np.float32)).to(self.device)
-        s_other = torch.from_numpy(np.array(one_step_stata[1][1], dtype=np.float32)).to(self.device)
-        s_road = torch.from_numpy(np.array(one_step_stata[1][2], dtype=np.float32)).to(self.device)
-        s_ref = torch.from_numpy(np.array(one_step_stata[1][3], dtype=np.float32)).to(self.device)
-
-        action, _, _ = self.actor(s_all)
-
-        # 跟踪消耗
-        tracking_diff = s_ego - s_ref
-        Q_diag = torch.from_numpy(np.diag(self.Q_matrix)).to(self.device).float()
-        tracking = (tracking_diff * Q_diag * tracking_diff).sum()
-
-        # 控制消耗
-        R_diag = torch.from_numpy(np.diag(self.R_matrix)).to(self.device).float()
-        control = (action * R_diag * action).sum()
-
-        total_cost = (tracking + control)
-
-        rel_pos_car = s_ego - s_other
-        M_xy = torch.from_numpy(np.diag(self.M_matrix)).to(self.device).float()
-        dist_sq_car = (rel_pos_car * M_xy * rel_pos_car).sum()
-        g_car = dist_sq_car - self.other_car_min_distance ** 2
-        ge_car = torch.relu(-g_car)
-
-        # 道路约束
-        rel_pos_road = s_ego - s_road
-        dist_sq_road = (rel_pos_road * M_xy * rel_pos_road).sum()
-        g_road = dist_sq_road - self.road_min_distance ** 2
-        ge_road = torch.relu(-g_road)
-
-        total_constraint = (ge_car + ge_road)
-
-        actor_loss = total_cost + self.init_penalty * total_constraint
-
-        # Actor更新
-        self.actor_optimizer.zero_grad()
-        actor_loss.backward()
-        self.actor_optimizer.step()
-
-        # Critic更新
-        critic_pred = self.critic(s_all).squeeze()
-        critic_target = total_cost.detach()
-        critic_loss = F.mse_loss(critic_pred, critic_target)
-
-        self.critic_optimizer.zero_grad()
-        critic_loss.backward()
-        self.critic_optimizer.step()
-        return {
-            "actor_loss": actor_loss.detach().item(),
-            "critic_loss": critic_loss.detach().item()
-        }
 
     def update(self):
-        # 1. 采样 N 条完整轨迹
-        trajectories = self.buffer.sample_batch(self.batch_size)
-
-        all_states = []
-        all_targets = []  # 存储每个状态对应的“剩余代价”
-        all_actions = []
+        # 1. 从 Buffer 采样 N 个【初始状态】 (Initial States)
+        # 形状: [Batch_Size, State_Dim]
+        # 这些 s_0 包含了 ego, other, road, ref 的初始信息
+        batch_s0 = self.buffer.sample_batch(self.batch_size)
 
         actor_loss_sum = 0
+        critic_inputs = []
+        critic_targets = []
 
-        for traj in trajectories:
-            # 解包数据 (假设 traj.states 是 [T, Dim])
-            s_all, s_ego, s_other, s_road, s_ref = self.unpack_observation(traj.states, True)
-            T = s_all.shape[0]  # 轨迹长度
+        # # 动态调整 GEP 惩罚系数 rho
+        # if self.global_step % self.m == 0:
+        #     self.rho *= self.c
+        # self.global_step += 1
 
-            # 获取动作 (重新通过 Actor 生成，确保计算图连通，或者用 traj.actions)
-            # 为了训练 Actor，我们需要梯度流过 action，所以必须 re-forward
-            actions, _, _ = self.actor(s_all)  # [T, Action_Dim]
+        for s_0 in batch_s0:
+            # --- 核心步骤：在计算图中进行轨迹推演 (Rollout) ---
+            # 我们需要一个可微的动力学模型 (Differentiable Dynamics Model)
+            # 这个模型通常是简单的自行车模型 (Bicycle Model)，可以用 PyTorch 轻松实现
 
-            # --- 计算每一步的即时代价 (Instant Cost) ---
-            tracking_diff = s_ego - s_ref
-            # 建议将 Q_diag, R_diag, M_xy 注册为 buffer 并在 init 时转到 device，避免循环内反复创建
-            Q_diag = torch.from_numpy(np.diag(self.Q_matrix)).to(self.device).float()
-            R_diag = torch.from_numpy(np.diag(self.R_matrix)).to(self.device).float()
-            M_xy = torch.from_numpy(np.diag(self.M_matrix)).to(self.device).float()
+            s_all, s_ego, s_other, s_road, s_ref = self.unpack_observation(s_0.states, True)
 
-            tracking = (tracking_diff * Q_diag * tracking_diff).sum(dim=1)  # [T]
-            control = (actions * R_diag * actions).sum(dim=1)  # [T]
-            instant_cost = tracking + control  # [T]
+            current_s = [s_all, s_ego, s_other, s_road, s_ref]
 
-            # --- 计算每一步的即时约束 ---
-            rel_pos_car = s_ego.unsqueeze(1) - s_other  # [T, N_other, Dim]
-            # 注意：这里假设 s_other 包含所有周围车辆，需要聚合 (例如取最小距离)
-            # 原代码直接 sum，这里保留原逻辑，但需注意维度
-            dist_sq_car = (rel_pos_car * M_xy * rel_pos_car).sum(dim=-1)  # [T, N_other]
-            dist_sq_car_min = dist_sq_car.min(dim=1)[0]  # 取最近的車 [T]
+            # 初始化
+            trajectory_actions = []
+            trajectory_states = []  # 存储每一步完整的 state_all (Tensor)
 
-            g_car = dist_sq_car_min - self.other_car_min_distance ** 2
-            ge_car = F.relu(-g_car)  # [T]
+            # 【关键修改】：初始状态 s_init 应该是已经准备好的 Tensor (cat 好的)
+            # 假设 s_init 是 t=0 时的 state_all
+            current_state_all = s_all.clone()  # 确保是可导的副本
+            current_ego_state = s_ego.clone()
+            current_other_state = s_other.clone()
 
-            rel_pos_road = s_ego - s_road
-            dist_sq_road = (rel_pos_road * M_xy * rel_pos_road).sum(dim=1)  # [T]
-            g_road = dist_sq_road - self.road_min_distance ** 2
-            ge_road = F.relu(-g_road)  # [T]
+            # 如果需要固定的参考线/道路信息作为全局上下文，可以在循环外定义
+            # 如果是随时间变化的参考线，需要有一个函数 get_ref(t) 来获取，而不是直接读数组
+            # 假设 ref_trajectory 是一个预先定义好的 Tensor [horizon+1, dim]
+            # road_info 同理
+            dt = torch.tensor(self.dt)
+            for t in range(self.horizon):
+                # --- A. Actor 生成动作 ---
+                # 输入必须是 Tensor
+                action, _, _ = self.actor(current_state_all)
+                trajectory_actions.append(action)
 
-            instant_constraint = ge_car + ge_road  # [T]
+                # --- B. 动力学推演 (核心梯度路径) ---
 
-            # --- 计算剩余代价 (Cost-to-Go) ---
-            # Target for Critic at time t: sum(cost[k] for k in t...T)
-            # 使用 cumsum 倒序计算
-            total_cost_traj = instant_cost + self.init_penalty * instant_constraint  # [T]
+                # 1. 自车动力学 (确保输出是 Tensor 且保留梯度)
+                next_ego_state = self.dynamics_model(current_ego_state, action).view(-1)
 
-            # flip -> cumsum -> flip 得到每个时刻的剩余和
-            remaining_cost = torch.flip(torch.cumsum(torch.flip(total_cost_traj, dims=[0]), dim=0), dims=[0])
+                # 2. 周车动力学 (⚠️高危区：必须确保此函数内部无 numpy/detach)
+                # 建议将 dt 也作为 tensor 传入，或者确保函数内部纯 torch 运算
+                next_other_state = update_other_context(current_other_state, t, dt)
+                # 如果 update_other_context 返回的是 list，记得转 tensor: torch.tensor(..., device=self.device)
+                if isinstance(next_other_state, list):
+                    next_other_state = torch.stack(next_other_state).to(self.device).view(-1)
 
-            # --- 构建 Actor Loss ---
-            # 论文中 Actor 是最小化整条轨迹的总代价
-            # 我们这里对整条轨迹的总 Loss 求平均，避免梯度随轨迹长度爆炸
-            trajectory_total_loss = total_cost_traj.sum()
-            actor_loss_sum += trajectory_total_loss
+                # 3. 获取下一时刻的道路/参考信息
+                # ⚠️注意：这里不能直接读 s_all_t[...][t+1]，除非那是静态参考线。
+                # 如果是预测轨迹中的相对道路，需要根据 next_ego_state 重新计算相对位置！
+                # 假设我们有函数 get_next_road_info(absolute_ego_state, t+1)
+                next_road_state = get_next_road_info(next_ego_state, t + 1)  # 伪代码，需实现为可导函数
+                next_ref_state = get_next_ref_info(next_ego_state, t + 1)  # 伪代码
 
-            # --- 构建 Critic 训练数据 ---
-            # 状态：s_all [T, Dim]
-            # 目标：remaining_cost [T] (从 t 到结束的总代价)
-            all_states.append(s_all)
-            all_targets.append(remaining_cost)
-            all_actions.append(actions)
+                # --- C. 构建下一时刻的完整状态 (State Construction) ---
 
-        # 2. 合并 Batch
-        states_batch = torch.cat(all_states, dim=0)  # [B*T, Dim]
-        targets_batch = torch.cat(all_targets, dim=0)  # [B*T]
-        # actions_batch = torch.cat(all_actions, dim=0)   # 如果 Critic 需要 action
+                # 展平所有部分
+                state_ego_flat = next_ego_state.view(-1)
+                state_other_flat = next_other_state.view(-1)
+                state_road_flat = next_road_state.view(-1)
+                state_ref_flat = next_ref_state.view(-1)
 
-        # 归一化 Loss (除以轨迹总步数)，防止长轨迹梯度爆炸
-        num_total_steps = states_batch.shape[0]
-        actor_loss = actor_loss_sum / num_total_steps
+                # 拼接成新的 state_all (这是传递给下一步 actor 的输入)
+                next_state_all = torch.cat([
+                    state_ego_flat,
+                    state_other_flat,
+                    state_road_flat,
+                    state_ref_flat
+                ], dim=0)
 
-        # 3. Actor 更新
+                # --- D. 更新变量，进入下一轮 ---
+                trajectory_states.append(next_state_all)
+
+                # 更新当前状态指针
+                current_state_all = next_state_all
+                current_ego_state = next_ego_state
+                current_other_state = next_other_state
+
+            # 循环结束后，trajectory_states 包含了 t=1 到 t=horizon 的状态
+            # trajectory_actions 包含了 t=0 到 t=horizon-1 的动作
+
+                # --- 此时，我们得到了一条由【当前网络参数】生成的完整轨迹 ---
+            # 这条轨迹是“活”的，梯度可以贯穿始终
+
+            # 2. 计算代价 (Cost)
+            # 将列表转为 Tensor
+            states_traj = torch.stack(trajectory_states[:-1])  # [T, Dim]
+            actions_traj = torch.stack(trajectory_actions)  # [T, Dim]
+
+            # 计算 tracking, control, constraint
+            # 注意：所有计算必须使用 torch 操作
+            # 跟踪消耗
+            # tracking_diff = states_traj[1] - s_ref
+            # Q_diag = torch.from_numpy(np.diag(self.Q_matrix)).to(self.device).float()
+            # tracking = (tracking_diff * Q_diag * tracking_diff).sum()
+            #
+            instant_cost = self.compute_instant_cost(states_traj, actions_traj)
+            instant_penalty = self.compute_constraints(states_traj)  # 记得平方 **2
+
+            # GEP 目标函数: J = sum(cost) + rho * sum(penalty)
+            total_loss = instant_cost.sum() + self.rho * instant_penalty.sum()
+
+            actor_loss_sum += total_loss
+
+            # 3. 准备 Critic 数据
+            # Critic 输入：初始状态 s_0
+            # Critic 目标：这条生成轨迹的总代价 (detach)
+            critic_inputs.append(s_0)
+            critic_targets.append(total_loss.detach())
+
+        # --- 优化步骤 ---
+        # Actor Update
+        actor_loss = actor_loss_sum / self.batch_size
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
-        # 【关键】梯度裁剪，防止长时序累积梯度爆炸
         torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.0)
         self.actor_optimizer.step()
 
-        # 4. Critic 更新
-        # 预测：V(s)
-        critic_pred = self.critic(states_batch).squeeze()  # [B*T]
-
-        # 目标：剩余代价 (已 detach)
-        critic_target = targets_batch.detach()
-
-        # 可选：对 Target 进行归一化或缩放，使其与 Pred 量级匹配
-        # 如果训练不稳定，可以打印一下 target 的均值看看是否过大
-
-        critic_loss = F.mse_loss(critic_pred, critic_target)
+        # Critic Update
+        inputs_batch = torch.stack(critic_inputs)
+        targets_batch = torch.stack(critic_targets)
+        pred = self.critic(inputs_batch).squeeze()
+        critic_loss = F.mse_loss(pred, targets_batch)
 
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=1.0)
         self.critic_optimizer.step()
 
         return {
             "actor_loss": actor_loss.item(),
-            "critic_loss": critic_loss.item(),
-            "avg_trajectory_cost": (targets_batch[0::int(num_total_steps / self.batch_size)]).mean().item()  # 粗略估算首状态代价
+            "critic_loss": critic_loss.item()
         }
 
     def save(self,save_info: Dict[str, Any]) -> None:

@@ -11,8 +11,8 @@ rl:
   save_freq: 100            # 每多少回合保存一次模型
   continue_a2c: True    # 是否继续训练，如果需要继续训练，则需要填写模型地址
   model_path_a2c: 'checkpoints/20260131/a2c-v1.0_Town06_Opt_020547_episode=4000.pth'
-  continue_ocp: False    # 是否继续训练，如果需要继续训练，则需要填写模型地址
-  model_path_ocp: 'checkpoints/20260301/ocp-v1.0_Town06_Opt_200919_episode=180.pth'
+  continue_ocp: True    # 是否继续训练，如果需要继续训练，则需要填写模型地址
+  model_path_ocp: 'checkpoints/20260303/ocp-v1.0_Town06_Opt_084829_episode=4600.pth'
   num_eps_eval: 10    # 评估步数
 
   A2C:
@@ -30,7 +30,7 @@ rl:
   OCP:
     gamma: 0.95
     amplifier_c: 1.1
-    amplifier_m: 1000000 # x更新一次m
+    amplifier_m: 10000 # x更新一次m
     lr_actor: 3e-4
     lr_critic: 1e-3
     init_penalty: 1.0  # 初始惩罚系数
@@ -40,4 +40,6 @@ rl:
     road_min_distance: 0.5    # 与路边缘最小距离
     min_start_train: 2    # 最小启动训练样本数(轨迹数)
     total_capacity: 50000  # 缓冲区容量(轨迹数)
-    batch_size: 4     # 每批次计算4条轨迹
+    batch_size: 2     # 批次取样数量
+    horizon: 30 # 预测步数
+    dt: 0.1 # 步长

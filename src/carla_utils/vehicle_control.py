@@ -5,6 +5,7 @@ CARLA 强化学习环境中的车辆控制工具模块。
 
 import carla
 import math
+import torch
 import numpy as np
 
 
@@ -188,3 +189,43 @@ def world_to_vehicle_frame(velocity: carla.Vector3D, transform: carla.Transform)
 #     vx, vy = v.x, v.y
 #     lateral = -vx * math.sin(yaw_rad) + vy * math.cos(yaw_rad)
 #     return lateral
+
+
+def update_other_context(initial_obs_states, t, dt):
+    """
+    简单预测周围车辆状态 (Constant Velocity Model).
+    这不是一个可学习的模型，只是一个几何计算。
+
+    Args:
+        initial_obs_states: [Batch, N_obs, 6] (x, y, vx, vy, psi, omega) - 来自 s_0
+        t: 当前时间步索引
+        dt: 时间步长
+
+    Returns:
+        current_obs_states: [Batch, N_obs, 6]
+    """
+    # 提取初始速度和航向
+    # 假设在短时域内，他车速度和航向不变
+    vx = initial_obs_states[:, :, 2]
+    vy = initial_obs_states[:, :, 3]
+
+    # 简单线性外推: pos(t) = pos(0) + v * t_total
+    # 注意：这里直接用总时间 t*dt 从初始位置推算，比一步步累加误差更小
+    total_time = t * dt
+
+    x_init = initial_obs_states[:, :, 0]
+    y_init = initial_obs_states[:, :, 1]
+
+    x_curr = x_init + vx * total_time
+    y_curr = y_init + vy * total_time
+
+    # 其他状态 (vx, vy, psi, omega) 假设保持不变
+    # 如果需要考虑他车也在转向，可以加上 omega * total_time 到 psi 上
+    psi_init = initial_obs_states[:, :, 4]
+    omega_init = initial_obs_states[:, :, 5]
+    psi_curr = psi_init + omega_init * total_time
+
+    # 重组状态
+    current_obs_states = torch.stack([x_curr, y_curr, vx, vy, psi_curr, omega_init], dim=-1)
+
+    return current_obs_states

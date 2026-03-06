@@ -10,7 +10,7 @@ from typing import Dict, Any, Tuple, Optional, Union, List
 
 from src.envs.sensors import CameraSensor, CollisionSensor, LaneInvasionSensor,ObstacleSensor,IMUSensor
 from src.carla_utils import get_compass,world_to_vehicle_frame,RoutePlanner,get_ocp_observation
-from src.utils import get_logger,RunningNormalizer,normalize_ocp__scenario_relative
+from src.utils import get_logger,RunningNormalizer,normalize_ocp_scenario_relative
 from src.configs.constant import (LAYERS_TO_REMOVE_1,
                                   LAYERS_TO_REMOVE_2,
                                   LAYERS_TO_REMOVE_3,
@@ -419,13 +419,13 @@ class CarlaEnv(gym.Env):
         if "ocp_obs" in self.env_cfg["obs_type"]:
             # 获取ocp观察信息
             ocp_obs = get_ocp_observation(self.vehicle,self.imu_sensor,self.actors,self.path_locations,self.world.get_map())
-            normalize_ocp = normalize_ocp__scenario_relative(ocp_obs)
-            state_ego_flat = np.asarray(normalize_ocp[0])
-            state_other_flat = np.asarray(normalize_ocp[1]).flatten()
-            state_road_flat = np.asarray(normalize_ocp[2])
-            state_ref_flat = np.asarray(normalize_ocp[3])
+            # normalize_ocp = normalize_ocp_scenario_relative(ocp_obs)
+            state_ego_flat = np.asarray(ocp_obs[0])
+            state_other_flat = np.asarray(ocp_obs[1]).flatten()
+            state_road_flat = np.asarray(ocp_obs[2])
+            state_ref_flat = np.asarray(ocp_obs[3])
             state_all = np.concatenate([state_ego_flat,state_other_flat,state_road_flat,state_ref_flat], axis=0)
-            obs["ocp_obs"] = [state_all,normalize_ocp]
+            obs["ocp_obs"] = [state_all,ocp_obs]
             # 如果是debug模式，在训练页面上显示和各个点的连线
             if self._ocp_debug:
                 self._debug_ocp(ocp_obs)
@@ -876,8 +876,8 @@ class CarlaEnv(gym.Env):
             self.vehicle.destroy()
             self.vehicle = None
 
-        if self.enable_sumo:
-            self.synchronization.close()
+        # if self.enable_sumo:
+            # self.synchronization.close()
 
         # 恢复异步模式
         if self.carla_cfg["sync_mode"]:
