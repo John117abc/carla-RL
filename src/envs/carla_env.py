@@ -9,8 +9,8 @@ import math
 from typing import Dict, Any, Tuple, Optional, Union, List
 
 from src.envs.sensors import CameraSensor, CollisionSensor, LaneInvasionSensor,ObstacleSensor,IMUSensor
-from src.carla_utils import get_compass,world_to_vehicle_frame,RoutePlanner,get_ocp_observation
-from src.utils import get_logger,RunningNormalizer,normalize_ocp_scenario_relative
+from src.carla_utils import get_compass,world_to_vehicle_frame,RoutePlanner,get_ocp_observation,get_current_lane_forward_edges
+from src.utils import get_logger,RunningNormalizer
 from src.configs.constant import (LAYERS_TO_REMOVE_1,
                                   LAYERS_TO_REMOVE_2,
                                   LAYERS_TO_REMOVE_3,
@@ -193,9 +193,13 @@ class CarlaEnv(gym.Env):
         # 初始化路径规划器
         self.route_planner = None
         self.path_locations = None
+        self.ref_path_xy = None
 
         # 路径id
         self.current_path_id = 0
+
+        # 静态道路坐标
+        self.static_road_xy = None
 
     def _init_notice_str_world(self):
         location = self.vehicle.get_location()
@@ -657,6 +661,10 @@ class CarlaEnv(gym.Env):
         reward = self._compute_reward(lane_inv,collision,obstacle)
         terminated, truncated, info = self._check_termination(lane_inv,collision,obstacle)
         info.update(reward)
+        # 把ref路径信息和static路径信息存到info中
+        info['ref_path_xy'] = self.ref_path_xy
+        left_pts, right_pts = get_current_lane_forward_edges(self.vehicle,self.world)
+        info['static_road_xy'] = [[[item1.x, item1.y], [item2.x, item2.y]] for item1, item2 in zip(left_pts, right_pts)]
         return obs, reward['total_reward'], terminated, truncated, info
 
     def _destroy_all_sensors(self):
@@ -903,6 +911,7 @@ class CarlaEnv(gym.Env):
                     life_time=60.0
                 )
         self.path_locations = path_locations
+        self.ref_path_xy = [[item.x, item.y] for item in path_locations]
         logger.info(f"路径规划成功！已规划{len(path_locations)}个坐标点")
 
     @property

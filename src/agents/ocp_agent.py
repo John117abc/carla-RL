@@ -15,10 +15,10 @@ from typing import Dict, Any, Tuple,List, Union
 from .base_agent import BaseAgent
 from src.models.advantage_actor_critic import ActorNetwork, CriticNetwork
 from src.models.bicycle import BicycleModel
-from src.utils import save_checkpoint,load_checkpoint,normalize_ocp_scenario_relative
+from src.utils import save_checkpoint,load_checkpoint
 from src.buffer import TrajectoryBuffer
 from src.utils import get_logger
-from src.carla_utils import update_other_context
+from src.carla_utils import predict_ref_next_torch,predict_other_next,predict_road_torch
 
 logger = get_logger('ocp_agent')
 
@@ -138,6 +138,9 @@ class OcpAgent(BaseAgent):
             current_state_all = s_all.clone()  # 确保是可导的副本
             current_ego_state = s_ego.clone()
             current_other_state = s_other.clone()
+            # 因为每条轨迹的参考路径从第一次规划就确定了，所以取s_0.infos[0]
+            current_ref_xy = torch.tensor(s_0.infos[0]['ref_path_xy'],dtype=torch.float32).to(self.device)
+            current_static_road_xy = torch.tensor([item['static_road_xy'][0] for item in s_0.infos],dtype=torch.float32).to(self.device)
 
             # 如果需要固定的参考线/道路信息作为全局上下文，可以在循环外定义
             # 如果是随时间变化的参考线，需要有一个函数 get_ref(t) 来获取，而不是直接读数组
@@ -147,30 +150,26 @@ class OcpAgent(BaseAgent):
             for t in range(self.horizon):
                 # --- A. Actor 生成动作 ---
                 # 输入必须是 Tensor
-                action, _, _ = self.actor(current_state_all)
+                action, _, _ = self.actor(current_state_all[0])
                 trajectory_actions.append(action)
 
                 # --- B. 动力学推演 (核心梯度路径) ---
 
                 # 1. 自车动力学 (确保输出是 Tensor 且保留梯度)
-                next_ego_state = self.dynamics_model(current_ego_state, action).view(-1)
+                next_ego_state = self.dynamics_model(current_ego_state[0], action)
 
-                # 2. 周车动力学 (⚠️高危区：必须确保此函数内部无 numpy/detach)
-                # 建议将 dt 也作为 tensor 传入，或者确保函数内部纯 torch 运算
-                next_other_state = update_other_context(current_other_state, t, dt)
+                # 2. 周车动力学
+                next_other_state = predict_other_next(current_other_state[0], t, dt)
                 # 如果 update_other_context 返回的是 list，记得转 tensor: torch.tensor(..., device=self.device)
                 if isinstance(next_other_state, list):
                     next_other_state = torch.stack(next_other_state).to(self.device).view(-1)
 
                 # 3. 获取下一时刻的道路/参考信息
-                # ⚠️注意：这里不能直接读 s_all_t[...][t+1]，除非那是静态参考线。
-                # 如果是预测轨迹中的相对道路，需要根据 next_ego_state 重新计算相对位置！
-                # 假设我们有函数 get_next_road_info(absolute_ego_state, t+1)
-                next_road_state = get_next_road_info(next_ego_state, t + 1)  # 伪代码，需实现为可导函数
-                next_ref_state = get_next_ref_info(next_ego_state, t + 1)  # 伪代码
-
+                ego_x = next_ego_state[:,0][0].unsqueeze(0)
+                ego_y = next_ego_state[:,1][0].unsqueeze(0)
+                next_road_state = predict_road_torch(ego_x,ego_y,current_static_road_xy)
+                next_ref_state = predict_ref_next_torch(ego_x,ego_y, current_ref_xy.unsqueeze(0))
                 # --- C. 构建下一时刻的完整状态 (State Construction) ---
-
                 # 展平所有部分
                 state_ego_flat = next_ego_state.view(-1)
                 state_other_flat = next_other_state.view(-1)
@@ -189,9 +188,9 @@ class OcpAgent(BaseAgent):
                 trajectory_states.append(next_state_all)
 
                 # 更新当前状态指针
-                current_state_all = next_state_all
-                current_ego_state = next_ego_state
-                current_other_state = next_other_state
+                current_state_all = next_state_all.unsqueeze(0)
+                current_ego_state = next_ego_state.unsqueeze(0)
+                current_other_state = next_other_state.unsqueeze(0)
 
             # 循环结束后，trajectory_states 包含了 t=1 到 t=horizon 的状态
             # trajectory_actions 包含了 t=0 到 t=horizon-1 的动作
@@ -207,7 +206,7 @@ class OcpAgent(BaseAgent):
             # 计算 tracking, control, constraint
             # 注意：所有计算必须使用 torch 操作
             # 跟踪消耗
-            # tracking_diff = states_traj[1] - s_ref
+            # tracking_diff = s_ref - states_traj[1]
             # Q_diag = torch.from_numpy(np.diag(self.Q_matrix)).to(self.device).float()
             # tracking = (tracking_diff * Q_diag * tracking_diff).sum()
             #
@@ -215,14 +214,14 @@ class OcpAgent(BaseAgent):
             instant_penalty = self.compute_constraints(states_traj)  # 记得平方 **2
 
             # GEP 目标函数: J = sum(cost) + rho * sum(penalty)
-            total_loss = instant_cost.sum() + self.rho * instant_penalty.sum()
+            total_loss = instant_cost.sum() + self.init_penalty * instant_penalty.sum()
 
             actor_loss_sum += total_loss
 
             # 3. 准备 Critic 数据
             # Critic 输入：初始状态 s_0
             # Critic 目标：这条生成轨迹的总代价 (detach)
-            critic_inputs.append(s_0)
+            critic_inputs.append(s_all.clone()[0])
             critic_targets.append(total_loss.detach())
 
         # --- 优化步骤 ---
@@ -247,6 +246,49 @@ class OcpAgent(BaseAgent):
             "actor_loss": actor_loss.item(),
             "critic_loss": critic_loss.item()
         }
+
+    def compute_instant_cost(self,states_traj,actions_traj):
+        """
+        计算控制消耗
+        :param states_traj: 状态信息
+        :param actions_traj: 动作信息
+        :return:
+        """
+        # 还原自车，周车，道路，参考信息
+        s_ego, s_other, s_road, s_ref = self.unpack_tensor(data=states_traj)
+
+        # 跟踪消耗
+        tracking_diff = s_ref - s_ego
+        Q_diag = torch.from_numpy(np.diag(self.Q_matrix)).to(self.device).float()
+        tracking = (tracking_diff * Q_diag * tracking_diff).sum()
+
+        # 控制消耗，
+        R_diag = torch.from_numpy(np.diag(self.R_matrix)).to(self.device).float()
+        control = (actions_traj * R_diag * actions_traj)
+
+        total_cost = (tracking + control)
+
+        return total_cost
+
+    def compute_constraints(self,states_traj):
+        # 还原自车，周车，道路，参考信息
+        s_ego, s_other, s_road, s_ref = self.unpack_tensor(data=states_traj)
+
+        rel_pos_car = s_ego.unsqueeze(1) - s_other
+        M_xy = torch.from_numpy(np.diag(self.M_matrix)).to(self.device).float()
+        dist_sq_car = (rel_pos_car * M_xy * rel_pos_car).sum()
+        g_car = dist_sq_car - self.other_car_min_distance ** 2
+        ge_car = torch.relu(-g_car)
+
+        # 道路约束
+        rel_pos_road = s_ego - s_road
+        dist_sq_road = (rel_pos_road * M_xy * rel_pos_road)
+        g_road = dist_sq_road - self.road_min_distance ** 2
+        ge_road = torch.relu(-g_road)
+
+        total_constraint = (ge_car + ge_road)
+
+        return total_constraint
 
     def save(self,save_info: Dict[str, Any]) -> None:
         """
@@ -411,3 +453,38 @@ class OcpAgent(BaseAgent):
         # constraint = self.init_penalty * (ge_car.mean() + ge_road.mean())
         constraint = ge_car.mean() + ge_road.mean()
         return l_current,constraint
+
+
+    def unpack_tensor(self,data: torch.Tensor):
+        """
+        解包形状为 [N, 66] 的 Tensor。
+
+        参数:
+            data (torch.Tensor): 输入 tensor，形状应为 [N, 66]
+
+        返回:
+            tuple: (ego_state, neighbor_states, road_state, ref_state)
+                - ego_state: [N, 6]
+                - neighbor_states: [N, 8, 6]
+                - road_state: [N, 6] (根据索引 54:60 计算得出)
+                - ref_state: [N, 6] (根据索引 60:66 计算得出)
+
+        """
+        if data.dim() != 2 or data.shape[1] != 66:
+            raise ValueError(f"输入 Tensor 形状必须为 [N, 66]，当前形状为 {data.shape}")
+
+        # 1. Ego 状态: 索引 [0, 6) -> 长度 6
+        ego_state = data[:, 0:6]  # Shape: [N, 6]
+
+        # 2. 周车状态: 索引 [6, 54) -> 长度 48 -> Reshape 为 [N, 8, 6]
+        neighbor_raw = data[:, 6:54]
+        other_states = neighbor_raw.view(neighbor_raw.shape[0], 8, 6)  # Shape: [N, 8, 6]
+
+        # 3. 道路状态: 索引 [54, 60) -> 长度 6
+        road_state = data[:, 54:60]  # Shape: [N, 6]
+
+        # 4. 参考状态: 索引 [60, 66) -> 长度 6
+        # 用户描述形状为 [6]，但 66-59=7。此处按索引切片。
+        ref_state = data[:, 60:66]  # Shape: [N, 6]
+
+        return ego_state, other_states, road_state, ref_state
