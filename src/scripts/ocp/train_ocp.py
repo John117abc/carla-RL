@@ -7,6 +7,8 @@
 import os
 import numpy as np
 import cv2
+import torch
+
 from src.utils import (load_config,get_logger,
                        setup_code_environment)
 from src.agents import OcpAgent
@@ -83,7 +85,7 @@ def main():
             states, actions, rewards, infos ,log_probs= [], [], [], [],[]
             initial_state = state.copy()
             while not done:
-                action,log_prob = agent.select_action(state)
+                action = agent.actor(torch.tensor(state[0],dtype=torch.float32).to(device)).cpu().detach().numpy()
                 next_obs, reward, _, _, info = env.step(action)
                 next_state = next_obs['ocp_obs']
                 done = info['collision'] or info['off_route'] or info['TimeLimit.truncated']
@@ -92,50 +94,38 @@ def main():
                 actions.append(action)
                 states.append(state[1])
                 rewards.append(reward)
-                log_probs.append(log_prob)
                 infos.append(info)
                 state = next_state
 
                 # 更新惩罚参数
                 agent.update_penalty(env.step_count)
+                # 加入buffer
+                agent.buffer.handle_new_experience((state, action, reward, _, done, info))
+
+                # 更新参数
+                loss = None
+                if agent.buffer.should_start_training():
+                    loss = agent.update()
+
                 # 打印关键信息
                 if global_step % train_config["log_interval"] == 0:
                     logger.info(f"  Step {global_step}: reward={reward:.3f}, total={total_reward:.2f}")
                     if 'speed' in info:
                         logger.info(f"    速度: {info['speed']:.2f} km/h")
 
+                    if loss is not None:
+                        logger.info(
+                            f"训练损失: actor_loss:{loss['actor_loss']:.5f},critic_loss:{loss['critic_loss']:.5f},"
+                            f"惩罚参数：{agent.init_penalty:.5f}")
+                        loss.update({
+                            'global_step': global_step
+                        })
+                        history.append(loss)
+
                 if done:
                     logger.info(f"  Episode 结束 (info={info})")
                     break
                 global_step += 1
-
-            # 计算 total_cost 和 total_constraint
-            total_cost, total_constraint = agent.compute_total_cost_and_constraint(states, actions)
-            trajectory = Trajectory(initial_state=initial_state,
-                                    states=states,actions=actions,
-                                    rewards=rewards,
-                                    infos=infos,
-                                    total_cost=total_cost,
-                                    total_constraint=total_constraint,
-                                    path_id=env.current_path_id,
-                                    horizon=len(states),
-                                    log_probs = log_probs)
-            # 加入buffer
-            agent.buffer.handle_new_trajectory(trajectory)
-
-            # 更新参数
-            loss = None
-            if agent.buffer.should_start_training():
-                loss = agent.update()
-            logger.info(f"第 {episode} 轮完成，总奖励: {total_reward:.2f}")
-
-            if loss is not None:
-                logger.info(f"训练损失: actor_loss:{loss['actor_loss']:.5f},critic_loss:{loss['critic_loss']:.5f},"
-                            f"惩罚参数：{agent.init_penalty:.5f}")
-                loss.update({
-                    'global_step': global_step
-                })
-                history.append(loss)
 
             episode += 1
 

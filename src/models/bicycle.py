@@ -64,8 +64,8 @@ class BicycleModel(nn.Module):
         omega = state[:, 5]
 
         # --- 2. 解包控制并做物理约束 ---
-        accel_cmd = action[:, 0]
-        steer_cmd = action[:, 1]
+        accel_cmd = action[:, 1]
+        steer_cmd = action[:, 0]
 
         # 物理限制 (Clamp 是可微的)
         accel = torch.clamp(accel_cmd, self.min_accel, self.max_accel)
