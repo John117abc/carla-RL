@@ -18,7 +18,7 @@ from src.models.bicycle import BicycleModel
 from src.utils import save_checkpoint,load_checkpoint
 from src.buffer import StochasticBuffer
 from src.utils import get_logger
-from src.carla_utils import predict_ref_next_torch,predict_other_next,predict_road_torch
+from src.carla_utils import get_ref_observation_torch,predict_other_next,get_road_observation_torch
 
 logger = get_logger('ocp_agent')
 
@@ -107,24 +107,26 @@ class OcpAgent(BaseAgent):
 
     def update(self):
         batch_s0 = self.buffer.sample_batch(self.batch_size)
-        actor_loss_sum = 0
+
+        actor_losses = []
         critic_inputs = []
         critic_targets = []
 
         for i, s_0 in enumerate(batch_s0):
             state, action, reward, _, done, info = s_0
-            state_tensor = torch.from_numpy(state[0]).to(self.device).float()
-            state_tensor.requires_grad_(True)
 
-            s0_state = state_tensor
+            # 1. 创建全新的状态张量
+            state_tensor = torch.from_numpy(state[0]).to(self.device).float().requires_grad_(True)
+            s0_state = state_tensor.clone()
+
             ego_state, other_states, road_state, ref_state = self.unpack_tensor(state_tensor.unsqueeze(0))
 
-            current_ref_xy = torch.tensor(info['ref_path_xy'], dtype=torch.float32,
-                                          device=self.device)
-            current_static_road_xy = torch.tensor(info['static_road_xy'], dtype=torch.float32,
-                                                  device=self.device)
             dt = torch.tensor(self.dt, device=self.device)
-
+            # ✅ 修复：clone 确保每个 sample 的参考数据独立
+            current_ref_xy = torch.tensor(info['ref_path_xy'], dtype=torch.float32,
+                                          device=self.device).clone()
+            current_static_road_xy = torch.tensor(info['static_road_xy'], dtype=torch.float32,
+                                                  device=self.device).clone()
             trajectory_actions = []
             trajectory_states = []
 
@@ -135,74 +137,44 @@ class OcpAgent(BaseAgent):
                 next_ego_state = self.dynamics_model(ego_state, action)
                 next_other_state = predict_other_next(other_states, dt)
 
-                ego_x = next_ego_state[:, 0][0].unsqueeze(0)
-                ego_y = next_ego_state[:, 1][0].unsqueeze(0)
+                ego_x = next_ego_state[0:1, 0].clone()
+                ego_y = next_ego_state[0:1, 1].clone()
 
-                next_road_state = predict_road_torch(ego_x, ego_y, current_static_road_xy)
-                next_ref_state = predict_ref_next_torch(ego_x, ego_y, current_ref_xy.unsqueeze(0)).view(1, -1)
+                next_road_state = get_road_observation_torch(ego_x, ego_y, current_static_road_xy.unsqueeze(0))
+                next_ref_state = get_ref_observation_torch(ego_x, ego_y, current_ref_xy.unsqueeze(0)).view(1, -1)
 
-                # ✅ 调试：检查每个状态的梯度
-                if i == 0 and t == 0 and self.global_step % 50 == 0:
-                    print(f"[t={t}] next_ego_state grad: {next_ego_state.requires_grad}")
-                    print(f"[t={t}] next_road_state grad: {next_road_state.requires_grad}")
-                    print(f"[t={t}] next_ref_state grad: {next_ref_state.requires_grad}")
-                    print(f"[t={t}] action grad: {action.requires_grad}")
-
-                state_ego_flat = next_ego_state.view(-1)
-                state_other_flat = next_other_state.view(-1)
-                state_road_flat = next_road_state.view(-1)
-                state_ref_flat = next_ref_state.view(-1)
 
                 next_state_all = torch.cat([
-                    state_ego_flat,
-                    state_other_flat,
-                    state_road_flat,
-                    state_ref_flat
+                    next_ego_state.view(-1),
+                    next_other_state.view(-1),
+                    next_road_state.view(-1),
+                    next_ref_state.view(-1)
                 ], dim=0)
 
                 trajectory_states.append(next_state_all)
-                state_tensor = next_state_all
-                ego_state = next_ego_state
-                other_states = next_other_state
 
-            states_traj = torch.stack(trajectory_states[:-1])
+                # 更新状态用于下一步
+                state_tensor = next_state_all.clone()
+                ego_state = next_ego_state.clone()
+                other_states = next_other_state.clone()
+
+            states_traj = torch.stack(trajectory_states)
             actions_traj = torch.stack(trajectory_actions)
 
             instant_cost = self.compute_instant_cost(states_traj, actions_traj)
             instant_penalty = self.compute_constraints(states_traj)
 
-            total_loss = instant_cost.mean() + self.init_penalty * instant_penalty.mean()
-            actor_loss_sum += total_loss
+            total_loss = instant_cost + self.init_penalty * instant_penalty
+            actor_losses.append(total_loss)
 
             critic_inputs.append(s0_state)
             critic_targets.append(total_loss.detach())
 
-        actor_loss = actor_loss_sum / self.batch_size
+        actor_loss = torch.stack(actor_losses).mean()
 
+        # 2. 反向传播
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
-
-        # ✅ 调试：打印梯度统计
-        if self.global_step % 50 == 0:
-            print("\n=== Actor 梯度统计 ===")
-            total_grad_norm = 0
-            for name, param in self.actor.named_parameters():
-                if param.grad is not None:
-                    grad_norm = param.grad.norm().item()
-                    total_grad_norm += grad_norm ** 2
-                    if grad_norm > 0:
-                        print(f"{name}: grad_norm={grad_norm:.6f}")
-                    else:
-                        print(f"{name}: ⚠️ grad_norm=0.000000")
-            print(f"总梯度范数: {total_grad_norm ** 0.5:.6f}")
-
-            # 检查是否有 NaN/Inf
-            for name, param in self.actor.named_parameters():
-                if param.grad is not None:
-                    if torch.isnan(param.grad).any():
-                        print(f"⚠️ {name} 梯度包含 NaN!")
-                    if torch.isinf(param.grad).any():
-                        print(f"⚠️ {name} 梯度包含 Inf!")
 
         torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.0)
         self.actor_optimizer.step()
@@ -210,64 +182,103 @@ class OcpAgent(BaseAgent):
         # Critic Update
         inputs_batch = torch.stack(critic_inputs)
         targets_batch = torch.stack(critic_targets)
-
-        if inputs_batch.shape[0] != targets_batch.shape[0]:
-            targets_batch = targets_batch.view_as(inputs_batch[:, 0])
-
         pred = self.critic(inputs_batch)
-
-        critic_loss = F.mse_loss(pred, targets_batch)
+        critic_loss = F.mse_loss(pred.squeeze(-1), targets_batch.squeeze(-1))
 
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
         self.critic_optimizer.step()
 
-        return {
-            "actor_loss": actor_loss.item(),
-            "critic_loss": critic_loss.item()
-        }
+        return {"actor_loss": actor_loss.item(), "critic_loss": critic_loss.item()}
 
-    def compute_instant_cost(self,states_traj,actions_traj):
+    def debug_buffer_sample(self):
         """
-        计算控制消耗
-        :param states_traj: 状态信息
-        :param actions_traj: 动作信息
-        :return:
+        诊断 buffer 采样是否返回不同数据
         """
-        # 还原自车，周车，道路，参考信息
+        print("\n=== Buffer 采样诊断 ===")
+
+        batch_s0 = self.buffer.sample_batch(self.batch_size)
+
+        print(f"Batch size: {len(batch_s0)}")
+
+        for i, s_0 in enumerate(batch_s0):
+            state, action, reward, _, done, info = s_0
+
+            print(f"\n[Sample {i}]")
+            print(f"  state[0][:10]: {state[0][:10]}")
+            print(f"  ref_path_xy shape: {info['ref_path_xy'].shape}")
+            print(f"  ref_path_xy[:3]: {info['ref_path_xy'][:3]}")
+            print(f"  static_road_xy shape: {info['static_road_xy'].shape}")
+            print(f"  static_road_xy[0]: {info['static_road_xy'][0]}")
+
+            # 检查是否相同
+            if i > 0:
+                prev_state = batch_s0[i - 1][0][0]
+                curr_state = state[0]
+                if np.allclose(prev_state, curr_state):
+                    print(f"  ⚠️ WARNING: Sample {i} 和 Sample {i - 1} 的 state 完全相同！")
+                else:
+                    print(f"  ✅ Sample {i} 和 Sample {i - 1} 的 state 不同")
+
+    def compute_instant_cost(self, states_traj, actions_traj):
         s_ego, s_other, s_road, s_ref = self.unpack_tensor(data=states_traj)
 
-        # 跟踪消耗
-        tracking_diff = s_ref - s_ego
+        # 1. 分别计算各部分误差，不要合并后再拆分，直接算 Loss
+
+        # --- 线性部分 (x, y, vx, vy, omega) ---
+        indices_linear = [0, 1, 2, 3, 5]
+        diff_linear = s_ref[..., indices_linear] - s_ego[..., indices_linear]
+
+        # --- 角度部分 (psi) ---
+        psi_ref = s_ref[..., 4]
+        psi_ego = s_ego[..., 4]
+        diff_psi = torch.atan2(torch.sin(psi_ego - psi_ref), torch.cos(psi_ego - psi_ref))
+
+        # 2. 分别计算 Loss，然后相加 (避免复杂的 tensor 重组导致的图断裂)
         Q_diag = torch.from_numpy(np.diag(self.Q_matrix).copy()).to(self.device).float()
-        tracking = (tracking_diff * Q_diag * tracking_diff).sum()
 
-        # 控制消耗，
+        # 确保维度匹配
+        if Q_diag.dim() == 1:
+            Q_diag = Q_diag.view(1, 1, -1) if s_ego.dim() == 3 else Q_diag.view(1, -1)
+
+        # ✅ 方法 A：分别加权求和 (最安全)
+        loss_linear = 0.0
+        for i, idx in enumerate(indices_linear):
+            q_val = Q_diag[..., idx]  # 获取对应维度的权重
+            # 注意：如果 Q_diag 是 [..., 6]，直接取 idx 列
+            diff_i = s_ref[..., idx] - s_ego[..., idx]
+            loss_linear += q_val * (diff_i ** 2)
+
+        loss_psi = Q_diag[..., 4] * (diff_psi ** 2)
+
+        tracking = loss_linear.sum() + loss_psi.sum()
+
+        # 控制消耗
         R_diag = torch.from_numpy(np.diag(self.R_matrix).copy()).to(self.device).float()
-        control = (actions_traj * R_diag * actions_traj)
+        if R_diag.dim() == 1:
+            R_diag = R_diag.view(1, 1, -1) if actions_traj.dim() == 3 else R_diag.view(1, -1)
+        control = (actions_traj * R_diag * actions_traj).sum()
 
-        total_cost = (tracking + control)
+        return tracking + control
 
-        return total_cost
-
-    def compute_constraints(self,states_traj):
+    def compute_constraints(self, states_traj):
         # 还原自车，周车，道路，参考信息
         s_ego, s_other, s_road, s_ref = self.unpack_tensor(data=states_traj)
 
+        # 车辆约束
         rel_pos_car = s_ego.unsqueeze(1) - s_other
         M_xy = torch.from_numpy(np.diag(self.M_matrix).copy()).to(self.device).float()
-        dist_sq_car = (rel_pos_car * M_xy * rel_pos_car).sum()
+        dist_sq_car = (rel_pos_car * M_xy * rel_pos_car).sum(dim=-1)  # ✅ 对特征维求和
         g_car = dist_sq_car - self.other_car_min_distance ** 2
-        ge_car = torch.relu(-g_car)
+        ge_car = torch.relu(-g_car).sum()  # ✅ 最后求和
 
-        # 道路约束
+        # 道路约束 ✅ 修复
         rel_pos_road = s_ego - s_road
-        dist_sq_road = (rel_pos_road * M_xy * rel_pos_road)
+        dist_sq_road = (rel_pos_road * M_xy * rel_pos_road).sum(dim=-1)  # ✅ 对特征维求和
         g_road = dist_sq_road - self.road_min_distance ** 2
-        ge_road = torch.relu(-g_road)
+        ge_road = torch.relu(-g_road).sum()  # ✅ 最后求和
 
-        total_constraint = (ge_car + ge_road)
-
+        total_constraint = ge_car + ge_road
         return total_constraint
 
     def save(self,save_info: Dict[str, Any]) -> None:

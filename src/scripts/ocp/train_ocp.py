@@ -123,7 +123,7 @@ def main():
                         history.append(loss)
 
                 if done:
-                    logger.info(f"  Episode 结束 (info={info})")
+                    logger.info(f"  Episode 结束")
                     break
                 global_step += 1
 

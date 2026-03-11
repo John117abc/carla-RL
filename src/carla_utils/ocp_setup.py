@@ -340,15 +340,26 @@ def predict_other_next(initial_obs_states, dt):
     return current_obs_states
 
 
-def predict_ref_next_torch(
-        ego_x: torch.Tensor,  # [B]
-        ego_y: torch.Tensor,  # [B]
-        path_locations: torch.Tensor,  # [N, 2] 或 [B, N, 2]
+def get_ref_observation_torch(
+        ego_x: torch.Tensor,  # [B] 自车 x 坐标
+        ego_y: torch.Tensor,  # [B] 自车 y 坐标
+        path_locations: torch.Tensor,  # [N, 2] 或 [B, N, 2] 参考路径点 (x, y)
         default_longitudinal_velocity: float = 20.0,
         lookahead_offset: int = 4
-):
+) -> torch.Tensor:
     """
-    【简化修复版】针对单步情况 [B] 输入
+    【Tensor 版本】获取自车到参考路径的状态信息，保持梯度流通
+    使用软注意力替代 argmin，所有操作可微分
+
+    Args:
+        ego_x: 自车 x 坐标 [B]
+        ego_y: 自车 y 坐标 [B]
+        path_locations: 参考路径点 [N, 2] 或 [B, N, 2]
+        default_longitudinal_velocity: 默认纵向速度 (m/s)
+        lookahead_offset: 前瞻偏移量
+
+    Returns:
+        torch.Tensor [B, 6]: [x, y, longitudinal_velocity, 0, yaw_deg, 0]
     """
     if path_locations is None or path_locations.shape[-2] < 2:
         return None
@@ -356,53 +367,79 @@ def predict_ref_next_torch(
     B = ego_x.shape[0]
     device = ego_x.device
 
-    # 处理 path_locations 维度
+    # ---------------------------------------------------------
+    # 1. 维度标准化
+    # ---------------------------------------------------------
     if path_locations.dim() == 2:
-        path_locations = path_locations.unsqueeze(0).expand(B, -1, -1)  # [B, N, 2]
+        # [N, 2] -> [B, N, 2]
+        path_locations = path_locations.unsqueeze(0).expand(B, -1, -1).clone()
+    elif path_locations.dim() == 3 and path_locations.shape[0] != B:
+        path_locations = path_locations.unsqueeze(0).expand(B, -1, -1).clone()
 
-    N = path_locations.shape[1]
+    N = path_locations.shape[1]  # 路径点数
 
-    # 计算距离 [B, N]
+    # ---------------------------------------------------------
+    # 2. 计算自车到所有路径点的距离 [B, N]
+    # ---------------------------------------------------------
     ego_coords = torch.stack([ego_x, ego_y], dim=-1).unsqueeze(1)  # [B, 1, 2]
     diff = path_locations - ego_coords  # [B, N, 2]
     dists = torch.sqrt(torch.sum(diff ** 2, dim=-1) + 1e-6)  # [B, N]
 
-    # 软注意力权重
+    # ---------------------------------------------------------
+    # 3. ✅ 软注意力：用距离的倒数作为权重（可微！）
+    # ---------------------------------------------------------
     inverse_dists = 1.0 / (dists + 1e-6)  # [B, N]
     weights = torch.softmax(inverse_dists, dim=-1)  # [B, N]
 
-    # 软前瞻偏移
-    offset_weights = torch.zeros_like(weights)
+    # ---------------------------------------------------------
+    # 4. ✅ 软前瞻偏移：将权重向前偏移 lookahead_offset
+    # ---------------------------------------------------------
+    offset_weights = torch.zeros_like(weights)  # [B, N]
+
+    # 将每个位置 i 的权重移到 i + lookahead_offset
     for i in range(N):
         target_i = min(i + lookahead_offset, N - 1)
         offset_weights[:, target_i] = offset_weights[:, target_i] + weights[:, i]
 
+    # 归一化偏移后的权重
     offset_weights = offset_weights / (offset_weights.sum(dim=-1, keepdim=True) + 1e-6)
 
-    # 加权平均获取目标点
+    # ---------------------------------------------------------
+    # 5. ✅ 加权平均获取目标点坐标（可微！）
+    # ---------------------------------------------------------
     target_pts = torch.sum(offset_weights.unsqueeze(-1) * path_locations, dim=1)  # [B, 2]
 
     x = target_pts[:, 0]  # [B]
     y = target_pts[:, 1]  # [B]
 
-    # 软方式计算航向角
+    # ---------------------------------------------------------
+    # 6. ✅ 软方式计算航向角（可微！）
+    # ---------------------------------------------------------
+    # 创建下一个位置的偏移权重（lookahead_offset + 1）
     next_offset_weights = torch.zeros_like(weights)
     for i in range(N):
         target_i = min(i + lookahead_offset + 1, N - 1)
         next_offset_weights[:, target_i] = next_offset_weights[:, target_i] + weights[:, i]
 
     next_offset_weights = next_offset_weights / (next_offset_weights.sum(dim=-1, keepdim=True) + 1e-6)
+
     next_pts = torch.sum(next_offset_weights.unsqueeze(-1) * path_locations, dim=1)  # [B, 2]
 
-    dx = next_pts[:, 0] - x
-    dy = next_pts[:, 1] - y
-    yaw_rad = torch.atan2(dy, dx)
-    yaw_deg = yaw_rad * (180.0 / 3.141592653589793)
+    dx = next_pts[:, 0] - x  # [B]
+    dy = next_pts[:, 1] - y  # [B]
 
-    # 构建输出 [B, 6]
+    # ✅ 使用 torch.atan2 而不是 math.atan2
+    yaw_rad = torch.atan2(dy, dx)
+    # yaw_deg = yaw_rad * (180.0 / 3.141592653589793)  # ✅ 使用 Python float 常量（没问题，乘法可微）
+    yaw_output = yaw_rad
+    # ---------------------------------------------------------
+    # 7. 构建输出 [B, 6]
+    # ---------------------------------------------------------
     long_vel_tensor = torch.full_like(x, default_longitudinal_velocity)
     zeros = torch.zeros_like(x)
-    result = torch.stack([x, y, long_vel_tensor, zeros, yaw_deg, zeros], dim=-1)  # [B, 6]
+
+    # ✅ 返回 torch.Tensor 而不是 numpy array
+    result = torch.stack([x, y, long_vel_tensor, zeros, yaw_output, zeros], dim=-1)  # [B, 6]
 
     return result
 
@@ -519,46 +556,80 @@ def get_current_lane_forward_edges(vehicle, world, distance=50.0, resolution=0.5
     return left_edges, right_edges
 
 
-def predict_road_torch(
+def get_road_observation_torch(
         ego_x: torch.Tensor,  # [B]
         ego_y: torch.Tensor,  # [B]
-        static_road_xy: torch.Tensor  # [N, 2, 2] (N个点，2个边缘，2个坐标xy)
+        static_road_xy: torch.Tensor,  # [N, 2, 2] 或 [B, N, 2, 2]
 ):
     """
-    【修复版】使用软注意力获取道路信息，保持梯度流通
+    【Agent 侧】使用软注意力获取最近道路边缘点信息，保持梯度流通
+    返回格式兼容原函数：[edge_x, edge_y, 0, 0, 0, 0]
     """
     B = ego_x.shape[0]
     device = ego_x.device
 
-    # 1. 维度对齐与扩展
+    # ---------------------------------------------------------
+    # 1. 维度处理
+    # ---------------------------------------------------------
     if static_road_xy.dim() == 3:
-        road_expanded = static_road_xy.unsqueeze(0).expand(B, -1, -1, -1)  # [B, N, 2, 2]
-    else:
-        raise ValueError(f"Expected static_road_xy dim 3, got {static_road_xy.dim()}")
+        # [N, 2, 2] -> [B, N, 2, 2]
+        static_road_xy = static_road_xy.unsqueeze(0).expand(B, -1, -1, -1).clone()
 
-    # 2. 构造自车坐标 Tensor [B, 1, 1, 2]
-    ego_xy = torch.stack([ego_x, ego_y], dim=-1).view(B, 1, 1, 2)
+    N = static_road_xy.shape[1]  # 道路点数
 
-    # 3. 计算所有点到自车的距离
-    diff = road_expanded - ego_xy  # [B, N, 2, 2]
-    dist_squared = torch.sum(diff ** 2, dim=-1)  # [B, N, 2]
-    dists = torch.sqrt(dist_squared + 1e-6)  # [B, N, 2]
+    # ---------------------------------------------------------
+    # 2. 计算自车到所有道路点的距离 [B, N]
+    # ---------------------------------------------------------
+    ego_coords = torch.stack([ego_x, ego_y], dim=-1).unsqueeze(1)  # [B, 1, 2]
 
-    # 4. ✅ 软注意力：用距离的倒数作为权重（可微！）
-    inverse_dists = 1.0 / (dists + 1e-6)  # [B, N, 2]
+    # 取左右边缘的中点作为道路中心参考
+    road_center = (static_road_xy[:, :, 0, :] + static_road_xy[:, :, 1, :]) / 2  # [B, N, 2]
 
-    # ✅ 关键修复：将 weights 展平为 [B, N*2]
-    weights = torch.softmax(inverse_dists.view(B, -1), dim=-1)  # [B, N*2] = [B, 200]
+    diff = road_center - ego_coords  # [B, N, 2]
+    dists = torch.sqrt(torch.sum(diff ** 2, dim=-1) + 1e-6)  # [B, N]
 
-    # 5. ✅ 加权平均获取道路点（可微！）
-    # 将道路点展平为 [B, N*2, 2]
-    road_points = road_expanded.view(B, -1, 2)  # [B, 200, 2]
+    # ---------------------------------------------------------
+    # 3. ✅ 软注意力：用距离的倒数作为权重（可微！）
+    # ---------------------------------------------------------
+    inverse_dists = 1.0 / (dists + 1e-6)  # [B, N]
+    weights = torch.softmax(inverse_dists, dim=-1)  # [B, N]
 
-    # ✅ 维度对齐：weights [B, 200] -> [B, 200, 1] 与 road_points [B, 200, 2] 相乘
-    weighted_road = torch.sum(weights.unsqueeze(-1) * road_points, dim=1)  # [B, 2]
+    # ---------------------------------------------------------
+    # 4. ✅ 加权平均获取最近边缘点（可微！）
+    # ---------------------------------------------------------
+    # 分别获取左右边缘的加权平均
+    left_edge = torch.sum(weights.unsqueeze(-1) * static_road_xy[:, :, 0, :], dim=1)  # [B, 2]
+    right_edge = torch.sum(weights.unsqueeze(-1) * static_road_xy[:, :, 1, :], dim=1)  # [B, 2]
 
-    # 6. 构造返回值 [B, 6]
-    zeros = torch.zeros((B, 4), device=device, dtype=weighted_road.dtype)
-    result = torch.cat([weighted_road, zeros], dim=1)
+    # 计算自车到左右边缘的距离
+    ego_coords_2d = torch.stack([ego_x, ego_y], dim=-1)  # [B, 2]
+    dist_to_left = torch.sqrt(torch.sum((left_edge - ego_coords_2d) ** 2, dim=-1) + 1e-6)  # [B]
+    dist_to_right = torch.sqrt(torch.sum((right_edge - ego_coords_2d) ** 2, dim=-1) + 1e-6)  # [B]
+
+    # ✅ 软选择：用 sigmoid 权重融合左右边缘（可微！）
+    # 距离近的边缘权重更大
+    edge_select_weight = torch.sigmoid(dist_to_right - dist_to_left)  # [B]
+    # dist_to_right - dist_to_left > 0 说明左边更近，weight > 0.5，更多选择左边缘
+
+    # 加权融合左右边缘
+    nearest_edge = edge_select_weight.unsqueeze(-1) * left_edge + \
+                   (1.0 - edge_select_weight).unsqueeze(-1) * right_edge  # [B, 2]
+
+    edge_x = nearest_edge[:, 0]  # [B]
+    edge_y = nearest_edge[:, 1]  # [B]
+
+    # ---------------------------------------------------------
+    # 5. 构建输出 [B, 6]（兼容原函数格式）
+    # ---------------------------------------------------------
+    zeros = torch.zeros_like(edge_x)
+
+    result = torch.stack([
+        edge_x,  # 道路边缘 x 坐标
+        edge_y,  # 道路边缘 y 坐标
+        zeros,  # 占位
+        zeros,  # 占位
+        zeros,  # 占位
+        zeros  # 占位
+    ], dim=-1)  # [B, 6]
 
     return result
