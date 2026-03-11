@@ -96,17 +96,14 @@ class OcpAgent(BaseAgent):
         with torch.no_grad():
             # 转为tensor
             obs_tensor = torch.from_numpy(obs[0]).to(self.device).float()
-            if deterministic:
-                action_scaled, log_prob, action_mean = self.actor(obs_tensor)
-                action = action_mean
-            else:
-                action, log_prob, _ = self.actor(obs_tensor)
+            action = self.actor(obs_tensor.unsqueeze(0)).squeeze(0)
             action = action.cpu().numpy().flatten()
-            log_prob = log_prob.cpu().numpy().flatten()
-        return np.clip(action, self.action_space.low, self.action_space.high),log_prob
+        return np.clip(action, self.action_space.low, self.action_space.high), np.zeros(1, dtype=np.float32)
 
     def update(self):
         batch_s0 = self.buffer.sample_batch(self.batch_size)
+        if len(batch_s0) == 0:
+            return {"actor_loss": 0.0, "critic_loss": 0.0, "actor_grad_norm": 0.0}
 
         actor_losses = []
         critic_inputs = []
@@ -115,8 +112,11 @@ class OcpAgent(BaseAgent):
         for i, s_0 in enumerate(batch_s0):
             state, action, reward, _, done, info = s_0
 
+            obs_vector = state[0] if isinstance(state, (list, tuple)) else state
+            obs_vector = np.asarray(obs_vector, dtype=np.float32)
+
             # 1. 创建全新的状态张量
-            state_tensor = torch.from_numpy(state[0]).to(self.device).float().requires_grad_(True)
+            state_tensor = torch.from_numpy(obs_vector).to(self.device).float().requires_grad_(True)
             s0_state = state_tensor.clone()
 
             ego_state, other_states, road_state, ref_state = self.unpack_tensor(state_tensor.unsqueeze(0))
@@ -131,7 +131,7 @@ class OcpAgent(BaseAgent):
             trajectory_states = []
 
             for t in range(self.horizon):
-                action = self.actor(state_tensor)
+                action = self.actor(state_tensor.unsqueeze(0)).squeeze(0)
                 trajectory_actions.append(action)
 
                 next_ego_state = self.dynamics_model(ego_state, action)
@@ -175,8 +175,7 @@ class OcpAgent(BaseAgent):
         # 2. 反向传播
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
-
-        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.0)
+        actor_grad_norm = torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.0)
         self.actor_optimizer.step()
 
         # Critic Update
@@ -189,7 +188,11 @@ class OcpAgent(BaseAgent):
         critic_loss.backward()
         self.critic_optimizer.step()
 
-        return {"actor_loss": actor_loss.item(), "critic_loss": critic_loss.item()}
+        return {
+            "actor_loss": actor_loss.item(),
+            "critic_loss": critic_loss.item(),
+            "actor_grad_norm": float(actor_grad_norm.item()) if torch.is_tensor(actor_grad_norm) else float(actor_grad_norm)
+        }
 
     def debug_buffer_sample(self):
         """
@@ -251,13 +254,13 @@ class OcpAgent(BaseAgent):
 
         loss_psi = Q_diag[..., 4] * (diff_psi ** 2)
 
-        tracking = loss_linear.sum() + loss_psi.sum()
+        tracking = loss_linear.mean() + loss_psi.mean()
 
         # 控制消耗
         R_diag = torch.from_numpy(np.diag(self.R_matrix).copy()).to(self.device).float()
         if R_diag.dim() == 1:
             R_diag = R_diag.view(1, 1, -1) if actions_traj.dim() == 3 else R_diag.view(1, -1)
-        control = (actions_traj * R_diag * actions_traj).sum()
+        control = (actions_traj * R_diag * actions_traj).mean()
 
         return tracking + control
 
@@ -270,13 +273,13 @@ class OcpAgent(BaseAgent):
         M_xy = torch.from_numpy(np.diag(self.M_matrix).copy()).to(self.device).float()
         dist_sq_car = (rel_pos_car * M_xy * rel_pos_car).sum(dim=-1)  # ✅ 对特征维求和
         g_car = dist_sq_car - self.other_car_min_distance ** 2
-        ge_car = torch.relu(-g_car).sum()  # ✅ 最后求和
+        ge_car = torch.relu(-g_car).mean()  # ✅ 最后求均值，避免数值随 horizon 暴涨
 
         # 道路约束 ✅ 修复
         rel_pos_road = s_ego - s_road
         dist_sq_road = (rel_pos_road * M_xy * rel_pos_road).sum(dim=-1)  # ✅ 对特征维求和
         g_road = dist_sq_road - self.road_min_distance ** 2
-        ge_road = torch.relu(-g_road).sum()  # ✅ 最后求和
+        ge_road = torch.relu(-g_road).mean()  # ✅ 最后求均值，避免数值随 horizon 暴涨
 
         total_constraint = ge_car + ge_road
         return total_constraint
