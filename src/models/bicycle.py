@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import math
 
 
@@ -40,9 +41,8 @@ class BicycleModel(nn.Module):
                 omega: 横摆角速度 (rad/s)
 
         action : torch.Tensor [Batch, 2]
-                 格式: [accel, steer]
-                 accel: 纵向加速度指令 (m/s^2) (沿车身坐标系)
-                 steer: 前轮转角指令 (rad)
+                 格式: [steer_norm, accel_norm]（与 ActorNet 保持一致）
+                 steer_norm / accel_norm: 归一化动作，范围通常在 [-1, 1]
 
         Returns:
         ---
@@ -62,14 +62,18 @@ class BicycleModel(nn.Module):
         psi = state[:, 4]
         omega = state[:, 5]
 
-        accel_cmd = action[:, 1]
-        steer_cmd = action[:, 0]
+        # 环境观测里 yaw 常为角度制；动力学内部统一用弧度制
+        psi = torch.where(torch.abs(psi) > self.pi_tensor, psi * self.pi_tensor / 180.0, psi)
 
-        accel = torch.clamp(accel_cmd, self.min_accel, self.max_accel)
-        steer = torch.clamp(steer_cmd, -self.max_steer, self.max_steer)
+        steer_norm = torch.tanh(action[:, 0])
+        accel_norm = torch.tanh(action[:, 1])
+
+        # 用平滑仿射映射替代 clamp，避免动作饱和区梯度为 0
+        steer = steer_norm * self.max_steer
+        accel = self.min_accel + 0.5 * (accel_norm + 1.0) * (self.max_accel - self.min_accel)
 
         v_mag = torch.hypot(vx, vy)
-        v_mag = torch.clamp(v_mag, min=1e-2)
+        v_mag = torch.sqrt(v_mag * v_mag + 1e-4)
         tan_steers = torch.tan(steer)
         omega_kin = (v_mag * tan_steers) / self.L_tensor
 
@@ -77,9 +81,9 @@ class BicycleModel(nn.Module):
         x_next = x + vx * self.dt_tensor
         y_next = y + vy * self.dt_tensor
 
-        v_mag_next = v_mag + accel * self.dt_tensor
-        # 防止速度为负 (倒车逻辑需单独处理，这里假设向前)
-        v_mag_next = torch.clamp(v_mag_next, min=0.0)
+        v_mag_next_raw = v_mag + accel * self.dt_tensor
+        # softplus 避免 clamp 造成的梯度截断
+        v_mag_next = F.softplus(v_mag_next_raw, beta=5.0)
 
         psi_next = psi + omega_kin * self.dt_tensor
 
