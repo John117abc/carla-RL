@@ -30,7 +30,7 @@ rl:
   OCP:
     gamma: 0.95
     amplifier_c: 1.1
-    amplifier_m: 10000 # x更新一次m
+    amplifier_m: 100000 # x更新一次m
     lr_actor: 3e-4
     lr_critic: 1e-3
     init_penalty: 1.0  # 初始惩罚系数
@@ -41,5 +41,5 @@ rl:
     min_start_train: 128    # 最小启动训练样本数(轨迹数)
     total_capacity: 500000  # 缓冲区容量(轨迹数)
     batch_size: 2     # 批次取样数量
-    horizon: 1 # 预测步数
-    dt: 0.1 # 步长
+    horizon: 20 # 预测步数
+    dt: 0.5 # 步长

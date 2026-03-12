@@ -664,7 +664,8 @@ class CarlaEnv(gym.Env):
         # 把ref路径信息和static路径信息存到info中
         info['ref_path_xy'] = self.ref_path_xy
         left_pts, right_pts = get_current_lane_forward_edges(self.vehicle,self.world)
-        info['static_road_xy'] = [[[item1.x, item1.y], [item2.x, item2.y]] for item1, item2 in zip(left_pts, right_pts)]
+        info['static_road_left'] = [[item.x, item.y] for item in left_pts]
+        info['static_road_right'] = [[item.x, item.y] for item in right_pts]
         return obs, reward['total_reward'], terminated, truncated, info
 
     def _destroy_all_sensors(self):
@@ -797,6 +798,7 @@ class CarlaEnv(gym.Env):
                 self._spawn_ego_vehicle()
             else:
                 self._spawn_ego_vehicle(BIRTH_POINT[self.env_cfg["world"]["map"]])
+
 
             self._setup_sensors()
 

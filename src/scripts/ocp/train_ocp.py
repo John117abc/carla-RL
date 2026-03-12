@@ -111,7 +111,7 @@ def main():
                 if global_step % train_config["log_interval"] == 0:
                     logger.info(f"  Step {global_step}: reward={reward:.3f}, total={total_reward:.2f}")
                     if 'speed' in info:
-                        logger.info(f"    速度: {info['speed']:.2f} km/h")
+                        logger.info(f"    速度: {info['speed']:.2f} km/h,动作：{action}")
 
                     if loss is not None:
                         logger.info(
