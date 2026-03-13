@@ -5,6 +5,7 @@ CARLA 强化学习环境中的车辆控制工具模块。
 
 import carla
 import math
+import torch
 import numpy as np
 
 
@@ -188,3 +189,6 @@ def world_to_vehicle_frame(velocity: carla.Vector3D, transform: carla.Transform)
 #     vx, vy = v.x, v.y
 #     lateral = -vx * math.sin(yaw_rad) + vy * math.cos(yaw_rad)
 #     return lateral
+
+
+

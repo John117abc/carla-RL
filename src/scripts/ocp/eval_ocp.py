@@ -27,13 +27,17 @@ def main():
     sys_config = load_config('configs/sys.yaml')
     rl_config = load_config('configs/rl.yaml')
     eval_config = rl_config['rl']
+    # 启用sumo控制交通
+    sumo_config = None
+    if env_config['traffic']['enable_sumo']:
+        sumo_config = load_config('configs/sumo.yaml')
     device = setup_code_environment(sys_config)
     logger.info("🚀 正在初始化 CARLA 环境...")
     env = CarlaEnv(
         render_mode=None,
         carla_config=carla_config,
         env_config=env_config,
-        sumo_config=None,
+        sumo_config=sumo_config,
         is_eval = True
     )
     try:

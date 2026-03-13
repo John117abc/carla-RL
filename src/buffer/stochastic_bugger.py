@@ -84,8 +84,8 @@ class SafetyCriticalBuffer(PriorityBuffer):
 
         # 从info中获取安全相关指标
         collision = info.get('collision', False)
-        collision_reward = reward['collision_reward']
-        on_road_reward = reward['centering_reward']
+        collision_reward = info['collision_reward']
+        on_road_reward = info['centering_reward']
         speed = info.get('speed', 0.0)
 
         # 基础安全优先级
@@ -137,7 +137,7 @@ class PerformanceBuffer(PriorityBuffer):
 
         # 从info中获取性能相关指标
         high_speed_reward = reward['high_speed_reward']
-        on_road_reward = reward['centering_reward']
+        on_road_reward = info['centering_reward']
         right_lane_reward = reward['right_lane_reward']
         speed = info.get('speed', 0.0)
 
@@ -211,7 +211,7 @@ class DiversityBuffer(PriorityBuffer):
     def _create_scenario_fingerprint(self, info,reward):
         """创建场景指纹，用于识别不同场景"""
         speed = info.get('speed', 0.0)
-        on_road = reward['centering_reward'] > 0.5
+        on_road = info['centering_reward'] > 0.5
         right_lane = reward['right_lane_reward'] > 0.5
 
         # 速度级别
@@ -227,7 +227,7 @@ class DiversityBuffer(PriorityBuffer):
         lane_type = "right" if right_lane else "other"
 
         # 碰撞风险
-        collision_risk = "high" if info.get('collision', False) or reward['collision_reward'] < -0.5 else "low"
+        collision_risk = "high" if info.get('collision', False) or info['collision_reward'] < -0.5 else "low"
 
         return f"{speed_level}_{position_type}_{lane_type}_{collision_risk}"
 
@@ -301,14 +301,14 @@ class CurriculumBuffer(PriorityBuffer):
         difficulty += min(speed / 10.0, 3.0)  # 假设速度单位为m/s
 
         # 2. 碰撞风险
-        collision_reward = reward['collision_reward']
+        collision_reward = info['collision_reward']
         if collision_reward < -0.5:
             difficulty += 3.0
         elif collision_reward < 0:
             difficulty += 1.5
 
         # 3. 道路位置 - 偏离道路增加难度
-        on_road_reward = reward['centering_reward']
+        on_road_reward = info['centering_reward']
         if on_road_reward < 0.5:
             difficulty += 2.0
 
@@ -400,8 +400,8 @@ class StochasticBuffer:
         """判断是否为安全关键样本"""
         _, _, reward, _, _, info = experience
         collision = info.get('collision', False)
-        collision_reward = reward['collision_reward']
-        on_road_reward = reward['centering_reward']
+        collision_reward = info['collision_reward']
+        on_road_reward = info['centering_reward']
 
         # 直接安全违反
         if collision or collision_reward < -0.5:
@@ -417,7 +417,7 @@ class StochasticBuffer:
         """判断是否为高性能样本"""
         _, _, reward, _, _, info = experience
         high_speed_reward = reward['high_speed_reward']
-        on_road_reward = reward['centering_reward']
+        on_road_reward = info['centering_reward']
         right_lane_reward = reward['right_lane_reward']
 
         # 高性能标准：高速、保持在道路上、在正确车道
@@ -444,7 +444,7 @@ class StochasticBuffer:
     def _create_scenario_fingerprint(self, info,reward):
         """创建场景指纹，用于识别不同场景 - 简化版"""
         speed = info.get('speed', 0.0)
-        on_road = reward['centering_reward'] > 0.5
+        on_road = info['centering_reward'] > 0.5
         right_lane = reward['right_lane_reward'] > 0.5
         collision = info.get('collision', False)
 
@@ -466,8 +466,8 @@ class StochasticBuffer:
 
         # 安全关键缓冲区：基于约束违反程度
         if buffer_idx == 0:  # SafetyCriticalBuffer
-            collision_reward = reward['collision_reward']
-            on_road_reward = reward['centering_reward']
+            collision_reward = info['collision_reward']
+            on_road_reward = info['centering_reward']
 
             # 计算安全违反程度
             safety_violation = 0.0
@@ -481,7 +481,7 @@ class StochasticBuffer:
         # 性能缓冲区：基于综合奖励
         elif buffer_idx == 1:  # PerformanceBuffer
             high_speed_reward = reward['high_speed_reward']
-            on_road_reward = reward['centering_reward']
+            on_road_reward = info['centering_reward']
             right_lane_reward = reward['right_lane_reward']
 
             # 综合性能得分
@@ -541,7 +541,7 @@ class StochasticBuffer:
             return []
 
         # todo 由于缺少其它样本的判断，先取部分
-        weights = [0.7, 0.0, 0.3, 0.0]  # Safety, Performance, Diversity, Curriculum
+        weights = [0.25, 0.25, 0.25, 0.25]  # Safety, Performance, Diversity, Curriculum
         samples = []
 
         # 确保每个缓冲区有足够样本
