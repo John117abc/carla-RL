@@ -1,7 +1,9 @@
 # src/carla_utils/ocp_setup.py
 import carla
 import numpy as np
+import torch
 from numpy import ndarray, dtype
+
 
 import src.envs.sensors
 import math
@@ -28,8 +30,8 @@ def get_ocp_observation(ego_vehicle:carla.Vehicle,
     # 获取周车信息
     ocp_other = get_other_observation(ego_vehicle, other_vehicles)
     # 获取道路信息
-    ocp_road = get_road_edge_points(ego_vehicle, world_map)       # 道路边缘
-    # ocp_road = get_closest_lane_edge_point(ego_vehicle)     # 车道边缘
+    # ocp_road = get_road_edge_points(ego_vehicle, world_map)       # 道路边缘
+    ocp_road = get_closest_lane_edge_point(ego_vehicle)     # 车道边缘
     # 获取静态路径信息
     ocp_ref = get_ref_observation(ego_vehicle,path_locations)
     return [ocp_ego,ocp_other,ocp_road,ocp_ref]
@@ -46,16 +48,13 @@ def get_ego_observation(ego_vehicle:carla.Vehicle,ego_imu:src.envs.sensors.IMUSe
     # 获取自车的观察信息
     v = ego_vehicle.get_velocity()
     ego_transform = ego_vehicle.get_transform()
-    # 获取x，y坐标
-    ego_x = ego_transform.location.x
-    ego_y = ego_transform.location.y
     # 转换为车辆坐标系的速度
     ego_vx, ego_vy = world_to_vehicle_frame(v, ego_vehicle.get_transform())
     # 航向角
     ego_yaw_deg = ego_transform.rotation.yaw
     # 角速度
     ego_angular_velocity = ego_imu.get_angular_velocity()
-    ocp_obs = np.array([ego_x,ego_y,ego_vx,ego_vy,ego_yaw_deg,ego_angular_velocity.z])
+    ocp_obs = np.array([0.0,0.0,ego_vx,ego_vy,ego_yaw_deg,ego_angular_velocity.z])
     return ocp_obs
 
 
@@ -65,7 +64,7 @@ def get_other_observation(
     other_vehicles: List[carla.Vehicle],
     max_num_vehicles: int = 8,
     distance_threshold: float = 50.0
-) -> list[dict] | ndarray[Any, dtype[Any]]:
+) -> list[list[int]] | ndarray[Any, dtype[Any]]:
     """
     获取自车周围指定距离内最近的若干辆车的状态信息。
     若车辆数不足 max_num_vehicles，则用零值字典填充至固定长度。
@@ -76,7 +75,7 @@ def get_other_observation(
     """
     from src.carla_utils.vehicle_control import world_to_vehicle_frame
 
-    def _get_zero_vehicle_obs() -> Dict:
+    def _get_zero_vehicle_obs() -> list[int]:
         """返回一个“空车辆”的零值观测字典"""
         return [0, 0, 0, 0, 0, 0]
 
@@ -87,6 +86,10 @@ def get_other_observation(
 
     ego_transform = ego_vehicle.get_transform()
     ego_location = ego_transform.location
+
+    # 自车坐标
+    ego_x = ego_location.x
+    ego_y = ego_location.y
 
     nearby_vehicles = []
 
@@ -104,7 +107,7 @@ def get_other_observation(
 
         other_yaw = vehicle.get_transform().rotation.yaw
 
-        nearby_vehicles.append([other_loc.x,other_loc.y,vx,0,other_yaw,0])
+        nearby_vehicles.append([other_loc.x - ego_x,other_loc.y - ego_y,vx,0,other_yaw,0])
 
     # 按距离排序，取最近的 N 辆
     # nearby_vehicles.sort(key=lambda x: x['distance'])
@@ -131,6 +134,10 @@ def get_closest_lane_edge_point(ego_vehicle: carla.Vehicle) -> ndarray[Any, dtyp
     world = ego_vehicle.get_world()
     map_obj = world.get_map()
     ego_loc = ego_vehicle.get_transform().location
+
+    # 自车坐标
+    ego_x = ego_loc.x
+    ego_y = ego_loc.y
 
     # 投影到道路中心线
     waypoint = map_obj.get_waypoint(ego_loc, project_to_road=True, lane_type=carla.LaneType.Driving)
@@ -171,7 +178,7 @@ def get_closest_lane_edge_point(ego_vehicle: carla.Vehicle) -> ndarray[Any, dtyp
 
     pos = left_edge if dist_left < dist_right else right_edge
 
-    return np.array([pos.x,pos.y,0,0,0,0])
+    return np.array([pos.x - ego_x,pos.y - ego_y,0,0,0,0])
 
 
 
@@ -237,7 +244,11 @@ def get_ref_observation(
     longitudinal_velocity = default_longitudinal_velocity
     yaw = ref_yaw_deg
 
-    return np.array([x, y, longitudinal_velocity,0, yaw,0])
+    # 自车坐标
+    ego_x = ego_location.x
+    ego_y = ego_location.y
+
+    return np.array([x - ego_x, y - ego_y, longitudinal_velocity,0, yaw,0])
 
 
 
@@ -301,4 +312,79 @@ def get_road_edge_points(ego_vehicle: carla.Vehicle,world_map: carla.Map):
     else:
         nearest_road_edge = left_edge
 
-    return [nearest_road_edge.x,nearest_road_edge.y,0,0,0,0]
+    return [nearest_road_edge.x - vehicle_loc.x,nearest_road_edge.y - vehicle_loc.y,0,0,0,0]
+
+
+
+def bicycle_model(state, u_i,ts,vehicle_length = 3.0):
+    """
+    自车预测模型，参考：龚建伟, 姜岩, 徐威. 无人驾驶车辆模型预测控制[M]. 北京理工大学出版社, 2014. page:28
+    :param state: [x, y, v_lat, v_lon, yaw, w], # Size: (batch, 1, 6)
+    :param u_i: [delta, a]  # Size: (batch, 1, 2)
+    :return: next state: [x, y, v_lat, v_lon, yaw, w], # Size: (batch, 1, 6)
+    """
+    u = u_i  # Size: (batch, 1, 2)
+    B,N,_ = u_i.shape
+    delta = u[:, :, 0]
+    a = u[:, :, 1]
+
+    x = state[:, :, 0]  # Size: (batch, 1)
+    y = state[:, :, 1]  # Size: (batch, 1)
+    v_lat = state[:, :, 2]  # Size: (batch, 1)
+    v_lon = state[:, :, 3]  # Size: (batch, 1)
+    yaw = state[:, :, 4]  # Size: (batch, 1)
+    w = state[:, :, 5]  # Size: (batch, 1)
+
+    v_lon_next = v_lon + ts * a  # Size: (batch, 1)
+    yaw_next = yaw + ts * v_lon_next * torch.tan(delta) * (1 / vehicle_length)  # Size: (batch, 1)
+    x_next = x + ts * v_lon_next * torch.cos(yaw_next)  # Size: (batch, 1)
+    y_next = y + ts * v_lon_next * torch.sin(yaw_next)  # Size: (batch, 1)
+    v_lat_next = v_lat  # Size: (batch, 1)
+    w_next = w  # Size: (batch, 1)
+
+    x_next = x_next.reshape(B, 1, -1)  # Size: (batch, 1, 1)
+    y_next = y_next.reshape(B, 1, -1)  # Size: (batch, 1, 1)
+    v_lat_next = v_lat_next.reshape(B, 1, -1)  # Size: (batch, 1, 1)
+    v_lon_next = v_lon_next.reshape(B, 1, -1)  # Size: (batch, 1, 1)
+    yaw_next = yaw_next.reshape(B, 1, -1)  # Size: (batch, 1, 1)
+    w_next = w_next.reshape(B, 1, -1)  # Size: (batch, 1, 1)
+
+    state_next = torch.cat([x_next, y_next, v_lat_next, v_lon_next, yaw_next, w_next], 2)  # Size: (batch, 1, 6)
+    return state_next
+
+
+def npc_model(batch_npc_states,ts):
+    """
+    周车预测模型(只考虑速度与航向角)
+    :param state:
+    :return:
+    """
+    device = batch_npc_states.device
+    B,N,N_NPC,_ = batch_npc_states.shape
+    batch_state_next = torch.empty(B, N, N_NPC,6).to(device)
+    for i in range(N_NPC):
+        batch_state = batch_npc_states[:, :, i]
+        x = batch_state[:, :, 0]
+        y = batch_state[:, :, 1]
+        v_lat = batch_state[:, :, 2]
+        v_lon = batch_state[:, :, 3]
+        yaw = batch_state[:, :, 4]
+        w = batch_state[:, :, 5]
+
+        x_next = x + ts * v_lon * torch.cos(yaw)
+        y_next = y + ts * v_lon * torch.sin(yaw)
+        v_lat_next = v_lat
+        v_lon_next = v_lon
+        yaw_next = yaw
+        w_next = w
+
+        x_next = x_next.reshape(B,N, 1, -1)
+        y_next = y_next.reshape(B, N,1, -1)
+        v_lat_next = v_lat_next.reshape(B,N, 1, -1)
+        v_lon_next = v_lon_next.reshape(B,N, 1, -1)
+        yaw_next = yaw_next.reshape(B,N, 1, -1)
+        w_next = w_next.reshape(B, N,1, -1)
+
+        state_next = torch.cat([x_next, y_next, v_lat_next, v_lon_next, yaw_next, w_next], 3)
+        batch_state_next[:, :, i] = state_next
+    return batch_state_next

@@ -8,16 +8,19 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-import statistics
+import random
 
 from typing import Dict, Any, Tuple,List, Union
 
 
+
 from .base_agent import BaseAgent
-from src.models.advantage_actor_critic import ActorNetwork, CriticNetwork
+from src.models.actor_critic import ActorNet,CriticNet
 from src.utils import save_checkpoint,load_checkpoint
 from src.buffer import TrajectoryBuffer
 from src.utils import get_logger
+from ..carla_utils import bicycle_model
+from ..carla_utils.ocp_setup import npc_model
 
 logger = get_logger('ocp_agent')
 
@@ -43,8 +46,8 @@ class OcpAgent(BaseAgent):
         self.ocp_config = rl_config['rl'][rl_algorithm]
 
         # 网络
-        self.actor = ActorNetwork(self.observation_space['ocp_obs'], self.action_space, hidden_dim=self.ocp_config['hidden_dim']).to(self.device)
-        self.critic = CriticNetwork(self.observation_space['ocp_obs'],hidden_dim=self.ocp_config['hidden_dim']).to(self.device)
+        self.actor = ActorNet(np.prod(self.observation_space['ocp_obs'].shape), hidden_dim=self.ocp_config['hidden_dim']).to(self.device)
+        self.critic = CriticNet(np.prod(self.observation_space['ocp_obs'].shape),hidden_dim=self.ocp_config['hidden_dim']).to(self.device)
 
         # 优化器
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.ocp_config['lr_actor'],betas=(0.9, 0.999))
@@ -73,13 +76,42 @@ class OcpAgent(BaseAgent):
         self.batch_size = self.ocp_config['batch_size']
 
         # 初始化缓冲区
-        self.buffer = TrajectoryBuffer(min_start_train = self.ocp_config['min_start_train'],
-                                       total_capacity = self.ocp_config['total_capacity'])
+        # self.buffer = TrajectoryBuffer(min_start_train = self.ocp_config['min_start_train'],
+        #                                total_capacity = self.ocp_config['total_capacity'])
+
+        self.buffer = []
+
+        self.predict_step = self.ocp_config['predict_step']
+        self.step_time = self.ocp_config['step_time']
 
         # 记录历史日志数据值
         self.globe_eps = 0
         self.history_loss = []
         self.global_step = 0
+
+    def sample_batch(self,data_list, batch_size):
+        """
+        从列表中随机取样 batch_size 个样本。
+
+        参数:
+            data_list (list): 原始数据列表
+            batch_size (int): 需要取样的样本数量
+
+        返回:
+            list: 包含随机样品的列表
+
+        注意:
+            如果 batch_size 大于列表长度，将返回整个列表（不放回抽样）。
+            如果需要放回抽样（即允许重复），请设置 replace=True。
+        """
+        if batch_size <= 0:
+            return []
+
+        # 不放回抽样（默认）
+        if batch_size >= len(data_list):
+            return data_list[:]  # 返回副本
+
+        return random.sample(data_list, batch_size)
 
     def select_action(self, obs: Any, deterministic: bool = False):
         """
@@ -98,165 +130,209 @@ class OcpAgent(BaseAgent):
             log_prob = log_prob.cpu().numpy().flatten()
         return np.clip(action, self.action_space.low, self.action_space.high),log_prob
 
-    def update_one_step(self,one_step_stata):
-        s_all = torch.from_numpy(np.array(one_step_stata[0], dtype=np.float32)).to(self.device)
-        s_ego = torch.from_numpy(np.array(one_step_stata[1][0], dtype=np.float32)).to(self.device)
-        s_other = torch.from_numpy(np.array(one_step_stata[1][1], dtype=np.float32)).to(self.device)
-        s_road = torch.from_numpy(np.array(one_step_stata[1][2], dtype=np.float32)).to(self.device)
-        s_ref = torch.from_numpy(np.array(one_step_stata[1][3], dtype=np.float32)).to(self.device)
+    def online_update(self, all_state, ref_road, static_road):
+        s_all, s_ego, s_other, s_road, s_ref = self.unpack_observation(all_state)
 
-        action, _, _ = self.actor(s_all)
+        # 初始化累积变量 (不需要 requires_grad=True，因为它们是累加结果，最后总 loss 才需要图)
+        # 注意：total_cost_traj 需要保留图以便 actor backward，所以不能 detach
+        total_cost_traj = torch.tensor(0.0, device=self.device)
+        # 用于记录每一步的 cost，方便调试，但不直接参与最终的 actor backward 累加逻辑（除非你要做每步优化）
+        instant_costs = []
 
-        # 跟踪消耗
-        tracking_diff = s_ego - s_ref
-        Q_diag = torch.from_numpy(np.diag(self.Q_matrix)).to(self.device).float()
-        tracking = (tracking_diff * Q_diag * tracking_diff).sum()
+        # 临时状态变量，用于滚动预测
+        curr_s_ego = s_ego.clone()
+        curr_s_other = s_other.clone()
+        curr_s_all = s_all.clone()  # 关键：需要一个随时间变化的状态输入
 
-        # 控制消耗
-        R_diag = torch.from_numpy(np.diag(self.R_matrix)).to(self.device).float()
-        control = (action * R_diag * action).sum()
+        ref_road_tensor = torch.tensor(ref_road,dtype=torch.float32).to(self.device).clone()
 
-        total_cost = (tracking + control)
+        # 预加载矩阵到 device (优化性能)
+        if not hasattr(self, 'Q_diag_buf'):
+            self.Q_diag_buf = torch.from_numpy(np.diag(self.Q_matrix)).to(self.device).float()
+            self.R_diag_buf = torch.from_numpy(np.diag(self.R_matrix)).to(self.device).float()
+            self.M_xy_buf = torch.from_numpy(np.diag(self.M_matrix)).to(self.device).float()
 
-        rel_pos_car = s_ego - s_other
-        M_xy = torch.from_numpy(np.diag(self.M_matrix)).to(self.device).float()
-        dist_sq_car = (rel_pos_car * M_xy * rel_pos_car).sum()
-        g_car = dist_sq_car - self.other_car_min_distance ** 2
-        ge_car = torch.relu(-g_car)
+        # --- 轨迹 rollout ---
+        for t in range(self.predict_step):
+            # 1. Actor 基于【当前时刻】的状态输出动作
+            # 假设 s_all 的结构允许切片或更新，如果 s_all 是固定结构，可能需要重新打包
+            # 这里假设 curr_s_all 已经包含了最新的 ego/other 信息
+            action = self.actor(curr_s_all)
 
-        # 道路约束
-        rel_pos_road = s_ego - s_road
-        dist_sq_road = (rel_pos_road * M_xy * rel_pos_road).sum()
-        g_road = dist_sq_road - self.road_min_distance ** 2
-        ge_road = torch.relu(-g_road)
+            # 2. 动力学模型推演下一状态
+            # 注意维度处理，确保 model 接收正确的 shape
+            next_ego = bicycle_model(curr_s_ego.view(1, 1, -1), action.view(1, 1, -1), self.step_time)
+            next_other = npc_model(curr_s_other.view(1, 1, curr_s_other.shape[0], -1), self.step_time).view(8,-1)
 
-        total_constraint = (ge_car + ge_road)
+            curr_ref_state = s_ref + t
+            curr_road_state = s_road  + t
 
-        actor_loss = total_cost + self.init_penalty * total_constraint
+            # 3. 计算即时 Cost
+            tracking_diff = next_ego - curr_ref_state
+            tracking = (tracking_diff * self.Q_diag_buf * tracking_diff).sum()
+            control = (action * self.R_diag_buf * action).sum()
 
-        # Actor更新
-        self.actor_optimizer.zero_grad()
-        actor_loss.backward()
-        self.actor_optimizer.step()
+            # 约束成本
+            rel_pos_road = next_ego - curr_road_state
+            dist_sq_road = (rel_pos_road * self.M_xy_buf * rel_pos_road).sum(dim=-1)
+            g_road = dist_sq_road - self.road_min_distance ** 2
+            ge_road = F.relu(-g_road).sum()
 
-        # Critic更新
-        critic_pred = self.critic(s_all).squeeze()
-        critic_target = total_cost.detach()
-        critic_loss = F.mse_loss(critic_pred, critic_target)
+            step_cost = tracking + control + self.init_penalty * ge_road
+
+            # 累加到总代价 (这一步构建了从 action -> total_cost 的计算图)
+            total_cost_traj = total_cost_traj + step_cost
+            instant_costs.append(step_cost.detach().item())  # 仅记录数值
+
+            # 4. 【关键】更新状态用于下一步
+            curr_s_ego = next_ego.detach()  # 滚动预测时通常 detach，防止图太长爆炸，除非你需要端到端梯度
+            curr_s_other = next_other.detach()
+
+            # 重新构建 curr_s_all (将新的 ego/other 填入观察向量)
+            # 这一步至关重要，否则 actor 永远看到初始状态
+            curr_s_all = self.pack_observation(curr_s_ego, curr_s_other, s_road, s_ref)
+
+            # ------------------ Train Critic -------------------------
+        # Critic 的目标：预测初始状态 s_all 下的总代价 total_cost_traj
+        # 注意：Critic 输入是初始状态 s_all，输出是一个标量估值
+        pred_value = self.critic(s_all).squeeze()  # 去掉多余维度
+
+        # Target 是 rollout 出来的真实总代价 (detach 掉，不让梯度流向 actor)
+        target_value = total_cost_traj.detach()
+
+        critic_loss = F.mse_loss(pred_value, target_value)
 
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
         self.critic_optimizer.step()
+
+        # ------------------ Train Actor --------------------------
+        # Actor 的目标：最小化 total_cost_traj
+        self.actor_optimizer.zero_grad()
+
+        # 此时 total_cost_traj 包含完整的从 action -> cost 的图
+        total_cost_traj.backward()
+
+        # 可选：梯度裁剪，防止爆炸
+        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.0)
+
+        self.actor_optimizer.step()
+
         return {
-            "actor_loss": actor_loss.detach().item(),
-            "critic_loss": critic_loss.detach().item()
+            "actor_loss": total_cost_traj.item(),
+            "critic_loss": critic_loss.item(),
+            "step_costs": instant_costs
         }
 
+    # 辅助函数：你需要实现这个来更新观察向量
+    def pack_observation(self, ego, other, road, ref):
+        # 根据你 unpack_observation 的逆过程，重新组装 tensor
+        # 必须保证形状和 s_all 一致
+        return torch.cat([ego.view(-1), other.view(-1), road, ref], dim=-1)  # 示例逻辑
+
     def update(self):
-        # 1. 采样 N 条完整轨迹
-        trajectories = self.buffer.sample_batch(self.batch_size)
+        # 0. 预处理常量 (移出循环，避免重复创建和潜在的图问题)
+        # 建议在 __init__ 中完成此步，这里为了演示放在这里
+        if not hasattr(self, '_diag_tensors'):
+            self.Q_diag_tensor = torch.from_numpy(np.diag(self.Q_matrix).copy()).to(self.device).float()
+            self.R_diag_tensor = torch.from_numpy(np.diag(self.R_matrix).copy()).to(self.device).float()
+            self.M_xy_tensor = torch.from_numpy(np.diag(self.M_matrix).copy()).to(self.device).float()
+            self._diag_tensors = True
 
+        Q_diag = self.Q_diag_tensor
+        R_diag = self.R_diag_tensor
+        M_xy = self.M_xy_tensor
+
+        # 调试：检查权重矩阵是否为0
+        if R_diag.sum() == 0:
+            print("ERROR: R_matrix is all zeros. Actor loss will be 0 w.r.t actions.")
+
+        trajectories = self.sample_batch(self.buffer,self.batch_size)
         all_states = []
-        all_targets = []  # 存储每个状态对应的“剩余代价”
-        all_actions = []
+        all_targets = []
 
-        actor_loss_sum = 0
+        # 使用列表收集 loss，最后 sum，比循环累加 tensor 更稳健
+        trajectory_losses = []
 
         for traj in trajectories:
-            # 解包数据 (假设 traj.states 是 [T, Dim])
-            s_all, s_ego, s_other, s_road, s_ref = self.unpack_observation(traj.states, True)
-            T = s_all.shape[0]  # 轨迹长度
+            s_ego, s_other, s_road, s_ref = self.unpack_tensor(traj)
+            full_state = traj  # 假设这是 (Batch, Time, State_Dim)
 
-            # 获取动作 (重新通过 Actor 生成，确保计算图连通，或者用 traj.actions)
-            # 为了训练 Actor，我们需要梯度流过 action，所以必须 re-forward
-            actions, _, _ = self.actor(s_all)  # [T, Action_Dim]
+            # 展平到 (Batch*Time, State_Dim) 以便统计
+            # 前向传播
+            actions = self.actor(traj).squeeze()  # [T, Action_Dim]
 
-            # --- 计算每一步的即时代价 (Instant Cost) ---
-            tracking_diff = s_ego - s_ref
-            # 建议将 Q_diag, R_diag, M_xy 注册为 buffer 并在 init 时转到 device，避免循环内反复创建
-            Q_diag = torch.from_numpy(np.diag(self.Q_matrix)).to(self.device).float()
-            R_diag = torch.from_numpy(np.diag(self.R_matrix)).to(self.device).float()
-            M_xy = torch.from_numpy(np.diag(self.M_matrix)).to(self.device).float()
-
-            tracking = (tracking_diff * Q_diag * tracking_diff).sum(dim=1)  # [T]
+            # 1. 控制代价 (直接依赖 actions)
+            # 确保 R_diag 广播正确
             control = (actions * R_diag * actions).sum(dim=1)  # [T]
-            instant_cost = tracking + control  # [T]
 
-            # --- 计算每一步的即时约束 ---
-            rel_pos_car = s_ego.unsqueeze(1) - s_other  # [T, N_other, Dim]
-            # 注意：这里假设 s_other 包含所有周围车辆，需要聚合 (例如取最小距离)
-            # 原代码直接 sum，这里保留原逻辑，但需注意维度
-            dist_sq_car = (rel_pos_car * M_xy * rel_pos_car).sum(dim=-1)  # [T, N_other]
-            dist_sq_car_min = dist_sq_car.min(dim=1)[0]  # 取最近的車 [T]
+            # 2. 追踪代价 (依赖 s_ego, s_ref，通常不直接依赖 actions，除非 s_ego 是预测出来的)
+            # 注意：如果 s_ego 是从 buffer 采样的真实状态，它对 actions 的梯度为 0。
+            # 只有 control 项提供梯度给 Actor。这是正常的 On-Policy/Off-Policy AC 算法逻辑吗？
+            # 如果是 Off-Policy (如 SAC/DDPG)，通常 Loss = Q(s, a)。
+            # 如果是这种直接最小化 Cost 的结构 (类似 MPC 或 直接策略搜索)，
+            # 必须确保 Cost 函数里有项是直接关于 action 的。这里 control 项就是。
 
+            tracking_diff = s_ego - s_ref
+            tracking = (tracking_diff * Q_diag * tracking_diff).sum(dim=1)  # [T] (梯度为0 w.r.t action)
+
+            instant_cost = tracking + control
+
+            # 3. 约束代价
+            rel_pos_car = s_ego.unsqueeze(1) - s_other
+            dist_sq_car = (rel_pos_car * M_xy * rel_pos_car).sum(dim=-1)
+            dist_sq_car_min = dist_sq_car.min(dim=1)[0]
             g_car = dist_sq_car_min - self.other_car_min_distance ** 2
-            ge_car = F.relu(-g_car)  # [T]
+            ge_car = F.relu(-g_car)
 
             rel_pos_road = s_ego - s_road
-            dist_sq_road = (rel_pos_road * M_xy * rel_pos_road).sum(dim=1)  # [T]
+            dist_sq_road = (rel_pos_road * M_xy * rel_pos_road).sum(dim=1)
             g_road = dist_sq_road - self.road_min_distance ** 2
-            ge_road = F.relu(-g_road)  # [T]
+            ge_road = F.relu(-g_road)
 
-            instant_constraint = ge_car + ge_road  # [T]
+            instant_constraint = ge_car + ge_road
 
-            # --- 计算剩余代价 (Cost-to-Go) ---
-            # Target for Critic at time t: sum(cost[k] for k in t...T)
-            # 使用 cumsum 倒序计算
-            total_cost_traj = instant_cost + self.init_penalty * instant_constraint  # [T]
+            total_cost_traj = instant_cost + self.init_penalty * instant_constraint
 
-            # flip -> cumsum -> flip 得到每个时刻的剩余和
+            # 累加该轨迹的总 loss
+            trajectory_losses.append(total_cost_traj.sum())
+
+            # Critic 数据准备 (保持不变)
             remaining_cost = torch.flip(torch.cumsum(torch.flip(total_cost_traj, dims=[0]), dim=0), dims=[0])
-
-            # --- 构建 Actor Loss ---
-            # 论文中 Actor 是最小化整条轨迹的总代价
-            # 我们这里对整条轨迹的总 Loss 求平均，避免梯度随轨迹长度爆炸
-            trajectory_total_loss = total_cost_traj.sum()
-            actor_loss_sum += trajectory_total_loss
-
-            # --- 构建 Critic 训练数据 ---
-            # 状态：s_all [T, Dim]
-            # 目标：remaining_cost [T] (从 t 到结束的总代价)
-            all_states.append(s_all)
+            all_states.append(traj.squeeze())
             all_targets.append(remaining_cost)
-            all_actions.append(actions)
 
-        # 2. 合并 Batch
-        states_batch = torch.cat(all_states, dim=0)  # [B*T, Dim]
-        targets_batch = torch.cat(all_targets, dim=0)  # [B*T]
-        # actions_batch = torch.cat(all_actions, dim=0)   # 如果 Critic 需要 action
+        # 合并 Actor Loss
+        if len(trajectory_losses) == 0:
+            return {"actor_loss": 0, "critic_loss": 0}
 
-        # 归一化 Loss (除以轨迹总步数)，防止长轨迹梯度爆炸
-        num_total_steps = states_batch.shape[0]
-        actor_loss = actor_loss_sum / num_total_steps
+        actor_loss_sum = torch.stack(trajectory_losses).mean()  # 或者 sum()，看你的 batch 定义
 
-        # 3. Actor 更新
+        # --- Actor Update ---
         self.actor_optimizer.zero_grad()
-        actor_loss.backward()
-        # 【关键】梯度裁剪，防止长时序累积梯度爆炸
-        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.0)
+        actor_loss_sum.backward()
+
+        # 【调试关键】检查梯度
+        grad_norm = torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.0)  # 先裁剪再检查或直接检查
+
         self.actor_optimizer.step()
 
-        # 4. Critic 更新
-        # 预测：V(s)
-        critic_pred = self.critic(states_batch).squeeze()  # [B*T]
+        # --- Critic Update (保持不变，略) ---
+        states_batch = torch.cat(all_states, dim=0)
+        targets_batch = torch.cat(all_targets, dim=0).detach()
 
-        # 目标：剩余代价 (已 detach)
-        critic_target = targets_batch.detach()
-
-        # 可选：对 Target 进行归一化或缩放，使其与 Pred 量级匹配
-        # 如果训练不稳定，可以打印一下 target 的均值看看是否过大
-
-        critic_loss = F.mse_loss(critic_pred, critic_target)
+        critic_pred = self.critic(states_batch).squeeze()
+        critic_loss = F.mse_loss(critic_pred, targets_batch)
 
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=1.0)
+        # torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=1.0)
         self.critic_optimizer.step()
 
         return {
-            "actor_loss": actor_loss.item(),
+            "actor_loss": actor_loss_sum.item(),
             "critic_loss": critic_loss.item(),
-            "avg_trajectory_cost": (targets_batch[0::int(num_total_steps / self.batch_size)]).mean().item()  # 粗略估算首状态代价
+            "grad_norm": grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm
         }
 
     def save(self,save_info: Dict[str, Any]) -> None:
@@ -327,6 +403,46 @@ class OcpAgent(BaseAgent):
         if step_count % self.amplifier_m == 0:
             self.init_penalty = min(self.init_penalty * self.amplifier_c,self.max_penalty)
 
+    def unpack_tensor(self, data: torch.Tensor):
+        """
+        解包形状为 [B, N, 66] 的 Tensor。
+
+        参数:
+            data (torch.Tensor): 输入 tensor，形状应为 [B, N, 66]
+                - B: Batch size (批次大小)
+                - N: Number of scenarios/agents per batch (每批次的场景/智能体数量)
+
+        返回:
+            tuple: (ego_state, neighbor_states, road_state, ref_state)
+                - ego_state: [B, N, 6]
+                - neighbor_states: [B, N, 8, 6]
+                - road_state: [B, N, 6]
+                - ref_state: [B, N, 6]
+        """
+        # 1. 验证输入维度：现在应该是 3 维 [B, N, 66]
+        if data.dim() != 3 or data.shape[2] != 66:
+            raise ValueError(f"输入 Tensor 形状必须为 [B, N, 66]，当前形状为 {data.shape}")
+
+        # 获取 B 和 N 以便后续 reshape 使用
+        B, N = data.shape[0], data.shape[1]
+
+        # 2. Ego 状态: 索引 [0, 6)
+        # 切片操作会自动保留前两个维度 [B, N]
+        ego_state = data[:, :, 0:6]  # Shape: [B, N, 6]
+
+        # 3. 周车状态: 索引 [6, 54) -> 长度 48
+        # 原始形状: [B, N, 48] -> 目标形状: [B, N, 8, 6]
+        neighbor_raw = data[:, :, 6:54]
+        other_states = neighbor_raw.view(B, N, 8, 6)  # Shape: [B, N, 8, 6]
+
+        # 4. 道路状态: 索引 [54, 60)
+        road_state = data[:, :, 54:60]  # Shape: [B, N, 6]
+
+        # 5. 参考状态: 索引 [60, 66)
+        ref_state = data[:, :, 60:66]  # Shape: [B, N, 6]
+
+        return ego_state.squeeze(), other_states.squeeze(), road_state.squeeze(), ref_state.squeeze()
+
     def unpack_observation(self, obs: Union[List, np.ndarray], batched: bool = False):
         """
         解包 observation 数据，支持单样本和批量样本
@@ -377,22 +493,22 @@ class OcpAgent(BaseAgent):
                 state_road_flat,
                 state_ref_flat
             ], dim=1)  # [B, D]
-
+            return state_all, state_ego, state_other, state_road, state_ref
         else:
-
-            state_ego = to_tensor(obs[0])
-            state_other = to_tensor(obs[1])
-            state_road = to_tensor(obs[2])
-            state_ref = to_tensor(obs[3])
+            state_ego = to_tensor(obs[0:6])
+            state_other = to_tensor(obs[6:54])
+            state_road = to_tensor(obs[54:60])
+            state_ref = to_tensor(obs[60:66])
 
             state_all = torch.cat([
-                state_ego.view(-1),
-                state_other.view(-1),
-                state_road.view(-1),
-                state_ref.view(-1)
+                state_ego,
+                state_other,
+                state_road,
+                state_ref
             ], dim=0)
+            return state_all, state_ego, state_other.view(8, -1), state_road, state_ref
 
-        return state_all, state_ego, state_other, state_road, state_ref
+
 
 
     def compute_total_cost_and_constraint(self,states,action):
@@ -419,6 +535,6 @@ class OcpAgent(BaseAgent):
         dist_sq = np.sum(((diff @ self.M_matrix)**2),axis=-1)
         ge_car = np.maximum(0.0,self.other_car_min_distance ** 2 - dist_sq).mean()
         ge_road = np.maximum(0.0,-np.sum((((state_ego - state_road) @ self.M_matrix)**2),axis=-1)+ self.road_min_distance ** 2)
-        # constraint = self.init_penalty * (ge_car.mean() + ge_road.mean())
-        constraint = ge_car.mean() + ge_road.mean()
+        constraint = self.init_penalty * (ge_car.mean() + ge_road.mean())
+        # constraint = ge_car.mean() + ge_road.mean()
         return l_current,constraint

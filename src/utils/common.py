@@ -75,11 +75,7 @@ class RunningNormalizer:
         self.var = np.asarray(state["var"], dtype=np.float32)
         self.count = state["count"]
 
-
-import numpy as np
-
-
-def normalize_ocp__scenario_relative(data):
+def normalize_ocp_scenario_relative(data):
     """
     基于自车的局部观测归一化（观测半径 50m）
 

@@ -6,10 +6,14 @@ from collections import defaultdict
 from dataclasses import dataclass,field
 from typing import List, Any
 
+import torch
+
+
 @dataclass
 class Trajectory:
     initial_state: Any          # 包含 path info 的初始状态（用于 Critic 输入）
     states: List[np.ndarray]           # [s0, s1, ..., sT]
+    states_tensor: Any
     actions: List[np.ndarray]          # [a0, a1, ..., a_{T-1}]
     rewards: List[dict]         # 每一步的 reward dict
     infos: List[dict]           # 每一步的 info
@@ -303,7 +307,7 @@ class TrajectoryBuffer:
 
     def sample_batch(self, batch_size: int) -> List[Trajectory]:
         # 权重可调整，例如更重视安全轨迹
-        weights = [0.7, 0.0, 0.3, 0.0]
+        weights = [0.2, 0.2, 0.2, 0.2]
         samples = []
         for i, buf in enumerate(self.buffers):
             if len(buf) > 0:

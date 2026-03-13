@@ -10,7 +10,7 @@ from typing import Dict, Any, Tuple, Optional, Union, List
 
 from src.envs.sensors import CameraSensor, CollisionSensor, LaneInvasionSensor,ObstacleSensor,IMUSensor
 from src.carla_utils import get_compass,world_to_vehicle_frame,RoutePlanner,get_ocp_observation
-from src.utils import get_logger,RunningNormalizer,normalize_ocp__scenario_relative
+from src.utils import get_logger,RunningNormalizer,normalize_ocp_scenario_relative
 from src.configs.constant import (LAYERS_TO_REMOVE_1,
                                   LAYERS_TO_REMOVE_2,
                                   LAYERS_TO_REMOVE_3,
@@ -193,9 +193,12 @@ class CarlaEnv(gym.Env):
         # 初始化路径规划器
         self.route_planner = None
         self.path_locations = None
+        self.ref_path_xy = None
 
         # 路径id
         self.current_path_id = 0
+
+
 
     def _init_notice_str_world(self):
         location = self.vehicle.get_location()
@@ -419,13 +422,13 @@ class CarlaEnv(gym.Env):
         if "ocp_obs" in self.env_cfg["obs_type"]:
             # 获取ocp观察信息
             ocp_obs = get_ocp_observation(self.vehicle,self.imu_sensor,self.actors,self.path_locations,self.world.get_map())
-            normalize_ocp = normalize_ocp__scenario_relative(ocp_obs)
-            state_ego_flat = np.asarray(normalize_ocp[0])
-            state_other_flat = np.asarray(normalize_ocp[1]).flatten()
-            state_road_flat = np.asarray(normalize_ocp[2])
-            state_ref_flat = np.asarray(normalize_ocp[3])
+            # normalize_ocp = normalize_ocp_scenario_relative(ocp_obs)
+            state_ego_flat = np.asarray(ocp_obs[0])
+            state_other_flat = np.asarray(ocp_obs[1]).flatten()
+            state_road_flat = np.asarray(ocp_obs[2])
+            state_ref_flat = np.asarray(ocp_obs[3])
             state_all = np.concatenate([state_ego_flat,state_other_flat,state_road_flat,state_ref_flat], axis=0)
-            obs["ocp_obs"] = [state_all,normalize_ocp]
+            obs["ocp_obs"] = [state_all,ocp_obs]
             # 如果是debug模式，在训练页面上显示和各个点的连线
             if self._ocp_debug:
                 self._debug_ocp(ocp_obs)
@@ -439,23 +442,25 @@ class CarlaEnv(gym.Env):
         周车的连线，道路边缘的连线
         """
         ego_location = self.vehicle.get_location()
+        ego_x = ego_location.x
+        ego_y = ego_location.y
         road_location = ocp_obs[2]
         # 自车与道路边缘的连线
-        self.world.debug.draw_line(
-            ego_location, carla.Location(x=road_location[0],y=road_location[1]),
-            thickness=0.1,
-            color=carla.Color(255, 0, 0),
-            life_time=0.5
-        )
+        # self.world.debug.draw_line(
+        #     ego_location, carla.Location(x=road_location[0] - ego_x,y=road_location[1] - ego_y),
+        #     thickness=0.1,
+        #     color=carla.Color(255, 0, 0),
+        #     life_time=0.5
+        # )
 
         # 自车与参考路径的连线
         ref_location = ocp_obs[3]
-        self.world.debug.draw_line(
-            ego_location, carla.Location(x=ref_location[0],y=ref_location[1]),
-            thickness=0.1,
-            color=carla.Color(0, 255, 0),
-            life_time=0.5
-        )
+        # self.world.debug.draw_line(
+        #     ego_location, carla.Location(x=ref_location[0] - ego_x,y=ref_location[1] - ego_y),
+        #     thickness=0.1,
+        #     color=carla.Color(0, 255, 0),
+        #     life_time=0.5
+        # )
 
     def _compute_reward(self,lane_inv,collision,obstacle) -> dict[str, Any]:
         w = self.env_cfg["reward_weights"]
@@ -657,6 +662,7 @@ class CarlaEnv(gym.Env):
         reward = self._compute_reward(lane_inv,collision,obstacle)
         terminated, truncated, info = self._check_termination(lane_inv,collision,obstacle)
         info.update(reward)
+        info['ref_path_xy'] = self.ref_path_xy
         return obs, reward['total_reward'], terminated, truncated, info
 
     def _destroy_all_sensors(self):
@@ -903,7 +909,36 @@ class CarlaEnv(gym.Env):
                     life_time=60.0
                 )
         self.path_locations = path_locations
+        ego_x = start_location.x
+        ego_y = start_location.y
+        self.ref_path_xy = [[item.x - ego_x, item.y - ego_y] for item in path_locations]
         logger.info(f"路径规划成功！已规划{len(path_locations)}个坐标点")
+
+    def get_random_driving_action(self):
+        """
+        生成用于探索的随机驾驶动作。
+        返回: [steer, accel]
+        范围: 均为 [-1, 1]
+
+        逻辑优化:
+        - 转向: 完全随机 [-1, 1]
+        - 加速: 70% 概率给正向油门 (0.3 ~ 1.0)，30% 概率刹车或滑行 (-1.0 ~ 0.2)
+          (这样能保证车大概率是向前动的，避免原地不动)
+        """
+
+        # 1. 转向角 (Steering): -1 (左满) 到 1 (右满)
+        steer = np.random.uniform(-1.0, 1.0)
+
+        # 2. 加速度/油门 (Acceleration): -1 (急刹) 到 1 (地板油)
+        # 策略：大部分时间给油，让车动起来
+        if np.random.rand() < 0.7:
+            # 70% 概率：给一个明显的油门 (0.3 到 1.0)，确保克服静摩擦力
+            accel = np.random.uniform(0.3, 1.0)
+        else:
+            # 30% 概率：刹车或松油门 (-1.0 到 0.2)
+            accel = np.random.uniform(-1.0, 0.2)
+
+        return np.array([accel,steer], dtype=np.float32)
 
     @property
     def is_eval(self):
