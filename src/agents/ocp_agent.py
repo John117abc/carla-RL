@@ -122,7 +122,7 @@ class OcpAgent(BaseAgent):
 
             # 5. 定向探索，打破不动的死亡循环
             if not deterministic:
-                if self.gep_iteration < 5000:
+                if self.global_step < 5000:
                     # 前5000次迭代：强制正向加速度探索
                     accel_noise = np.random.normal(0.5, 0.2, size=1)  # 均值0.5，保证正向
                     steer_noise = np.random.normal(0, 0.1, size=1)  # 转向小噪声
@@ -200,7 +200,7 @@ class OcpAgent(BaseAgent):
                 dx = np.diff(xs, prepend=xs[0])
                 dy = np.diff(ys, prepend=ys[0])
                 phis = np.arctan2(dy, dx)
-                vs = np.full(N, 5.0, dtype=np.float32)
+                vs = np.full(N, self.env.ego_ref_speed, dtype=np.float32)
                 processed_line = np.stack([xs, ys, vs, phis], axis=1)
                 if N < max_len:
                     processed_line = np.vstack([processed_line, np.zeros((max_len - N, 4), dtype=np.float32)])
@@ -350,16 +350,15 @@ class OcpAgent(BaseAgent):
         self.critic_optimizer.step()
 
         # 5. 策略改进 (PIM)：仅当 i mod m == 0 时执行
-        self.gep_iteration += 1
         actor_updated = False
         actor_loss = torch.tensor(0.0)
 
-        if self.gep_iteration % self.amplifier_m == 0:
+        if self.global_step % self.amplifier_m == 0:
             # 5.1 放大惩罚因子
             old_penalty = self.init_penalty
             self.init_penalty = min(self.init_penalty * self.amplifier_c, self.max_penalty)
             logger.info(
-                f"[GEP] 迭代 {self.gep_iteration}: 放大惩罚因子 ρ: {old_penalty:.4f} -> {self.init_penalty:.4f}")
+                f"[GEP] 迭代 {self.global_step}: 放大惩罚因子 ρ: {old_penalty:.4f} -> {self.init_penalty:.4f}")
 
             # 5.2 【关键】用新ρ重新计算增广代价（确保计算图完整）
             # 重新计算一遍损失，保证梯度能从Actor一路回传到状态
@@ -408,7 +407,7 @@ class OcpAgent(BaseAgent):
 
             # 5.4 清空buffer（on-policy）
             self.buffer.clear()
-            logger.info(f"[GEP] 迭代 {self.gep_iteration}: Actor已更新 {actor_loss.item() if torch.is_tensor(actor_loss) else 0.0}，已清空Buffer")
+            logger.info(f"[GEP] 迭代 {self.global_step}: Actor已更新 {actor_loss.item() if torch.is_tensor(actor_loss) else 0.0}，已清空Buffer")
 
             actor_updated = True
 
@@ -417,7 +416,7 @@ class OcpAgent(BaseAgent):
             "actor_loss": actor_loss.item() if torch.is_tensor(actor_loss) else 0.0,
             "critic_loss": critic_loss.item(),
             "penalty": self.init_penalty,
-            "gep_iteration": self.gep_iteration,
+            "gep_iteration": self.global_step,
             "actor_updated": actor_updated
         }
 

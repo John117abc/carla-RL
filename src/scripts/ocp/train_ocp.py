@@ -73,7 +73,6 @@ def main():
         # logger.info(f"动作空间: {env.action_space}")
 
         num_episodes = train_config["num_episodes"]
-        global_step = 0
         episode = 0
         while episode < num_episodes:
             logger.info(f"\n开始第 {episode + 1} 轮测试...")
@@ -83,14 +82,11 @@ def main():
             total_reward = 0.0
             done = False
             states, actions, rewards, infos ,log_probs= [], [], [], [],[]
-            initial_state = state.copy()
             while not done:
-                if not agent.buffer.should_start_training():
+                if not agent.buffer.should_start_training() and not train_config['continue_ocp']:
                     action = env.get_random_driving_action()
                 else:
                     action, _ = agent.select_action(state)
-                    # ✅ 新增：打印传给环境的最终动作（验证是否在 [-1,1] 且非极值）
-                    # logger.info(f"🎮 传给环境的动作: {action} (加速度: {action[0]:.4f}, 转向角: {action[1]:.4f})")
                 next_obs, reward, _, _, info = env.step(action)
                 next_state = next_obs['ocp_obs']
                 done = info['collision'] or info['off_route'] or info['TimeLimit.truncated']
@@ -102,8 +98,6 @@ def main():
                 infos.append(info)
                 state = next_state
 
-                # # 更新惩罚参数
-                # agent.update_penalty(env.step_count)
                 # 加入buffer
                 agent.buffer.handle_new_experience((state, action, reward, _, done, info))
 
@@ -113,8 +107,8 @@ def main():
                     loss = agent.update()
 
                 # 打印关键信息
-                if global_step % train_config["log_interval"] == 0:
-                    logger.info(f"  Step {global_step}: reward={reward:.3f}, total={total_reward:.2f}")
+                if agent.global_step % train_config["log_interval"] == 0:
+                    logger.info(f"  Step {agent.global_step}: reward={reward:.3f}, total={total_reward:.2f}")
                     if 'speed' in info:
                         logger.info(f"    速度: {info['speed']:.2f} km/h,动作：{action}")
 
@@ -129,13 +123,13 @@ def main():
                 if done:
                     logger.info(f"  Episode 结束")
                     break
-                global_step += 1
+                agent.global_step += 1
 
             episode += 1
 
             # 保存模型
             if episode % train_config["save_freq"] == 0:
-                logger.info(f"开始保存模型：  Step {global_step}: total={total_reward:.2f}")
+                logger.info(f"开始保存模型：  Step {agent.global_step}: total={total_reward:.2f}")
                 save_info = {
                     'rl_config':rl_config,
                     'global_step':global_step,

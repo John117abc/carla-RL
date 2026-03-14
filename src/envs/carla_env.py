@@ -137,6 +137,9 @@ class CarlaEnv(gym.Env):
         # 周车
         self.actors = []
 
+        # 自车参考速度
+        self.ego_ref_speed = self.env_cfg['actors']['ego']['ref_speed']
+
         # 动作空间
         action_type = self.env_cfg["action"]["type"]
         if action_type == "continuous":
@@ -200,6 +203,11 @@ class CarlaEnv(gym.Env):
 
         # 静态道路坐标
         self.static_road_xy = None
+
+        # 保存上一帧在参考线上的投影点索引（加速搜索，避免每帧从头找）
+        self.last_ref_idx = 0
+        # 保存上一帧的视角（可选，用于极轻微的平滑，防止参考线本身有抖动）
+        self.prev_spectator_transform = None
 
     def _init_notice_str_world(self):
         location = self.vehicle.get_location()
@@ -422,7 +430,7 @@ class CarlaEnv(gym.Env):
             obs["measurements"] = meas_normalized
         if "ocp_obs" in self.env_cfg["obs_type"]:
             # 获取ocp观察信息
-            ocp_obs = get_ocp_observation(self.vehicle,self.imu_sensor,self.actors,self.path_locations,self.world.get_map())
+            ocp_obs = get_ocp_observation(self.vehicle,self.imu_sensor,self.actors,self.path_locations,self.world.get_map(),self.ego_ref_speed)
             # normalize_ocp = normalize_ocp_scenario_relative(ocp_obs)
             state_ego_flat = np.asarray(ocp_obs[0])
             state_other_flat = np.asarray(ocp_obs[1]).flatten()
@@ -446,7 +454,7 @@ class CarlaEnv(gym.Env):
         road_location = ocp_obs[2]
         # 自车与道路边缘的连线
         self.world.debug.draw_line(
-            ego_location, carla.Location(x=road_location[0],y=road_location[1]),
+            ego_location, carla.Location(x=float(road_location[0]),y=float(road_location[1])),
             thickness=0.1,
             color=carla.Color(255, 0, 0),
             life_time=0.5
@@ -455,7 +463,7 @@ class CarlaEnv(gym.Env):
         # 自车与参考路径的连线
         ref_location = ocp_obs[3]
         self.world.debug.draw_line(
-            ego_location, carla.Location(x=ref_location[0],y=ref_location[1]),
+            ego_location, carla.Location(x=float(ref_location[0]),y=float(ref_location[1])),
             thickness=0.1,
             color=carla.Color(0, 255, 0),
             life_time=0.5
@@ -581,32 +589,100 @@ class CarlaEnv(gym.Env):
         return surrounding
 
     def _place_spectator_above_vehicle(self):
-        """将观察者摄像头放置在车辆后上方，便于查看"""
-        if self.vehicle is None:
+        """
+        超稳定上帝视角：
+        - 位置：完全沿参考线滑动，X/Y挂在参考线上，Z固定高度
+        - 朝向：沿参考线切线方向（平行于道路）
+        - 无任何车辆晃动影响
+        """
+        if self.vehicle is None or len(self.dense_ref_path) < 2:
             return
 
-        vehicle_transform = self.vehicle.get_transform()
-        # 侧视角
-        # offset = carla.Location(x=-5.0, y=-20.0, z=15.0)
-        # spectator_transform = carla.Transform(
-        #     vehicle_transform.location + offset,
-        #     carla.Rotation(pitch=-30.0, yaw=120.0, roll=0.0)
-        # )
+        # 1. 获取车辆当前位置
+        vehicle_loc = self.vehicle.get_location()
+        vehicle_xy = np.array([vehicle_loc.x, vehicle_loc.y])
 
-        # 后视角
-        # offset = carla.Location(x=6.0, y=0.0, z=10.0)
-        # spectator_transform = carla.Transform(
-        #     vehicle_transform.location + offset,
-        #     carla.Rotation(pitch=-20.0, yaw=vehicle_transform.rotation.yaw, roll=0.0)
-        # )
+        # 2. 找到车辆在密集参考线上的「最近投影点」（用上一帧索引加速）
+        # 只搜索上一帧索引附近的点（比如前后各100个点），避免每帧遍历整个数组
+        search_window = 100
+        start_idx = max(0, self.last_ref_idx - search_window)
+        end_idx = min(len(self.dense_ref_path), self.last_ref_idx + search_window)
+        search_path = self.dense_ref_path[start_idx:end_idx]
 
-        # 上帝视角
-        offset = carla.Location(x=40.0, y=0.0, z=50.0)
-        spectator_transform = carla.Transform(
-            vehicle_transform.location + offset,
-            carla.Rotation(pitch=270.0, yaw=vehicle_transform.rotation.yaw, roll=-90.0)
+        # 计算距离，找到最近点
+        dists = np.hypot(search_path[:, 0] - vehicle_xy[0], search_path[:, 1] - vehicle_xy[1])
+        local_min_idx = np.argmin(dists)
+        closest_idx = start_idx + local_min_idx
+        self.last_ref_idx = closest_idx  # 更新索引供下一帧使用
+
+        # 3. 计算参考线在该点的「切线方向」（保证视角平行于道路）
+        # 取前后各一个点来计算切线，更平滑
+        lookahead_idx = min(closest_idx + 5, len(self.dense_ref_path) - 1)  # 往前看5个点，视角更顺
+        lookbehind_idx = max(closest_idx - 1, 0)
+
+        forward_pt = self.dense_ref_path[lookahead_idx]
+        backward_pt = self.dense_ref_path[lookbehind_idx]
+
+        # 计算切线角度（yaw）
+        dx = forward_pt[0] - backward_pt[0]
+        dy = forward_pt[1] - backward_pt[1]
+        ref_yaw = np.degrees(np.arctan2(dy, dx))  # 弧度转角度
+
+        # 4. 设置相机位置：参考线投影点正上方
+        # 可调参数：
+        # z=50.0：高度，越高越宏观
+        # x_offset=10.0：相机往参考线前方偏移10米（能看到更远的路）
+        x_offset = 10.0
+        z_height = 50.0
+
+        # 把x_offset投影到参考线方向上
+        offset_x = x_offset * np.cos(np.radians(ref_yaw))
+        offset_y = x_offset * np.sin(np.radians(ref_yaw))
+
+        target_location = carla.Location(
+            x=float(self.dense_ref_path[closest_idx, 0] + offset_x),
+            y=float(self.dense_ref_path[closest_idx, 1] + offset_y),
+            z=z_height
         )
-        self.world.get_spectator().set_transform(spectator_transform)
+
+        # 5. 设置相机朝向：沿参考线切线，固定俯视角度
+        # 可调参数：pitch=-45（俯视角度，-90是完全垂直向下）
+        target_rotation = carla.Rotation(
+            pitch=-90.0,
+            yaw=float(ref_yaw),
+            roll=0.0
+        )
+        target_transform = carla.Transform(target_location, target_rotation)
+
+        # 6. 极轻微平滑（可选，防止参考线本身有微小抖动，lerp_factor设大一点，比如0.5）
+        if self.prev_spectator_transform is None:
+            final_transform = target_transform
+        else:
+            lerp_factor = 0.5  # 0.5~0.8之间，既平滑又不延迟
+            # 位置插值
+            prev_loc = self.prev_spectator_transform.location
+            final_loc = carla.Location(
+                x=prev_loc.x + (target_location.x - prev_loc.x) * lerp_factor,
+                y=prev_loc.y + (target_location.y - prev_loc.y) * lerp_factor,
+                z=prev_loc.z + (target_location.z - prev_loc.z) * lerp_factor
+            )
+            # 旋转插值（处理yaw环绕）
+            prev_rot = self.prev_spectator_transform.rotation
+            delta_yaw = target_rotation.yaw - prev_rot.yaw
+            if delta_yaw > 180: delta_yaw -= 360
+            if delta_yaw < -180: delta_yaw += 360
+            final_yaw = prev_rot.yaw + delta_yaw * lerp_factor
+
+            final_rot = carla.Rotation(
+                pitch=prev_rot.pitch + (target_rotation.pitch - prev_rot.pitch) * lerp_factor,
+                yaw=final_yaw,
+                roll=0.0
+            )
+            final_transform = carla.Transform(final_loc, final_rot)
+
+        # 7. 应用视角
+        self.world.get_spectator().set_transform(final_transform)
+        self.prev_spectator_transform = final_transform
 
     def step(self, action):
         if self.vehicle is None:
@@ -619,7 +695,7 @@ class CarlaEnv(gym.Env):
         reverse_flag = False
 
         if not isinstance(self.action_space, gym.spaces.Discrete):
-            # ========== 连续动作处理（核心修复：唯一计算控制量的分支）==========
+            # ========== 连续动作处理 ==========
             # 1. 解析动作 [归一化加速度, 归一化转向角]，范围[-1,1]
             norm_accel = float(np.clip(action[0], -1.0, 1.0))
             norm_steer = float(np.clip(action[1], -1.0, 1.0))
@@ -649,7 +725,7 @@ class CarlaEnv(gym.Env):
             # ========== 离散动作处理（仅占位，不覆盖连续动作的变量）==========
             pass  # 你的离散动作逻辑写在这里，不要修改throttle_val等变量
 
-        # ========== 【唯一一次】应用控制到车辆（核心修复：删除重复执行）==========
+        # ========== 【唯一一次】应用控制到车辆 ==========
         ctrl = carla.VehicleControl()
         ctrl.throttle = throttle_val
         ctrl.brake = brake_val
@@ -658,22 +734,27 @@ class CarlaEnv(gym.Env):
         ctrl.hand_brake = False  # 强制关闭手刹，避免锁死
         self.vehicle.apply_control(ctrl)
 
-        # ========== 仿真推进逻辑（保持不变）==========
+        # ========== 仿真推进逻辑（修复模运算括号）==========
         if self.carla_cfg["sync_mode"]:
             if self.enable_sumo:
                 self.synchronization.tick()
                 self.world.tick()
-                if self.step_count + 1 % 1000 == 0:
+                # 【修复1】给 step_count+1 加括号，保证模运算优先级正确
+                if (self.step_count + 1) % 1000 == 0:
                     self._cleanup_finished_vehicles()
             else:
                 self.world.tick()
         else:
             if self.enable_sumo:
                 self.synchronization.tick()
-                if self.step_count + 1 % 1000 == 0:
+                # 【修复1】同上
+                if (self.step_count + 1) % 1000 == 0:
                     self._cleanup_finished_vehicles()
             else:
                 self.world.wait_for_tick()
+
+        # ========== 在此处调用视角跟随函数（仿真推进后，车辆位置已更新）==========
+        self._place_spectator_above_vehicle()
 
         self.step_count += 1
 
@@ -797,6 +878,33 @@ class CarlaEnv(gym.Env):
                 print(f"[Cleanup] Unexpected error for {veh_id}: {e}")
                 continue
 
+    def _interpolate_ref_path(self, sparse_path, interval=0.5):
+        """
+        对稀疏参考线进行插值加密
+        :param sparse_path: 原始稀疏参考线 [[x1,y1], [x2,y2], ...]
+        :param interval: 插值后点与点的间隔（米），越小越密集，0.5~1.0米推荐
+        :return: 加密后的参考线 array(N, 2)
+        """
+        if len(sparse_path) < 2:
+            return np.array(sparse_path)
+
+        sparse_array = np.array(sparse_path)
+        # 计算原始路径上每个点之间的累积距离
+        diffs = np.diff(sparse_array, axis=0)
+        seg_dists = np.hypot(diffs[:, 0], diffs[:, 1])
+        cum_dists = np.concatenate(([0], np.cumsum(seg_dists)))
+        total_dist = cum_dists[-1]
+
+        # 生成新的密集距离点
+        num_new_points = int(np.ceil(total_dist / interval))
+        new_dists = np.linspace(0, total_dist, num_new_points)
+
+        # 对x和y分别进行线性插值
+        x_new = np.interp(new_dists, cum_dists, sparse_array[:, 0])
+        y_new = np.interp(new_dists, cum_dists, sparse_array[:, 1])
+
+        return np.column_stack((x_new, y_new))
+
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
         super().reset(seed=seed)
         try:
@@ -832,6 +940,9 @@ class CarlaEnv(gym.Env):
             # 规划静态路径
             self.route_planner = RoutePlanner(self.world, self.carla_cfg["world"]["sampling_resolution"])
             self.route_plane(end_x =500.3154,end_y = 251.56,end_z = 0.300000)
+
+            # 对参考线进行插值加密（解决参考线稀疏问题）
+            self.dense_ref_path = self._interpolate_ref_path(self.ref_path_xy)
 
             obs = self._get_observation()
             info = {}  # 可扩展
