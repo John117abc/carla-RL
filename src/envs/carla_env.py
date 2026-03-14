@@ -7,7 +7,7 @@ import random
 import time
 import math
 from typing import Dict, Any, Tuple, Optional, Union, List
-
+from gymnasium import spaces
 from src.envs.sensors import CameraSensor, CollisionSensor, LaneInvasionSensor,ObstacleSensor,IMUSensor
 from src.carla_utils import get_compass,world_to_vehicle_frame,RoutePlanner,get_ocp_observation,get_current_lane_forward_edges
 from src.utils import get_logger,RunningNormalizer
@@ -612,60 +612,84 @@ class CarlaEnv(gym.Env):
         if self.vehicle is None:
             raise RuntimeError("环境没有重置. 请先 reset()。")
 
-        # 解析动作
-        if isinstance(self.action_space, gym.spaces.Discrete):
-            throttle, steer = self.env_cfg["action"]["discrete"]["actions"][action]
-        else:
-            throttle, steer = float(action[0]), float(action[1])
-            throttle = np.clip(throttle, -1.0, 1.0)
-            steer = np.clip(steer, -1.0, 1.0)
+        # 初始化控制量默认值，避免分支变量未定义
+        throttle_val = 0.0
+        brake_val = 0.0
+        steer_val = 0.0
+        reverse_flag = False
 
-        # 应用控制
-        ctrl = carla.VehicleControl()
-        if throttle >= 0:
-            ctrl.throttle = float(throttle)
-            ctrl.brake = 0.0
+        if not isinstance(self.action_space, gym.spaces.Discrete):
+            # ========== 连续动作处理（核心修复：唯一计算控制量的分支）==========
+            # 1. 解析动作 [归一化加速度, 归一化转向角]，范围[-1,1]
+            norm_accel = float(np.clip(action[0], -1.0, 1.0))
+            norm_steer = float(np.clip(action[1], -1.0, 1.0))
+
+            # 2. 映射到CARLA油门/刹车（互斥）
+            if norm_accel > 0:
+                throttle_val = norm_accel
+                brake_val = 0.0
+            elif norm_accel < 0:
+                throttle_val = 0.0
+                brake_val = abs(norm_accel)
+            else:
+                throttle_val = 0.0
+                brake_val = 0.0
+
+            # 3. 转向角直接映射（CARLA steer范围正好是[-1,1]）
+            steer_val = norm_steer
+
+            # 4. 倒车档位逻辑：负加速度+车速接近0时，开启倒车档
+            current_speed = self.vehicle.get_velocity().length()
+            if norm_accel < -0.1 and current_speed < 0.1:
+                reverse_flag = True
+            else:
+                reverse_flag = False
+
         else:
-            ctrl.throttle = 0.0
-            ctrl.brake = float(-throttle)
-        ctrl.steer = float(steer)
+            # ========== 离散动作处理（仅占位，不覆盖连续动作的变量）==========
+            pass  # 你的离散动作逻辑写在这里，不要修改throttle_val等变量
+
+        # ========== 【唯一一次】应用控制到车辆（核心修复：删除重复执行）==========
+        ctrl = carla.VehicleControl()
+        ctrl.throttle = throttle_val
+        ctrl.brake = brake_val
+        ctrl.steer = steer_val
+        ctrl.reverse = reverse_flag
+        ctrl.hand_brake = False  # 强制关闭手刹，避免锁死
         self.vehicle.apply_control(ctrl)
 
-        # 推进仿真
+        # ========== 仿真推进逻辑（保持不变）==========
         if self.carla_cfg["sync_mode"]:
             if self.enable_sumo:
-                # SUMO + CARLA 同步模式：先同步数据，再推进 CARLA
                 self.synchronization.tick()
                 self.world.tick()
-                # 清理sumo的actors
-                if self.step_count +1 % 1000 == 0:
+                if self.step_count + 1 % 1000 == 0:
                     self._cleanup_finished_vehicles()
             else:
                 self.world.tick()
         else:
             if self.enable_sumo:
                 self.synchronization.tick()
-                if self.step_count +1 % 1000 == 0:
+                if self.step_count + 1 % 1000 == 0:
                     self._cleanup_finished_vehicles()
             else:
                 self.world.wait_for_tick()
 
         self.step_count += 1
 
-        # 获取传感器状态
+        # ========== 传感器、观测、奖励、终止判断（保持不变）==========
         lane_inv = self.lane_invasion_sensor.get_count()
         collision = self.collision_sensor.get_intensity()
         obstacle = self.obstacle_sensor.is_obstacle_ahead(self.env_cfg["termination"]["obstacle_threshold"])
-        # 获取观察状态
         obs = self._get_observation()
-        reward = self._compute_reward(lane_inv,collision,obstacle)
-        terminated, truncated, info = self._check_termination(lane_inv,collision,obstacle)
+        reward = self._compute_reward(lane_inv, collision, obstacle)
+        terminated, truncated, info = self._check_termination(lane_inv, collision, obstacle)
         info.update(reward)
-        # 把ref路径信息和static路径信息存到info中
         info['ref_path_xy'] = self.ref_path_xy
-        left_pts, right_pts = get_current_lane_forward_edges(self.vehicle,self.world)
+        left_pts, right_pts = get_current_lane_forward_edges(self.vehicle, self.world)
         info['static_road_left'] = [[item.x, item.y] for item in left_pts]
         info['static_road_right'] = [[item.x, item.y] for item in right_pts]
+
         return obs, reward['total_reward'], terminated, truncated, info
 
     def _destroy_all_sensors(self):
@@ -915,6 +939,32 @@ class CarlaEnv(gym.Env):
         self.path_locations = path_locations
         self.ref_path_xy = [[item.x, item.y] for item in path_locations]
         logger.info(f"路径规划成功！已规划{len(path_locations)}个坐标点")
+
+    def get_random_driving_action(self):
+        """
+        生成用于探索的随机驾驶动作。
+        返回: [steer, accel]
+        范围: 均为 [-1, 1]
+
+        逻辑优化:
+        - 转向: 完全随机 [-1, 1]
+        - 加速: 70% 概率给正向油门 (0.3 ~ 1.0)，30% 概率刹车或滑行 (-1.0 ~ 0.2)
+          (这样能保证车大概率是向前动的，避免原地不动)
+        """
+
+        # 1. 转向角 (Steering): -1 (左满) 到 1 (右满)
+        steer = np.random.uniform(-1.0, 1.0)
+
+        # 2. 加速度/油门 (Acceleration): -1 (急刹) 到 1 (地板油)
+        # 策略：大部分时间给油，让车动起来
+        if np.random.rand() < 0.7:
+            # 70% 概率：给一个明显的油门 (0.3 到 1.0)，确保克服静摩擦力
+            accel = np.random.uniform(0.3, 1.0)
+        else:
+            # 30% 概率：刹车或松油门 (-1.0 到 0.2)
+            accel = np.random.uniform(-1.0, 0.2)
+
+        return np.array([accel,steer], dtype=np.float32)
 
     @property
     def is_eval(self):

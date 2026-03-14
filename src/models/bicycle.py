@@ -1,79 +1,68 @@
 import torch
-import numpy as np
+import torch.nn as nn
 
-# ✅ 修改：作为一个普通类或直接使用函数
-class BicycleModel:
+
+class BicycleModel(nn.Module):
     def __init__(self, dt=0.1, L=2.5):
+        super(BicycleModel, self).__init__()
         self.dt = dt
-        self.L = L  # 轴距
+        self.L = L
+        self.register_buffer('dt_tensor', torch.tensor(dt))
+        self.register_buffer('L_tensor', torch.tensor(L))
 
     def forward(self, state, action):
-        """
-        纯物理公式计算，不涉及任何 nn.Parameter
-        state: [B, 1, 6] (x, y, psi, v, delta, ...) 或类似结构
-        action: [B, 2] (accel, steer)
-        """
-        # 确保输入是 tensor
-        if not isinstance(state, torch.Tensor):
-            state = torch.tensor(state, dtype=torch.float32)
-        if not isinstance(action, torch.Tensor):
-            action = torch.tensor(action, dtype=torch.float32)
+        original_shape = state.shape
+        B, N = original_shape[0], original_shape[1]
 
-        # 解包状态 (假设 state 结构: x, y, psi, v, ...)
-        # 请根据你实际的 state 维度调整索引
-        # 假设 state shape: [B, 1, 6], action shape: [B, 2]
-        # 这里需要 squeeze 掉中间的维度以匹配运算
-        s = state.squeeze(1)  # [B, 6]
-        a = action  # [B, 2]
+        s_flat = state.view(-1, 6)
+        if action.dim() == 2:
+            a_flat = action.unsqueeze(1).expand(-1, N, -1).reshape(-1, 2)
+        else:
+            a_flat = action.reshape(-1, 2)
 
-        x = s[:, 0]
-        y = s[:, 1]
-        psi = s[:, 2]
-        v = s[:, 3]
-        # delta = s[:, 4] # 如果需要当前舵角
+        x = s_flat[:, 0]
+        y = s_flat[:, 1]
+        psi = s_flat[:, 2]
+        v = s_flat[:, 3]
+        delta = s_flat[:, 4]
+        extra = s_flat[:, 5]
 
-        accel = a[:, 0]
-        steer = a[:, 1]
+        accel = a_flat[:, 0]
+        steer = a_flat[:, 1]
 
-        # --- 物理模型 ---
-        # 1. 更新速度
-        v_next = v + accel * self.dt
-        v_next = torch.clamp(v_next, 1.0, 30.0)  # 限制速度范围
+        # --- 1. 速度更新 (允许减速到 0，但不要强制为正，除非物理引擎限制) ---
+        # 建议：只限制最大值，最小值设为 0 (禁止倒车) 或 -1 (允许微倒车)
+        # ❌ 错误：v_next = torch.clamp(v_next, 0.1, 30.0) -> 导致梯度在 v<0.1 时消失
+        v_next = v + accel * self.dt_tensor
+        # ✅ 修复：允许速度归零，但不要出现巨大的梯度截断
+        # 如果确实不能倒车，设为 0.0。如果想让训练更稳定，可以设为 -0.5 允许微小倒车
+        v_next = torch.clamp(v_next, 0.01, 30.0)
 
-        # 2. 更新航向 (关键修复：处理 v=0 的奇点)
-        # 原公式: d_psi = (v / L) * tan(steer)
-        # 问题: 当 v=0 时，梯度为 0。
-        # 修复: 添加一个极小值 epsilon，或者在低速时使用近似模型
-        # 但更物理的做法是：即使 v=0，如果我们有加速度，下一帧 v 就不为 0 了。
-        # 这里的梯度断裂是因为 v 是当前帧的，而 steer 影响的是下一帧的 v 方向？
-        # 不，自行车模型中 steer 直接影响角速度。如果 v=0，车确实原地转不了弯（除非考虑动力学滑移，但这是运动学模型）。
+        # --- 2. 转向计算 (保留你的 v_safe 技巧，这很好) ---
+        # 注意：这里用 v 还是 v_next 都可以，关键是用 v_safe 保证梯度
+        # 为了物理一致性，通常用当前速度 v 计算角速度，或者用平均速度
+        v_safe = torch.clamp(v, min=0.5)
+        d_psi = (v_safe / self.L_tensor) * torch.tan(steer)
+        psi_next = psi + d_psi * self.dt_tensor
 
-        # 🔥 真正的解决方案：
-        # 在运动学模型中，如果 v=0，转向确实无效。
-        # 必须保证初始状态 v != 0，或者在 Loss 中加入对 "未来速度" 的激励。
-        # 但为了梯度能传回，我们可以人为地在计算角速度时加一个 epsilon，
-        # 或者更简单地：确保环境初始速度不为 0。
+        # --- 3. 位移计算 (关键修复) ---
+        # ❌ 原代码：x_next = x + v * cos(psi) * dt
+        # 问题：如果 v=0 且 accel>0，这一步 x 不变，虽然 v_next 变了，但第一帧没位移。
+        # 这会导致网络认为"加油也没用"。
 
-        # 临时 Hack (为了让梯度流动): 给 v 加一个极小值用于计算角速度，但不更新实际速度
-        v_safe = torch.clamp(v, min=0.1)
+        # ✅ 修复：使用更新后的速度 v_next (欧拉前向) 或者 平均速度 (梯形积分)
+        # 方法 A: 使用 v_next (假设加速度瞬间生效)
+        # x_next = x + v_next * torch.cos(psi) * self.dt_tensor
 
-        d_psi = (v_safe / self.L) * torch.tan(steer)
-        psi_next = psi + d_psi * self.dt
+        # 方法 B (推荐): 使用平均速度 (v + v_next) / 2，物理更准确，梯度更平滑
+        v_avg = (v + v_next) * 0.5
+        x_next = x + v_avg * torch.cos(psi) * self.dt_tensor
+        y_next = y + v_avg * torch.sin(psi) * self.dt_tensor
 
-        # 3. 更新位置
-        x_next = x + v * torch.cos(psi) * self.dt
-        y_next = y + v * torch.sin(psi) * self.dt
+        delta_next = torch.clamp(steer, -0.5, 0.5)
 
-        # 4. 更新舵角 (假设动作直接控制舵角变化率或直接设定)
-        # 假设 action[:, 1] 是目标舵角或舵角增量，这里简化为直接更新
-        delta_next = steer  # 或者 delta + steer * dt
+        next_state_flat = torch.stack([
+            x_next, y_next, psi_next, v_next, delta_next, extra
+        ], dim=1)
 
-        # 重新打包
-        # 保持与原代码一致的输出形状 [B, 1, 6]
-        next_state = torch.stack([x_next, y_next, psi_next, v_next, delta_next, s[:, 5]], dim=1).unsqueeze(1)
-
-        return next_state
-
-    # 如果你之前有 batch 处理函数，也改成普通方法
-    def predict_batch(self, states, actions):
-        return self.forward(states, actions)
+        return next_state_flat.view(original_shape)

@@ -7,12 +7,12 @@ rl:
   num_envs: 1                  # 并行环境数
   num_episodes: 5000    # 训练回合数
   total_timesteps: 1_000_000
-  log_interval: 100               # 每多少步记录一次日志
+  log_interval: 50               # 每多少步记录一次日志
   save_freq: 100            # 每多少回合保存一次模型
-  continue_a2c: True    # 是否继续训练，如果需要继续训练，则需要填写模型地址
+  continue_a2c: False    # 是否继续训练，如果需要继续训练，则需要填写模型地址
   model_path_a2c: 'checkpoints/20260131/a2c-v1.0_Town06_Opt_020547_episode=4000.pth'
-  continue_ocp: False    # 是否继续训练，如果需要继续训练，则需要填写模型地址
-  model_path_ocp: 'checkpoints/20260303/ocp-v1.0_Town06_Opt_084829_episode=4600.pth'
+  continue_ocp: True    # 是否继续训练，如果需要继续训练，则需要填写模型地址
+  model_path_ocp: 'checkpoints/20260314/ocp-v1.0_Town06_Opt_071734_episode=5000.pth'
   num_eps_eval: 10    # 评估步数
 
   A2C:
@@ -29,17 +29,18 @@ rl:
 
   OCP:
     gamma: 0.95
-    amplifier_c: 1.1
-    amplifier_m: 100000 # x更新一次m
-    lr_actor: 3e-4
-    lr_critic: 1e-3
-    init_penalty: 1.0  # 初始惩罚系数
-    max_penalty: 100
-    hidden_dim: 512
-    other_car_min_distance: 1.0   # 与周车最小距离
-    road_min_distance: 0.5    # 与路边缘最小距离
-    min_start_train: 128    # 最小启动训练样本数(轨迹数)
-    total_capacity: 500000  # 缓冲区容量(轨迹数)
-    batch_size: 2     # 批次取样数量
-    horizon: 20 # 预测步数
-    dt: 0.5 # 步长
+    amplifier_c: 1.05
+    amplifier_m: 500      # 【关键】每500次迭代才更新一次Actor
+    lr_actor: 0.0001
+    lr_critic: 0.0005     # 【关键】提高Critic学习率
+    init_penalty: 0.5      # 【关键】降低初始惩罚
+    max_penalty: 20.0      # 【关键】降低最大惩罚
+    hidden_dim: 256
+    other_car_min_distance: 1.0
+    road_min_distance: 0.5
+    min_start_train: 1000
+    total_capacity: 500000
+    batch_size: 256
+    horizon: 10            # 【关键】缩短预测时域到10步
+    dt: 0.1                # 【关键】和Carla仿真步长对齐
+

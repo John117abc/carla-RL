@@ -25,7 +25,7 @@ class PriorityBuffer:
         elif priority > self.buffer[0][0]:
             removed = heapq.heappop(self.buffer)
             self.sum_priorities -= removed[0]
-            heapq.heappush(self.buffer, (priority, self.count,experience))
+            heapq.heappush(self.buffer, (priority, count,experience))
             self.sum_priorities += priority
             return True
         return False
@@ -63,6 +63,13 @@ class PriorityBuffer:
 
     def temporarily_expand(self):
         self.capacity = int(self.capacity * 1.2)  # 临时增加20%容量
+
+    def clear(self):
+        """清空当前缓冲区的所有内容"""
+        self.buffer = []
+        self.sum_priorities = 0.0
+        # 重置计数器，避免内存泄漏或整数溢出（虽然 itertools.count 很少溢出，但重置更干净）
+        self._counter = itertools.count()
 
     def __len__(self):
         return len(self.buffer)
@@ -120,6 +127,11 @@ class SafetyCriticalBuffer(PriorityBuffer):
 
         return max(0.1, min(10.0, safety_priority))  # 限制在0.1-10.0之间
 
+    def clear(self):
+        """清空安全关键缓冲区及碰撞历史"""
+        super().clear()
+        self.collision_history = []
+
 
 class PerformanceBuffer(PriorityBuffer):
     """存储有助于跟踪性能优化的样本"""
@@ -170,6 +182,12 @@ class PerformanceBuffer(PriorityBuffer):
             priority *= 1.5
 
         return max(0.1, min(10.0, priority))
+
+    def clear(self):
+        """清空性能缓冲区及性能历史"""
+        super().clear()
+        self.best_performance = -float('inf')
+        self.performance_history = []
 
 
 class DiversityBuffer(PriorityBuffer):
@@ -259,6 +277,11 @@ class DiversityBuffer(PriorityBuffer):
 
         return 0.5
 
+    def clear(self):
+        """清空多样性缓冲区及场景统计"""
+        super().clear()
+        self.scenario_counts = defaultdict(int)
+        self.total_samples = 0
 
 class CurriculumBuffer(PriorityBuffer):
     """实现课程学习的缓冲区，从简单到复杂"""
@@ -291,6 +314,13 @@ class CurriculumBuffer(PriorityBuffer):
         self._update_difficulty_threshold(difficulty)
 
         return max(0.1, min(10.0, priority))
+
+    def clear(self):
+        """清空课程学习缓冲区及难度历史"""
+        super().clear()
+        # 重置难度阈值为初始值 (根据你的 __init__ 设定)
+        self.current_difficulty_threshold = 2.0
+        self.difficulty_history = []
 
     def _assess_difficulty(self, info,reward):
         """评估样本难度"""
@@ -377,6 +407,18 @@ class StochasticBuffer:
         if not added:
             self._handle_buffer_full(buffer_idx, experience, priority)
 
+    def clear(self):
+        """
+        清空所有子缓冲区的内容、统计历史和状态。
+        调用此方法后，缓冲区将恢复到刚初始化时的状态。
+        """
+        # 1. 清空所有子缓冲区
+        for buffer in self.buffers:
+            buffer.clear()
+
+        # 2. 重置 StochasticBuffer 特有的状态变量
+        self.gep_penalty_factor = 1.0
+
     def _classify_experience(self, experience):
         """根据经验特性分类到最合适的缓冲区"""
         state, action, reward, value, done, info = experience
@@ -415,10 +457,10 @@ class StochasticBuffer:
 
     def _is_high_performance(self, experience):
         """判断是否为高性能样本"""
-        _, _, reward, _, _, info = experience
-        high_speed_reward = reward['high_speed_reward']
+        _, _, _, _, _, info = experience
+        high_speed_reward = info['high_speed_reward']
         on_road_reward = info['centering_reward']
-        right_lane_reward = reward['right_lane_reward']
+        right_lane_reward = info['right_lane_reward']
 
         # 高性能标准：高速、保持在道路上、在正确车道
         return (high_speed_reward > 0.7 and
@@ -445,7 +487,7 @@ class StochasticBuffer:
         """创建场景指纹，用于识别不同场景 - 简化版"""
         speed = info.get('speed', 0.0)
         on_road = info['centering_reward'] > 0.5
-        right_lane = reward['right_lane_reward'] > 0.5
+        right_lane = info['right_lane_reward'] > 0.5
         collision = info.get('collision', False)
 
         # 速度级别

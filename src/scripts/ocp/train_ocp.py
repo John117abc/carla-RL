@@ -69,8 +69,8 @@ def main():
             #     env.ocp_normalizer.load_state_dict(checkpoint['ocp_normalizer'])
 
         logger.info("环境创建成功！")
-        logger.info(f"观测空间: {env.observation_space}")
-        logger.info(f"动作空间: {env.action_space}")
+        # logger.info(f"观测空间: {env.observation_space}")
+        # logger.info(f"动作空间: {env.action_space}")
 
         num_episodes = train_config["num_episodes"]
         global_step = 0
@@ -85,7 +85,12 @@ def main():
             states, actions, rewards, infos ,log_probs= [], [], [], [],[]
             initial_state = state.copy()
             while not done:
-                action = agent.actor(torch.tensor(state[0],dtype=torch.float32).to(device)).cpu().detach().numpy()
+                if not agent.buffer.should_start_training():
+                    action = env.get_random_driving_action()
+                else:
+                    action, _ = agent.select_action(state)
+                    # ✅ 新增：打印传给环境的最终动作（验证是否在 [-1,1] 且非极值）
+                    # logger.info(f"🎮 传给环境的动作: {action} (加速度: {action[0]:.4f}, 转向角: {action[1]:.4f})")
                 next_obs, reward, _, _, info = env.step(action)
                 next_state = next_obs['ocp_obs']
                 done = info['collision'] or info['off_route'] or info['TimeLimit.truncated']
@@ -97,8 +102,8 @@ def main():
                 infos.append(info)
                 state = next_state
 
-                # 更新惩罚参数
-                agent.update_penalty(env.step_count)
+                # # 更新惩罚参数
+                # agent.update_penalty(env.step_count)
                 # 加入buffer
                 agent.buffer.handle_new_experience((state, action, reward, _, done, info))
 
@@ -115,11 +120,10 @@ def main():
 
                     if loss is not None:
                         logger.info(
-                            f"训练损失: actor_loss:{loss['actor_loss']:.5f},critic_loss:{loss['critic_loss']:.5f},"
-                            f"惩罚参数：{agent.init_penalty:.5f}")
-                        loss.update({
-                            'global_step': global_step
-                        })
+                            f"训练损失: actor_loss:{loss['actor_loss']:.5f}, critic_loss:{loss['critic_loss']:.5f}, "
+                            f"惩罚参数 ρ:{loss['penalty']:.5f}, GEP迭代次数:{loss['gep_iteration']}, "
+                            f"Actor是否更新:{loss['actor_updated']}"
+                        )
                         history.append(loss)
 
                 if done:
