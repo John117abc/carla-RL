@@ -194,3 +194,35 @@ def average_ocp_list(data_list):
         avg_road_edge,
         avg_ref_path
     ]
+
+def unpack_ocp_numpy(data,road_num,other_number):
+    """
+    严格解包ocp维状态张量
+    输入维度：[B, N, 121] → 输出：
+    - ego_state: [B, N, 6]
+    - other_states: [B, N, 8, 4]
+    - ref_error: [B, N, 3]
+    - road_state: [B, N, 80]
+    """
+    # 核心维度定义（严格对齐用户输入）
+    DIM_EGO = 6  # 自车状态维度 [x,y,vx,vy,psi,omega]
+    DIM_OTHER = other_number * 4  # 其他车辆状态 8×4
+    DIM_REF_ERROR = 3  # 参考误差 [横向误差δp, 航向误差δφ, 速度误差δv]
+    DIM_ROAD = road_num * 4  # 道路边界 80维 [左1x,左1y,...左20x,左20y,右1x,右1y,...右20x,右20y]
+    TOTAL_STATE_DIM = DIM_EGO + DIM_OTHER + DIM_REF_ERROR + DIM_ROAD  # 121维
+
+    if data.ndim != 3 or data.shape[2] != TOTAL_STATE_DIM:
+        raise ValueError(
+            f"输入张量必须为 [B,N,121]，当前={data.shape}"
+        )
+
+    B, N = data.shape[0], data.shape[1]
+
+    # 解包各部分
+    ego_state = data[:, :, 0:DIM_EGO]  # 0-5
+    other_raw = data[:, :, DIM_EGO : DIM_EGO + DIM_OTHER]  # 6-37
+    other_states = other_raw.reshape(B, N, other_number, 4)  # 8×4=32
+    ref_error = data[:, :, DIM_EGO + DIM_OTHER : DIM_EGO + DIM_OTHER + DIM_REF_ERROR]  # 38-40
+    road_state = data[:, :, DIM_EGO + DIM_OTHER + DIM_REF_ERROR:]  # 41-120
+
+    return ego_state, other_states, ref_error, road_state

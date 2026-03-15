@@ -9,8 +9,9 @@ import math
 from typing import Dict, Any, Tuple, Optional, Union, List
 from gymnasium import spaces
 from src.envs.sensors import CameraSensor, CollisionSensor, LaneInvasionSensor,ObstacleSensor,IMUSensor
-from src.carla_utils import get_compass,world_to_vehicle_frame,RoutePlanner,get_ocp_observation,get_current_lane_forward_edges
-from src.utils import get_logger,RunningNormalizer
+from src.carla_utils import get_compass, world_to_vehicle_frame, RoutePlanner, get_ocp_observation, \
+    get_current_lane_forward_edges, draw_text_at_location, draw_lines_between_points, draw_points
+from src.utils import get_logger, RunningNormalizer, unpack_ocp_numpy
 from src.configs.constant import (LAYERS_TO_REMOVE_1,
                                   LAYERS_TO_REMOVE_2,
                                   LAYERS_TO_REMOVE_3,
@@ -179,16 +180,12 @@ class CarlaEnv(gym.Env):
             )
 
         if "ocp_obs" in obs_type:
-            # 有自车，周车，道路，参考4个维度数据，每个维度有6项
-            # 而且周车观察8辆车，所以维度是66
+            n_meas = self._get_ocp_dim()
             obs_spaces["ocp_obs"] = gym.spaces.Box(
-                low=-np.inf, high=np.inf, shape=(66,), dtype=np.float32
+                low=-np.inf, high=np.inf, shape=(n_meas,), dtype=np.float32
             )
 
-        if len(obs_spaces) == 1:
-            self.observation_space = list(obs_spaces.values())[0]
-        else:
-            self.observation_space = gym.spaces.Dict(obs_spaces)
+        self.observation_space = gym.spaces.Dict(obs_spaces)
 
         # 卸载地图层级
         self._init_map_layers()
@@ -219,6 +216,24 @@ class CarlaEnv(gym.Env):
             color=carla.Color(255, 0, 0),  # 红色
             draw_shadow=True
         )
+
+    def _get_ocp_dim(self):
+        """
+                获取ocp观察下的维度大小
+                :return: 维度大小
+                """
+        dim = 0
+        for key in self.env_cfg["ocp"]["include"]:
+            if key == "ego":
+                dim += 6
+            elif key == "others":
+                dim += (self.env_cfg["ocp"]["others"] * 4)
+            elif key == "ref_error":
+                dim += 3
+            elif key == "road":
+                dim += (self.env_cfg["ocp"]["num_points"] * 4)
+
+        return dim
 
     def _get_measurements_dim(self):
         """
@@ -257,6 +272,24 @@ class CarlaEnv(gym.Env):
         for layer in remove_layer:
             self.world.unload_map_layer(layer)
             logger.info(f"卸载层级: {layer}")
+
+    def _load_map_layers(self):
+        match self.carla_cfg["world"]["map_layer"]:
+            case 1:
+                remove_layer = LAYERS_TO_REMOVE_1
+            case 2:
+                remove_layer = LAYERS_TO_REMOVE_2
+            case 3:
+                remove_layer = LAYERS_TO_REMOVE_3
+            case 4:
+                remove_layer = LAYERS_TO_REMOVE_4
+            case _:
+                remove_layer = []
+        # 批量卸载
+        for layer in remove_layer:
+            self.world.load_map_layer(layer)
+            logger.info(f"加载层级: {layer}")
+
 
     def _spawn_ego_vehicle(
             self,
@@ -430,44 +463,49 @@ class CarlaEnv(gym.Env):
             obs["measurements"] = meas_normalized
         if "ocp_obs" in self.env_cfg["obs_type"]:
             # 获取ocp观察信息
-            ocp_obs = get_ocp_observation(self.vehicle,self.imu_sensor,self.actors,self.path_locations,self.world.get_map(),self.ego_ref_speed)
-            # normalize_ocp = normalize_ocp_scenario_relative(ocp_obs)
-            state_ego_flat = np.asarray(ocp_obs[0])
-            state_other_flat = np.asarray(ocp_obs[1]).flatten()
-            state_road_flat = np.asarray(ocp_obs[2])
-            state_ref_flat = np.asarray(ocp_obs[3])
-            state_all = np.concatenate([state_ego_flat,state_other_flat,state_road_flat,state_ref_flat], axis=0)
-            obs["ocp_obs"] = [state_all,ocp_obs]
-            # 如果是debug模式，在训练页面上显示和各个点的连线
+            s_ego, s_other, s_road, s_ref_raw, s_ref_error = get_ocp_observation(self.vehicle,self.imu_sensor,self.actors,self.path_locations,self.ego_ref_speed)
+            network_input = np.concatenate([
+                s_ego,  # 6维
+                s_other.flatten(),
+                s_ref_error,  # 3维
+                s_road
+            ])  # 共121维，可根据实际调整
+            obs["ocp_obs"] = network_input
+            # # 如果是debug模式，在训练页面上显示和各个点的连线
             if self._ocp_debug:
-                self._debug_ocp(ocp_obs)
+                self._debug_ocp(obs["ocp_obs"],s_ref_raw)
         if len(obs) == 1:
             return list(obs.values())[0]
         return obs
 
-    def _debug_ocp(self,ocp_obs):
-        """
-        如果启动ocp的debug模式，会在地图上显示自车与ref的连线
-        周车的连线，道路边缘的连线
-        """
-        ego_location = self.vehicle.get_location()
-        road_location = ocp_obs[2]
-        # 自车与道路边缘的连线
-        self.world.debug.draw_line(
-            ego_location, carla.Location(x=float(road_location[0]),y=float(road_location[1])),
-            thickness=0.1,
-            color=carla.Color(255, 0, 0),
-            life_time=0.5
-        )
+    def _debug_ocp(self,ocp_obs,s_ref_raw):
+        ocp_obs_np = np.array(ocp_obs, dtype=np.float32).flatten().reshape([1,1,-1])
+        ego_state, other_states, ref_error, road_state = unpack_ocp_numpy(ocp_obs_np,self.env_cfg['ocp']['num_points'],self.env_cfg['ocp']['others'])
+        ego_text = f'v_lon:{ego_state[0][0][2]:.2f} \n v_lat:{ego_state[0][0][3]:.2f} \n φ:{ego_state[0][0][4]:.2f} \n 0:{ego_state[0][0][5]:.2f}'
 
-        # 自车与参考路径的连线
-        ref_location = ocp_obs[3]
-        self.world.debug.draw_line(
-            ego_location, carla.Location(x=float(ref_location[0]),y=float(ref_location[1])),
-            thickness=0.1,
-            color=carla.Color(0, 255, 0),
-            life_time=0.5
-        )
+        # 显示ego文字
+        draw_text_at_location(world=self.world,text=ego_text,
+                              location=np.array([ego_state[0][0][0],ego_state[0][0][1]], dtype=np.float32),
+                              display_time=0.01,
+                              color=carla.Color(0, 0, 255))
+
+        road_left = road_state[..., :self.env_cfg['ocp']['num_points'] * 2].reshape(self.env_cfg['ocp'][
+                                                                                        'num_points'],
+                                                                                    2)
+        road_right = road_state[..., self.env_cfg['ocp']['num_points'] * 2:].reshape(self.env_cfg['ocp'][
+                                                                                         'num_points'],
+                                                                                     2)
+
+        # 左车道
+        draw_points(world=self.world,points=road_left,display_time=0.2, color=carla.Color(0, 255, 0),size=0.05)
+
+        # 右车道
+        draw_points(world=self.world, points=road_right, display_time=0.2, color=carla.Color(0, 255, 0),size=0.05)
+
+
+        # 参考路径绘制
+        draw_points(world=self.world, points=s_ref_raw[0:2].reshape(1,-1), display_time=0.2, color=carla.Color(0, 0, 255),size=0.05)
+
 
     def _compute_reward(self,lane_inv,collision,obstacle) -> dict[str, Any]:
         w = self.env_cfg["reward_weights"]
@@ -1030,6 +1068,9 @@ class CarlaEnv(gym.Env):
             settings.synchronous_mode = False
             settings.fixed_delta_seconds = None
             self.world.apply_settings(settings)
+
+        # 加载层级（显示回来）
+        self._load_map_layers()
 
     def route_plane(self,end_x,end_y,end_z):
         start_location = self.vehicle.get_transform().location

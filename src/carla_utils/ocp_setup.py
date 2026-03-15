@@ -1,127 +1,135 @@
 # src/carla_utils/ocp_setup.py
 import carla
 import numpy as np
-import torch
-from numpy import ndarray, dtype
 import math
-from typing import List, Dict, Union, Any, Optional
-
+from typing import List, Optional, Tuple
 import src.envs.sensors
-from src.carla_utils.vehicle_control import world_to_vehicle_frame  # 统一导入，避免重复
+from src.carla_utils.vehicle_control import world_to_vehicle_frame
 
 
 def get_ocp_observation(
-    ego_vehicle: carla.Vehicle,
-    ego_imu: src.envs.sensors.IMUSensor,
-    other_vehicles: List[carla.Vehicle],
-    path_locations: List[carla.Location],
-    world_map: carla.Map,
-    ego_ref_speed: float
-) -> List[ndarray]:
+        ego_vehicle: carla.Vehicle,
+        ego_imu: Optional[src.envs.sensors.IMUSensor],
+        other_vehicles: List[carla.Vehicle],
+        path_locations: List[carla.Location],
+        ego_ref_speed: float
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
-    获取OCP控制所需的全量观测信息
-    :param ego_ref_speed: 自车参考速度 m/s
-    :param world_map: 世界地图
+    获取完全对齐论文的OCP控制所需全量观测信息
     :param ego_vehicle: 自车
-    :param ego_imu: imu传感器
+    :param ego_imu: IMU传感器（允许为空）
     :param other_vehicles: 周车列表
     :param path_locations: 静态路径点列表
-    :return: [自车观察信息(6维), 周车观察信息(N×6维), 道路观察信息(6维), 静态路径观察信息(6维)]
+    :param world_map: 世界地图
+    :param ego_ref_speed: 自车参考速度 (m/s)
+    :return: (s_ego, s_other, s_road, s_ref_raw, s_ref_error)
+        - s_ego: 自车原始状态 (6,) [x, y, v_lon, v_lat, φ(rad), ω]
+        - s_other: 周车状态 (8, 4) [x, y, φ(rad), v_lon] 每车
+        - s_road: 多帧道路边缘 (80,) [左x1,左y1,右x1,右y1,...] 前20个点
+        - s_ref_raw: 参考路径原始状态 (6,) [x_ref, y_ref, v_ref, 0, φ_ref(rad), 0]
+        - s_ref_error: 参考路径误差状态 (3,) [δ_p(带符号), δ_φ, δ_v]
     """
-    # 鲁棒性：确保各子函数返回非None的数组
-    ocp_ego = get_ego_observation(ego_vehicle, ego_imu)
-    ocp_other = get_other_observation(ego_vehicle, other_vehicles)
-    ocp_road = get_road_edge_points(ego_vehicle, world_map)
-    ocp_ref = get_ref_observation(ego_vehicle, path_locations, ego_ref_speed)
+    # 1. 获取自车状态
+    s_ego = get_ego_observation(ego_vehicle, ego_imu)
 
-    # 兜底：若子函数返回None则替换为全零数组
-    ocp_road = ocp_road if ocp_road is not None else np.zeros(6)
-    ocp_ref = ocp_ref if ocp_ref is not None else np.zeros(6)
+    # 2. 获取周车状态
+    s_other = get_other_observation(ego_vehicle, other_vehicles)
 
-    return [ocp_ego, ocp_other, ocp_road, ocp_ref]
+    # 3. 获取多帧道路边缘状态
+    s_road = get_road_observation_multi_frame(ego_vehicle, ego_vehicle.get_world())
+
+    # 4. 获取参考路径原始状态
+    s_ref_raw = get_ref_observation(ego_vehicle, path_locations, ego_ref_speed)
+
+    # 5. 计算参考路径误差状态
+    s_ref_error = calc_ref_error(s_ego, s_ref_raw)
+
+    return s_ego, s_other, s_road, s_ref_raw, s_ref_error
 
 
 def get_ego_observation(
-    ego_vehicle: carla.Vehicle,
-    ego_imu: Optional[src.envs.sensors.IMUSensor]
-) -> ndarray:
+        ego_vehicle: carla.Vehicle,
+        ego_imu: Optional[src.envs.sensors.IMUSensor]
+) -> np.ndarray:
     """
-    获取OCP中自车的观察信息
+    获取论文定义的自车状态 (6维)
     :param ego_vehicle: 自车
-    :param ego_imu: imu传感器（允许为空，空则横摆角速度设0）
-    :return: 6维数组 [x坐标, y坐标, 纵向速度, 横向速度, 航向角(度), 横摆角速度(rad/s)]
+    :param ego_imu: IMU传感器
+    :return: [x, y, v_lon, v_lat, φ(rad), ω]
     """
     ego_transform = ego_vehicle.get_transform()
-    # 获取x，y坐标（世界坐标系）
+
+    # 1. 世界坐标系下的重心坐标
     ego_x = ego_transform.location.x
     ego_y = ego_transform.location.y
 
-    # 转换为车辆坐标系的速度（纵向/横向）
+    # 2. 车辆坐标系下的纵向/横向速度
     v_world = ego_vehicle.get_velocity()
-    ego_vx, ego_vy = world_to_vehicle_frame(v_world, ego_transform)
+    ego_vlon, ego_vlat = world_to_vehicle_frame(v_world, ego_transform)
 
-    # 航向角（度）
-    ego_yaw_deg = ego_transform.rotation.yaw
+    # 3. 航向角 (弧度) - 论文要求
+    ego_yaw_rad = math.radians(ego_transform.rotation.yaw)
 
-    # 横摆角速度（鲁棒处理：IMU为空则设0）
-    ego_angular_velocity_z = 0.0
+    # 4. 横摆角速度 (rad/s) - 鲁棒处理
+    ego_omega = 0.0
     if ego_imu is not None and hasattr(ego_imu, 'get_angular_velocity'):
         angular_vel = ego_imu.get_angular_velocity()
-        ego_angular_velocity_z = angular_vel.z if isinstance(angular_vel, carla.Vector3D) else 0.0
+        if isinstance(angular_vel, carla.Vector3D):
+            ego_omega = angular_vel.z
 
-    # 组装6维数组
-    ocp_obs = np.array([ego_x, ego_y, ego_vx, ego_vy, ego_yaw_deg, ego_angular_velocity_z], dtype=np.float32)
-    return ocp_obs
+    return np.array([ego_x, ego_y, ego_vlon, ego_vlat, ego_yaw_rad, ego_omega], dtype=np.float32)
 
 
 def get_other_observation(
-    ego_vehicle: carla.Vehicle,
-    other_vehicles: List[carla.Vehicle],
-    max_num_vehicles: int = 8,
-    distance_threshold: float = 50.0
-) -> ndarray:
+        ego_vehicle: carla.Vehicle,
+        other_vehicles: List[carla.Vehicle],
+        max_num_vehicles: int = 8,
+        distance_threshold: float = 50.0
+) -> np.ndarray:
     """
-    获取自车周围指定距离内最近的若干辆车的状态信息
-    若车辆数不足 max_num_vehicles，则用零值填充至固定长度
+    获取论文定义的周车状态 (8×4维)
+    论文V-B1: s^other = [p_x^j, p_y^j, φ^j, v_lon^j] 每车
     :param ego_vehicle: 自车
     :param other_vehicles: 周车列表
     :param max_num_vehicles: 最大返回车辆数
-    :param distance_threshold: 距离阈值（米）
-    :return: ndarray [max_num_vehicles, 6]，每行为[ x, y, 纵向速度, 横向速度(0), 航向角, 横摆角速度(0) ]
+    :param distance_threshold: 距离阈值 (米)
+    :return: (8, 4) 每车为 [x, y, φ(rad), v_lon]
     """
+
     def _get_zero_vehicle_obs() -> List[float]:
-        """返回一个“空车辆”的零值观测列表"""
-        return [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        return [0.0, 0.0, 0.0, 0.0]
 
     if not other_vehicles:
-        # 直接返回全零填充
-        zero_array = np.array([_get_zero_vehicle_obs() for _ in range(max_num_vehicles)], dtype=np.float32)
-        return zero_array
+        return np.array([_get_zero_vehicle_obs() for _ in range(max_num_vehicles)], dtype=np.float32)
 
-    ego_transform = ego_vehicle.get_transform()
-    ego_location = ego_transform.location
+    ego_location = ego_vehicle.get_transform().location
     nearby_vehicles = []
 
     for vehicle in other_vehicles:
-        # 跳过无效车辆
         if not vehicle or not vehicle.is_alive:
             continue
 
         other_loc = vehicle.get_transform().location
-        # 计算自车到周车的距离
         distance = ego_location.distance(other_loc)
-        # 过滤过远/过近（自身）的车辆
+
         if distance > distance_threshold or distance < 1e-3:
             continue
 
-        # 周车速度：仅保留纵向速度，横向速度强制设0（按注释要求）
-        v_world = vehicle.get_velocity()
-        vx, _ = world_to_vehicle_frame(v_world, vehicle.get_transform())
-        other_yaw = vehicle.get_transform().rotation.yaw
+        # 论文要求：世界坐标系下的坐标
+        other_x = other_loc.x
+        other_y = other_loc.y
 
-        # 保存：[x, y, 纵向速度, 横向速度(0), 航向角, 横摆角速度(0)] + 距离（用于排序）
+        # 论文要求：航向角 (弧度)
+        other_yaw_rad = math.radians(vehicle.get_transform().rotation.yaw)
+
+        # 论文要求：周车自身坐标系下的纵向速度
+        v_world = vehicle.get_velocity()
+        v_world_x = v_world.x
+        v_world_y = v_world.y
+        other_vlon = v_world_x * math.cos(other_yaw_rad) + v_world_y * math.sin(other_yaw_rad)
+
         nearby_vehicles.append({
-            'obs': [other_loc.x, other_loc.y, vx, 0.0, other_yaw, 0.0],
+            'obs': [other_x, other_y, other_yaw_rad, other_vlon],
             'distance': distance
         })
 
@@ -131,216 +139,134 @@ def get_other_observation(
 
     # 补零至固定长度
     padded_result = valid_obs + [_get_zero_vehicle_obs() for _ in range(max_num_vehicles - len(valid_obs))]
-    # 转换为数组，确保类型为float32
+
     return np.array(padded_result, dtype=np.float32)
 
 
-def get_closest_lane_edge_point(ego_vehicle: carla.Vehicle) -> ndarray:
-    """
-    获取自车到左右车道边缘中**更近的那个边缘点**的世界坐标
-    :return: ndarray [6,]，格式为[x, y, 0, 0, 0, 0]
-    """
-    world = ego_vehicle.get_world()
-    map_obj = world.get_map()
-    ego_loc = ego_vehicle.get_transform().location
-
-    # 投影到道路中心线（鲁棒处理）
-    waypoint = map_obj.get_waypoint(ego_loc, project_to_road=True, lane_type=carla.LaneType.Driving)
-    if waypoint is None:
-        # 未在可行驶车道上，返回全零
-        return np.zeros(6, dtype=np.float32)
-
-    # 获取车道参数（兜底默认宽度）
-    lane_width = waypoint.lane_width if waypoint.lane_width > 0 else 3.5
-    yaw_rad = math.radians(waypoint.transform.rotation.yaw)
-
-    # 计算前进方向和左侧垂直方向
-    forward = carla.Vector3D(x=math.cos(yaw_rad), y=math.sin(yaw_rad), z=0.0)
-    left_dir = carla.Vector3D(x=-forward.y, y=forward.x, z=0.0)  # 左侧单位向量
-
-    # 归一化（避免零向量）
-    norm = math.hypot(left_dir.x, left_dir.y)
-    if norm > 1e-6:
-        left_dir = carla.Vector3D(x=left_dir.x/norm, y=left_dir.y/norm, z=0.0)
-
-    # 计算左右边缘点
-    center = waypoint.transform.location
-    offset = lane_width / 2.0
-    left_edge = carla.Location(
-        x=center.x + left_dir.x * offset,
-        y=center.y + left_dir.y * offset,
-        z=center.z
-    )
-    right_edge = carla.Location(
-        x=center.x - left_dir.x * offset,
-        y=center.y - left_dir.y * offset,
-        z=center.z
-    )
-
-    # 比较哪个更近，返回6维数组
-    dist_left = ego_loc.distance(left_edge)
-    dist_right = ego_loc.distance(right_edge)
-    pos = left_edge if dist_left < dist_right else right_edge
-
-    return np.array([pos.x, pos.y, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
-
-
 def get_ref_observation(
-    ego_vehicle: carla.Vehicle,
-    path_locations: List[carla.Location],
-    default_longitudinal_velocity: float = 20.0
-) -> ndarray:
+        ego_vehicle: carla.Vehicle,
+        path_locations: List[carla.Location],
+        default_longitudinal_velocity: float = 20.0
+) -> np.ndarray:
     """
-    获取自车到参考路径中最近点的状态信息
+    获取论文定义的参考路径原始状态 (6维)
+    论文IV-A公式2: x_ref = [p_x^ref, p_y^ref, v_lon^ref, 0, φ^ref, 0]
     :param ego_vehicle: 自车
-    :param path_locations: 参考路径点列表（世界坐标）
-    :param default_longitudinal_velocity: 默认纵向速度（m/s）
-    :return: ndarray [6,]，格式为[x, y, 纵向速度, 0, 航向角(度), 0]；空路径返回全零数组
+    :param path_locations: 参考路径点列表
+    :param default_longitudinal_velocity: 默认参考速度 (m/s)
+    :return: [x_ref, y_ref, v_ref, 0, φ_ref(rad), 0]
     """
     if not path_locations:
         return np.zeros(6, dtype=np.float32)
 
     ego_location = ego_vehicle.get_transform().location
 
-    # 找到距离自车最近的路径点（鲁棒处理重复点）
+    # 1. 找到距离自车最近的路径点
     min_distance = float('inf')
-    ref_location = path_locations[0]
     closest_idx = 0
     for idx, loc in enumerate(path_locations):
         distance = ego_location.distance(loc)
         if distance < min_distance:
             min_distance = distance
-            ref_location = loc
             closest_idx = idx
 
-    # 参考点索引：向后偏移4个点（兜底避免越界）
-    ref_index = min(closest_idx + 4, len(path_locations) - 1)
+    # 2. 参考点偏移+4 (舒适性设计，论文未禁止)
+    ref_index = min(closest_idx + 1, len(path_locations) - 1)
     ref_location = path_locations[ref_index]
 
-    # 计算参考点航向角（基于前后路径点）
-    ref_yaw_deg = 0.0
+    # 3. 计算参考点航向角 (弧度) - 基于前后路径点差分
+    ref_yaw_rad = 0.0
     if len(path_locations) >= 2:
-        # 用当前参考点和下一个点计算航向
         next_idx = min(ref_index + 1, len(path_locations) - 1)
         delta_x = path_locations[next_idx].x - path_locations[ref_index].x
         delta_y = path_locations[next_idx].y - path_locations[ref_index].y
 
-        # 避免除以零
         if math.hypot(delta_x, delta_y) < 1e-6:
-            ref_yaw_deg = ego_vehicle.get_transform().rotation.yaw
+            # 路径点重合时用自车航向
+            ref_yaw_rad = math.radians(ego_vehicle.get_transform().rotation.yaw)
         else:
-            ref_yaw_deg = math.degrees(math.atan2(delta_y, delta_x))
+            ref_yaw_rad = math.atan2(delta_y, delta_x)
     else:
-        # 单点路径：使用自车当前航向
-        ref_yaw_deg = ego_vehicle.get_transform().rotation.yaw
+        ref_yaw_rad = math.radians(ego_vehicle.get_transform().rotation.yaw)
 
-    # 组装6维数组
     return np.array([
         ref_location.x, ref_location.y,
         default_longitudinal_velocity, 0.0,
-        ref_yaw_deg, 0.0
+        ref_yaw_rad, 0.0
     ], dtype=np.float32)
 
 
-def get_road_edge_points(ego_vehicle: carla.Vehicle, world_map: carla.Map) -> ndarray:
+def calc_ref_error(ego_state: np.ndarray, ref_state: np.ndarray) -> np.ndarray:
     """
-    获取当前道路最外侧边缘的近似点（基于最外侧车道中心线偏移）
-    :param world_map: 世界地图
+    计算论文定义的参考路径误差状态 (3维)
+    论文V-B1: s^ref = [δ_p, δ_φ, δ_v]
+    :param ego_state: 自车状态 (6,)
+    :param ref_state: 参考路径原始状态 (6,)
+    :return: [δ_p(带符号), δ_φ, δ_v]
+        - δ_p: 位置误差 (米)，左正右负
+        - δ_φ: 航向角误差 (rad)，归一化到[-π, π]
+        - δ_v: 速度误差 (m/s)
+    """
+    # 1. 计算位置误差 δ_p
+    dx = ref_state[0] - ego_state[0]
+    dy = ref_state[1] - ego_state[1]
+    delta_p = math.hypot(dx, dy)
+
+    # 计算方向符号：自车在参考路径左侧为正，右侧为负
+    # 叉积判断：dx*sin(φ_ref) - dy*cos(φ_ref)
+    cross = dx * math.sin(ref_state[4]) - dy * math.cos(ref_state[4])
+    delta_p = delta_p * math.copysign(1.0, cross)
+
+    # 2. 计算航向角误差 δ_φ
+    delta_phi = ego_state[4] - ref_state[4]
+    # 归一化到 [-π, π]
+    delta_phi = math.atan2(math.sin(delta_phi), math.cos(delta_phi))
+
+    # 3. 计算速度误差 δ_v
+    delta_v = ego_state[2] - ref_state[2]
+
+    return np.array([delta_p, delta_phi, delta_v], dtype=np.float32)
+
+
+def get_road_observation_multi_frame(
+        ego_vehicle: carla.Vehicle,
+        world: carla.World,
+        distance: float = 10.0,
+        resolution: float = 0.5,
+        num_points: int = 20
+) -> np.ndarray:
+    """
+    获取论文隐含的多帧道路边缘状态 (80维)
+    用于OCP有限时域安全约束
     :param ego_vehicle: 自车
-    :return: ndarray [6,]，格式为[边缘点x, 边缘点y, 0, 0, 0, 0]
-    """
-    # 鲁棒获取Waypoint
-    vehicle_loc = ego_vehicle.get_transform().location
-    wp = world_map.get_waypoint(vehicle_loc, project_to_road=True, lane_type=carla.LaneType.Driving)
-    if wp is None:
-        return np.zeros(6, dtype=np.float32)
-
-    def get_one_road_edge_points(current_wp: carla.Waypoint, direction: str) -> Optional[carla.Location]:
-        """向指定方向遍历到最外侧车道，返回边缘点"""
-        if direction == 'right':
-            # 找最右侧驾驶车道
-            while True:
-                next_wp = current_wp.get_right_lane()
-                if next_wp is None or next_wp.lane_type != carla.LaneType.Driving:
-                    break
-                current_wp = next_wp
-            # 计算右边缘点
-            lane_width = current_wp.lane_width if current_wp.lane_width > 0 else 3.5
-            right_vec = current_wp.transform.get_right_vector()
-            return carla.Location(
-                x=current_wp.transform.location.x + right_vec.x * lane_width / 2,
-                y=current_wp.transform.location.y + right_vec.y * lane_width / 2,
-                z=current_wp.transform.location.z
-            )
-
-        elif direction == 'left':
-            # 找最左侧驾驶车道
-            while True:
-                next_wp = current_wp.get_left_lane()
-                if next_wp is None or next_wp.lane_type != carla.LaneType.Driving:
-                    break
-                current_wp = next_wp
-            # 计算左边缘点（左 = -右向量）
-            lane_width = current_wp.lane_width if current_wp.lane_width > 0 else 3.5
-            right_vec = current_wp.transform.get_right_vector()
-            return carla.Location(
-                x=current_wp.transform.location.x - right_vec.x * lane_width / 2,
-                y=current_wp.transform.location.y - right_vec.y * lane_width / 2,
-                z=current_wp.transform.location.z
-            )
-        return None
-
-    # 获取左右两侧道路边缘点（鲁棒处理None）
-    right_edge = get_one_road_edge_points(wp, 'right') or vehicle_loc
-    left_edge = get_one_road_edge_points(wp, 'left') or vehicle_loc
-
-    # 计算自车到两个边缘的距离，取最近的
-    dist_right = vehicle_loc.distance(right_edge)
-    dist_left = vehicle_loc.distance(left_edge)
-    nearest_road_edge = right_edge if dist_right < dist_left else left_edge
-
-    return np.array([nearest_road_edge.x, nearest_road_edge.y, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
-
-
-def get_current_lane_forward_edges(
-    vehicle: carla.Vehicle,
-    world: carla.World,
-    distance: float = 50.0,
-    resolution: float = 0.5
-) -> tuple[List[carla.Location], List[carla.Location]]:
-    """
-    获取自车当前所在车道前方指定距离内的【左边缘】和【右边缘】坐标序列
-    :param vehicle: 自车
     :param world: Carla世界对象
-    :param distance: 前方搜索距离 (米), 默认50米
-    :param resolution: 采样步长 (米), 默认0.5米
-    :return: tuple(list, list):
-        - left_edges: 左侧边缘坐标列表 [carla.Location, ...]
-        - right_edges: 右侧边缘坐标列表 [carla.Location, ...]
-        (两个列表长度一致，索引 i 对应同一横截面的左右边缘)
+    :param distance: 前方搜索距离 (米)
+    :param resolution: 采样步长 (米)
+    :param num_points: 返回的边缘点数量
+    :return: (80,) [左x1,左y1,左x2,左y2, ..., 右x1,右x1,右x2,右y2]
     """
     map_obj = world.get_map()
-    vehicle_loc = vehicle.get_transform().location
+    vehicle_loc = ego_vehicle.get_transform().location
 
-    # 1. 鲁棒获取当前Waypoint
+    # 1. 获取当前Waypoint
     try:
-        current_wp = map_obj.get_waypoint(vehicle_loc, project_to_road=True, lane_type=carla.LaneType.Driving)
-    except Exception as e:
-        print(f"获取Waypoint失败: {e}")
-        return [], []
+        current_wp = map_obj.get_waypoint(
+            vehicle_loc,
+            project_to_road=True,
+            lane_type=carla.LaneType.Driving
+        )
+    except Exception:
+        return np.zeros(num_points * 4, dtype=np.float32)
 
     if current_wp is None:
-        return [], []
+        return np.zeros(num_points * 4, dtype=np.float32)
 
     left_edges = []
     right_edges = []
 
-    def calculate_edge_locations(center_wp: carla.Waypoint) -> tuple[carla.Location, carla.Location]:
-        """
-        从中心waypoint计算当前截面的左右边缘点
-        :return: (left_edge_loc, right_edge_loc)
-        """
-        # --- 找左边缘（最左侧驾驶车道）---
+    # 2. 辅助函数：计算当前截面的左右边缘点
+    def calculate_edge_locations(center_wp: carla.Waypoint) -> Tuple[carla.Location, carla.Location]:
+        # 找最左侧驾驶车道
         left_most_wp = center_wp
         while True:
             next_left = left_most_wp.get_left_lane()
@@ -356,7 +282,7 @@ def get_current_lane_forward_edges(
             z=left_most_wp.transform.location.z
         )
 
-        # --- 找右边缘（最右侧驾驶车道）---
+        # 找最右侧驾驶车道
         right_most_wp = center_wp
         while True:
             next_right = right_most_wp.get_right_lane()
@@ -374,7 +300,142 @@ def get_current_lane_forward_edges(
 
         return left_edge_loc, right_edge_loc
 
-    # 2. 向前迭代采样边缘点
+    # 3. 向前迭代采样边缘点
+    next_wps = current_wp.next(resolution)
+    if not next_wps:
+        return np.zeros(num_points * 4, dtype=np.float32)
+
+    iterator_wp = next_wps[0]
+    accumulated_dist = resolution
+
+    while accumulated_dist <= distance and len(left_edges) < num_points:
+        l_loc, r_loc = calculate_edge_locations(iterator_wp)
+        left_edges.append(l_loc)
+        right_edges.append(r_loc)
+
+        next_step = iterator_wp.next(resolution)
+        if not next_step:
+            break
+        iterator_wp = next_step[0]
+        accumulated_dist += resolution
+
+    # 4. 【修改这里！】先把所有左点放前面，再放所有右点
+    left_flat = []
+    for l in left_edges:
+        left_flat.extend([l.x, l.y])  # 左1x,左1y,左2x,左2y...
+
+    right_flat = []
+    for r in right_edges:
+        right_flat.extend([r.x, r.y]) # 右1x,右1y,右2x,右2y...
+
+    # 最终：左点全部 + 右点全部
+    road_obs = left_flat + right_flat
+
+    # 补零至固定长度
+    road_obs = road_obs + [0.0] * (num_points * 4 - len(road_obs))
+
+    return np.array(road_obs, dtype=np.float32)
+
+
+# 保留原函数以保持接口兼容性（但内部调用新实现）
+def get_closest_lane_edge_point(ego_vehicle: carla.Vehicle) -> np.ndarray:
+    """兼容接口：获取最近车道边缘点（返回6维数组）"""
+    world = ego_vehicle.get_world()
+    map_obj = world.get_map()
+    ego_loc = ego_vehicle.get_transform().location
+
+    waypoint = map_obj.get_waypoint(ego_loc, project_to_road=True, lane_type=carla.LaneType.Driving)
+    if waypoint is None:
+        return np.zeros(6, dtype=np.float32)
+
+    lane_width = waypoint.lane_width if waypoint.lane_width > 0 else 3.5
+    yaw_rad = math.radians(waypoint.transform.rotation.yaw)
+    forward = carla.Vector3D(x=math.cos(yaw_rad), y=math.sin(yaw_rad), z=0.0)
+    left_dir = carla.Vector3D(x=-forward.y, y=forward.x, z=0.0)
+
+    norm = math.hypot(left_dir.x, left_dir.y)
+    if norm > 1e-6:
+        left_dir = carla.Vector3D(x=left_dir.x / norm, y=left_dir.y / norm, z=0.0)
+
+    center = waypoint.transform.location
+    offset = lane_width / 2.0
+    left_edge = carla.Location(
+        x=center.x + left_dir.x * offset,
+        y=center.y + left_dir.y * offset,
+        z=center.z
+    )
+    right_edge = carla.Location(
+        x=center.x - left_dir.x * offset,
+        y=center.y - left_dir.y * offset,
+        z=center.z
+    )
+
+    dist_left = ego_loc.distance(left_edge)
+    dist_right = ego_loc.distance(right_edge)
+    pos = left_edge if dist_left < dist_right else right_edge
+
+    return np.array([pos.x, pos.y, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
+
+
+def get_road_edge_points(ego_vehicle: carla.Vehicle, world_map: carla.Map) -> np.ndarray:
+    """兼容接口：获取道路边缘点（返回6维数组）"""
+    return get_closest_lane_edge_point(ego_vehicle)
+
+
+def get_current_lane_forward_edges(
+        vehicle: carla.Vehicle,
+        world: carla.World,
+        distance: float = 50.0,
+        resolution: float = 0.5
+) -> Tuple[List[carla.Location], List[carla.Location]]:
+    """兼容接口：获取前方道路边缘点列表"""
+    map_obj = world.get_map()
+    vehicle_loc = vehicle.get_transform().location
+
+    try:
+        current_wp = map_obj.get_waypoint(vehicle_loc, project_to_road=True, lane_type=carla.LaneType.Driving)
+    except Exception:
+        return [], []
+
+    if current_wp is None:
+        return [], []
+
+    left_edges = []
+    right_edges = []
+
+    def calculate_edge_locations(center_wp: carla.Waypoint) -> Tuple[carla.Location, carla.Location]:
+        left_most_wp = center_wp
+        while True:
+            next_left = left_most_wp.get_left_lane()
+            if next_left is None or next_left.lane_type != carla.LaneType.Driving:
+                break
+            left_most_wp = next_left
+
+        lane_width_l = left_most_wp.lane_width if left_most_wp.lane_width > 0 else 3.5
+        right_vec_l = left_most_wp.transform.get_right_vector()
+        left_edge_loc = carla.Location(
+            x=left_most_wp.transform.location.x - right_vec_l.x * lane_width_l / 2.0,
+            y=left_most_wp.transform.location.y - right_vec_l.y * lane_width_l / 2.0,
+            z=left_most_wp.transform.location.z
+        )
+
+        right_most_wp = center_wp
+        while True:
+            next_right = right_most_wp.get_right_lane()
+            if next_right is None or next_right.lane_type != carla.LaneType.Driving:
+                break
+            right_most_wp = next_right
+
+        lane_width_r = right_most_wp.lane_width if right_most_wp.lane_width > 0 else 3.5
+        right_vec_r = right_most_wp.transform.get_right_vector()
+        right_edge_loc = carla.Location(
+            x=right_most_wp.transform.location.x + right_vec_r.x * lane_width_r / 2.0,
+            y=right_most_wp.transform.location.y + right_vec_r.y * lane_width_r / 2.0,
+            z=right_most_wp.transform.location.z
+        )
+
+        return left_edge_loc, right_edge_loc
+
     next_wps = current_wp.next(resolution)
     if not next_wps:
         return [], []
@@ -383,12 +444,10 @@ def get_current_lane_forward_edges(
     accumulated_dist = resolution
 
     while accumulated_dist <= distance:
-        # 计算当前截面的左右边缘
         l_loc, r_loc = calculate_edge_locations(iterator_wp)
         left_edges.append(l_loc)
         right_edges.append(r_loc)
 
-        # 向前移动（鲁棒处理分叉路口）
         next_step = iterator_wp.next(resolution)
         if not next_step:
             break

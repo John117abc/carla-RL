@@ -13,7 +13,7 @@ word_01:
       cloudiness: 20
       precipitation: 0
       sun_altitude_angle: 10
-    map_layer: 4  # 世界层级，级别越高越复杂,最高5级最小1级
+    map_layer: 1  # 世界层级，级别越高越复杂,最高5级最小1级
     sampling_resolution: 2.0
     notice_world: 'OCP-train'
 

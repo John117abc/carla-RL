@@ -38,6 +38,6 @@ BIRTH_POINT = {
         #                    carla.Location(x=106.3154, y=241.06, z=0.6),
         #                    carla.Location(x=106.3154, y=244.56, z=0.6),
         #                    carla.Location(x=106.3154, y=248.06, z=0.6),
-                           carla.Location(x=106.3154, y=251.56, z=0.6)],
+                           carla.Location(x=110.3154, y=251.56, z=0.6)],
     # "Town07_Opt": {x,y,z,yaw}
 }

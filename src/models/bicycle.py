@@ -45,16 +45,7 @@ class BicycleModel(nn.Module):
         d_psi = (v_safe / self.L_tensor) * torch.tan(steer)
         psi_next = psi + d_psi * self.dt_tensor
 
-        # --- 3. 位移计算 (关键修复) ---
-        # ❌ 原代码：x_next = x + v * cos(psi) * dt
-        # 问题：如果 v=0 且 accel>0，这一步 x 不变，虽然 v_next 变了，但第一帧没位移。
-        # 这会导致网络认为"加油也没用"。
-
-        # ✅ 修复：使用更新后的速度 v_next (欧拉前向) 或者 平均速度 (梯形积分)
-        # 方法 A: 使用 v_next (假设加速度瞬间生效)
-        # x_next = x + v_next * torch.cos(psi) * self.dt_tensor
-
-        # 方法 B (推荐): 使用平均速度 (v + v_next) / 2，物理更准确，梯度更平滑
+        # --- 3. 位移计算---
         v_avg = (v + v_next) * 0.5
         x_next = x + v_avg * torch.cos(psi) * self.dt_tensor
         y_next = y + v_avg * torch.sin(psi) * self.dt_tensor

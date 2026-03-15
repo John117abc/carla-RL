@@ -69,8 +69,8 @@ def main():
             #     env.ocp_normalizer.load_state_dict(checkpoint['ocp_normalizer'])
 
         logger.info("环境创建成功！")
-        # logger.info(f"观测空间: {env.observation_space}")
-        # logger.info(f"动作空间: {env.action_space}")
+        logger.info(f"观测空间: {env.observation_space}")
+        logger.info(f"动作空间: {env.action_space}")
 
         num_episodes = train_config["num_episodes"]
         episode = 0
@@ -93,7 +93,7 @@ def main():
                 total_reward += reward
                 # 数据加入buffer
                 actions.append(action)
-                states.append(state[1])
+                states.append(state)
                 rewards.append(reward)
                 infos.append(info)
                 state = next_state
@@ -132,7 +132,7 @@ def main():
                 logger.info(f"开始保存模型：  Step {agent.global_step}: total={total_reward:.2f}")
                 save_info = {
                     'rl_config':rl_config,
-                    'global_step':global_step,
+                    'global_step':agent.global_step,
                     'map':env_config['world']['map'],
                     'history_loss':history.copy(),
                     # 'ocp_normalizer': env.ocp_normalizer.state_dict()
