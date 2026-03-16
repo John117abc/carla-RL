@@ -329,12 +329,12 @@ class OcpAgent(BaseAgent):
         step_phi = violation_track + violation_car + violation_road  # [B, Horizon]
 
         # # 7.5 速度奖励（鼓励正向速度）
-        ego_speed = torch.norm(current_ego[..., 2:4], dim=-1).squeeze(1)  # [B]
-        speed_reward = 0.05 * torch.clamp(ego_speed, 0, 10).unsqueeze(1)  # [B, 1]
+        # ego_speed = torch.norm(current_ego[..., 2:4], dim=-1).squeeze(1)  # [B]
+        # speed_reward = 0.05 * torch.clamp(ego_speed, 0, 10).unsqueeze(1)  # [B, 1]
 
         # 7.6 增广成本（论文核心：l + ρ·φ - 速度奖励）
-        step_aug_l = step_l + self.init_penalty * step_phi - speed_reward  # [B, Horizon]
-        # step_aug_l = step_l + self.init_penalty * step_phi
+        # step_aug_l = step_l + self.init_penalty * step_phi - speed_reward  # [B, Horizon]
+        step_aug_l = step_l + self.init_penalty * step_phi
 
         # 8. 策略评估（PEV）：拟合Critic（贝尔曼方程）
         # 8.1 整理轨迹状态和目标值
@@ -372,20 +372,20 @@ class OcpAgent(BaseAgent):
             old_penalty = self.init_penalty
             self.init_penalty = min(self.init_penalty * self.amplifier_c, self.max_penalty)
             logger.info(
-                f"[GEP] 迭代 {self.global_step}: 惩罚因子ρ更新 {old_penalty:.4f} → {self.init_penalty:.4f}"
+                f"[GEP] 迭代 {self.gep_iteration}: 惩罚因子ρ更新 {old_penalty:.4f} → {self.init_penalty:.4f}"
             )
 
             # 9.2 重新计算增广成本（保证计算图完整）
-            actor_loss = (
-                step_l.mean() +
-                self.init_penalty * step_phi.mean() -
-                speed_reward.mean()
-            )
-
             # actor_loss = (
             #     step_l.mean() +
-            #     self.init_penalty * step_phi.mean()
+            #     self.init_penalty * step_phi.mean() -
+            #     speed_reward.mean()
             # )
+
+            actor_loss = (
+                step_l.mean() +
+                self.init_penalty * step_phi.mean()
+            )
 
             # 9.3 更新Actor参数
             self.actor_optimizer.zero_grad()
@@ -394,10 +394,11 @@ class OcpAgent(BaseAgent):
             self.actor_optimizer.step()
 
             # 9.4 On-Policy：清空缓冲区
-            self.buffer.clear()
+            # self.buffer.clear()
             logger.info(
-                f"[GEP] 迭代 {self.global_step}: Actor更新完成，损失={actor_loss.item():.4f}，缓冲区已清空"
+                f"[GEP] 迭代 {self.gep_iteration}: Actor更新完成，损失={actor_loss.item():.4f}，缓冲区已清空"
             )
+            self.gep_iteration += 1
             actor_updated = True
 
         # 11. 返回日志数据
@@ -475,7 +476,9 @@ class OcpAgent(BaseAgent):
             'global_step': self.global_step + save_info['global_step'],
             'history': self.history_loss + save_info['history_loss'],
             'globe_eps': self.globe_eps + self.base_config['save_freq'],
-            'state_dim': self.TOTAL_STATE_DIM  # 保存维度信息
+            'state_dim': self.TOTAL_STATE_DIM,  # 保存维度信息
+            'punish_factor': self.init_penalty,  # 惩罚因子
+            'gep_iteration': self.gep_iteration   # GEP迭代次数
         }
         metrics = {
             'episode': extra_info['globe_eps']
@@ -495,6 +498,9 @@ class OcpAgent(BaseAgent):
         self.globe_eps = extra_info['globe_eps']
         self.global_step = extra_info['global_step']
         self.history_loss = extra_info['history']
+        self.init_penalty = extra_info['punish_factor']
+        self.gep_iteration = extra_info['gep_iteration']
+
 
     def load(self, path: str) -> Dict[str, Any]:
         """加载模型参数（兼容维度校验）"""
@@ -516,6 +522,8 @@ class OcpAgent(BaseAgent):
         self.globe_eps = checkpoint['globe_eps']
         self.history_loss = checkpoint['history']
         self.global_step = checkpoint['global_step']
+        self.init_penalty = checkpoint['punish_factor']
+        self.gep_iteration = checkpoint['gep_iteration']
 
         return checkpoint
 

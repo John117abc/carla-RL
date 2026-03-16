@@ -12,7 +12,7 @@ rl:
   continue_a2c: False    # 是否继续训练，如果需要继续训练，则需要填写模型地址
   model_path_a2c: 'checkpoints/20260131/a2c-v1.0_Town06_Opt_020547_episode=4000.pth'
   continue_ocp: False    # 是否继续训练，如果需要继续训练，则需要填写模型地址
-  model_path_ocp: 'checkpoints/20260314/ocp-v1.0_Town06_Opt_071734_episode=5000.pth'
+  model_path_ocp: 'checkpoints/20260316/ocp-v1.0_Town06_Opt_154205_episode=200.pth'
   num_eps_eval: 10    # 评估步数
 
   A2C:
@@ -29,18 +29,18 @@ rl:
 
   OCP:
     gamma: 0.99
-    amplifier_c: 1.05
-    amplifier_m: 200      # 【关键】每500次迭代才更新一次Actor
+    amplifier_c: 1.01
+    amplifier_m: 20      # 【关键】每500次迭代才更新一次Actor
     lr_actor: 1e-4
     lr_critic: 1e-3     # 【关键】提高Critic学习率
-    init_penalty: 0.01      # 【关键】降低初始惩罚
-    max_penalty: 20.0      # 【关键】降低最大惩罚
+    init_penalty: 1.0      # 【关键】降低初始惩罚
+    max_penalty: 100.0      # 【关键】降低最大惩罚
     hidden_dim: 256
     other_car_min_distance: 2.0
     road_min_distance: 1.0
     min_start_train: 10
     total_capacity: 10000
-    batch_size: 64
-    horizon: 15            # 【关键】缩短预测时域到10步
+    batch_size: 128
+    horizon: 30            # 【关键】缩短预测时域到10步
     dt: 0.1                # 【关键】和Carla仿真步长对齐
 

@@ -506,6 +506,12 @@ class CarlaEnv(gym.Env):
         # 参考路径绘制
         draw_points(world=self.world, points=s_ref_raw[0:2].reshape(1,-1), display_time=0.2, color=carla.Color(0, 0, 255),size=0.05)
 
+        # 绘制误差
+        ref_error_text = f'e_p:{ref_error[0][0][0]:.2f} \n e_φ:{ref_error[0][0][1]:.2f} \n e_v:{ref_error[0][0][2]:.2f}\n'
+        draw_text_at_location(world=self.world,text=ref_error_text,
+                              location=np.array([ego_state[0][0][0],ego_state[0][0][1] + 10.0], dtype=np.float32),
+                              display_time=0.01,
+                              color=carla.Color(0, 0, 255))
 
     def _compute_reward(self,lane_inv,collision,obstacle) -> dict[str, Any]:
         w = self.env_cfg["reward_weights"]
@@ -977,7 +983,7 @@ class CarlaEnv(gym.Env):
 
             # 规划静态路径
             self.route_planner = RoutePlanner(self.world, self.carla_cfg["world"]["sampling_resolution"])
-            self.route_plane(end_x =500.3154,end_y = 251.56,end_z = 0.300000)
+            self.route_plane(end_x =700.3154,end_y = 251.56,end_z = 0.300000)
 
             # 对参考线进行插值加密（解决参考线稀疏问题）
             self.dense_ref_path = self._interpolate_ref_path(self.ref_path_xy)
