@@ -76,9 +76,9 @@ def main():
         episode = 0
         while episode < num_episodes:
             logger.info(f"\n开始第 {episode + 1} 轮测试...")
+            # logger.info(f"初始观测类型: {type(state)}, 形状/结构: {get_obs_shape(state)}")
             state, info = env.reset()
             state = state['ocp_obs']
-            logger.info(f"初始观测类型: {type(state)}, 形状/结构: {get_obs_shape(state)}")
             total_reward = 0.0
             done = False
             states, actions, rewards, infos ,log_probs= [], [], [], [],[]
@@ -107,7 +107,7 @@ def main():
                     loss = agent.update()
 
                 # 打印关键信息
-                if agent.global_step % train_config["log_interval"] == 0:
+                if agent.global_step % train_config["log_interval"] == 0 or (loss is not None and loss['actor_updated']):
                     logger.info(f"  Step {agent.global_step}: reward={reward:.3f}, total={total_reward:.2f}")
                     if 'speed' in info:
                         logger.info(f"    速度: {info['speed']:.2f} km/h,动作：{action}")

@@ -565,8 +565,8 @@ class CarlaEnv(gym.Env):
                 'speed': v}
 
         # 碰撞actors和障碍物公用一个终止条件
-        if collision > self.env_cfg["termination"]["collision_threshold"] or obstacle:
-            info["collision"] = True
+        # if collision > self.env_cfg["termination"]["collision_threshold"] or obstacle:
+        #     info["collision"] = True
 
         if self.step_count >= self.env_cfg["termination"]["max_episode_steps"]:
             info["TimeLimit.truncated"] = True
