@@ -739,43 +739,45 @@ class CarlaEnv(gym.Env):
         reverse_flag = False
 
         if not isinstance(self.action_space, gym.spaces.Discrete):
-            # ========== 连续动作处理 ==========
-            # 1. 解析动作 [归一化加速度, 归一化转向角]，范围[-1,1]
-            norm_accel = float(np.clip(action[0], -1.0, 1.0))
-            norm_steer = float(np.clip(action[1], -1.0, 1.0))
+            # ========== 【最终对齐】接收论文物理动作：[a (m/s²), δ (rad)] ==========
+            a_phy = float(np.clip(action[0], -3.0, 1.5))  # 物理加速度
+            delta_phy = float(np.clip(action[1], -0.4, 0.4))  # 物理前轮转角
 
-            # 2. 映射到CARLA油门/刹车（互斥）
-            if norm_accel > 0:
-                throttle_val = norm_accel
+            # 1. 物理加速度 → Carla油门/刹车
+            if a_phy > 0.1:
+                # 正加速：[0.1, 1.5] → 油门[0.1, 1.0]
+                throttle_val = np.interp(a_phy, [0.1, 1.5], [0.1, 1.0])
                 brake_val = 0.0
-            elif norm_accel < 0:
+            elif a_phy < -0.1:
+                # 刹车：[-3.0, -0.1] → 刹车[0.1, 1.0]
                 throttle_val = 0.0
-                brake_val = abs(norm_accel)
+                brake_val = np.interp(abs(a_phy), [0.1, 3.0], [0.1, 1.0])
             else:
+                # 滑行
                 throttle_val = 0.0
                 brake_val = 0.0
 
-            # 3. 转向角直接映射（CARLA steer范围正好是[-1,1]）
-            steer_val = norm_steer
+            # 2. 物理前轮转角 → Carla转向
+            # Carla steer [-1,1] 对应最大转角约0.6rad，我们用0.4rad对应0.67的steer
+            steer_val = np.interp(delta_phy, [-0.4, 0.4], [-0.67, 0.67])
+            steer_val = float(np.clip(steer_val, -1.0, 1.0))
 
-            # 4. 倒车档位逻辑：负加速度+车速接近0时，开启倒车档
-            current_speed = self.vehicle.get_velocity().length()
-            if norm_accel < -0.1 and current_speed < 0.1:
-                reverse_flag = True
-            else:
-                reverse_flag = False
+            # 强制禁止倒车，论文场景不需要
+            reverse_flag = False
 
         else:
-            # ========== 离散动作处理（仅占位，不覆盖连续动作的变量）==========
-            pass  # 你的离散动作逻辑写在这里，不要修改throttle_val等变量
+            throttle_val = 0.0
+            brake_val = 0.0
+            steer_val = 0.0
+            reverse_flag = False
 
-        # ========== 【唯一一次】应用控制到车辆 ==========
+        # 应用控制
         ctrl = carla.VehicleControl()
         ctrl.throttle = throttle_val
         ctrl.brake = brake_val
         ctrl.steer = steer_val
         ctrl.reverse = reverse_flag
-        ctrl.hand_brake = False  # 强制关闭手刹，避免锁死
+        ctrl.hand_brake = False
         self.vehicle.apply_control(ctrl)
 
         # ========== 仿真推进逻辑（修复模运算括号）==========
@@ -990,6 +992,7 @@ class CarlaEnv(gym.Env):
 
             obs = self._get_observation()
             info = {}  # 可扩展
+            info['ref_path_locations'] = self.ref_path_xy
             # 重置观察者视角
             self._place_spectator_above_vehicle()
 
@@ -1110,19 +1113,25 @@ class CarlaEnv(gym.Env):
           (这样能保证车大概率是向前动的，避免原地不动)
         """
 
-        # 1. 转向角 (Steering): -1 (左满) 到 1 (右满)
-        steer = np.random.uniform(-1.0, 1.0)
+        # # 1. 转向角 (Steering): -1 (左满) 到 1 (右满)
+        # steer = np.random.uniform(-1.0, 1.0)
+        #
+        # # 2. 加速度/油门 (Acceleration): -1 (急刹) 到 1 (地板油)
+        # # 策略：大部分时间给油，让车动起来
+        # if np.random.rand() < 0.7:
+        #     # 70% 概率：给一个明显的油门 (0.3 到 1.0)，确保克服静摩擦力
+        #     accel = np.random.uniform(0.3, 1.0)
+        # else:
+        #     # 30% 概率：刹车或松油门 (-1.0 到 0.2)
+        #     accel = np.random.uniform(-1.0, 0.2)
 
-        # 2. 加速度/油门 (Acceleration): -1 (急刹) 到 1 (地板油)
-        # 策略：大部分时间给油，让车动起来
-        if np.random.rand() < 0.7:
-            # 70% 概率：给一个明显的油门 (0.3 到 1.0)，确保克服静摩擦力
-            accel = np.random.uniform(0.3, 1.0)
-        else:
-            # 30% 概率：刹车或松油门 (-1.0 到 0.2)
-            accel = np.random.uniform(-1.0, 0.2)
+        # return np.array([accel,steer], dtype=np.float32)
 
-        return np.array([accel,steer], dtype=np.float32)
+        # 强制正加速度：归一化加速度 [0.2, 1.0] → 物理量 [0, 1.5]m/s²，绝对不会刹车
+        a_norm = np.random.uniform(0.2, 1.0, size=1)
+        # 小范围转向，避免转圈
+        delta_norm = np.random.uniform(-0.2, 0.2, size=1)
+        norm_action = np.concatenate([a_norm, delta_norm])
 
     @property
     def is_eval(self):

@@ -77,16 +77,20 @@ def main():
         while episode < num_episodes:
             logger.info(f"\n开始第 {episode + 1} 轮测试...")
             # logger.info(f"初始观测类型: {type(state)}, 形状/结构: {get_obs_shape(state)}")
+            # 在reset之后，获取规划好的参考路径，转换为tensor
+            # 在reset之后添加这段代码
             state, info = env.reset()
             state = state['ocp_obs']
+            # 提取参考路径，转为tensor [1, N, 2]
+            ref_path_locations = info['ref_path_locations']  # 你的路径规划输出的carla.Location列表
+            ref_path_np = np.array([[loc[0], loc[1]] for loc in ref_path_locations], dtype=np.float32)
+            ref_path_tensor = torch.from_numpy(ref_path_np).unsqueeze(0).to(device)
+
             total_reward = 0.0
             done = False
             states, actions, rewards, infos ,log_probs= [], [], [], [],[]
             while not done:
-                if not agent.buffer.should_start_training() and not train_config['continue_ocp']:
-                    action = env.get_random_driving_action()
-                else:
-                    action, _ = agent.select_action(state)
+                action, _ = agent.select_action(state)
                 next_obs, reward, _, _, info = env.step(action)
                 next_state = next_obs['ocp_obs']
                 done = info['collision'] or info['off_route'] or info['TimeLimit.truncated']
@@ -104,10 +108,11 @@ def main():
                 # 更新参数
                 loss = None
                 if agent.buffer.should_start_training():
-                    loss = agent.update()
+                    loss = agent.update(ref_path_tensor)
 
                 # 打印关键信息
-                if agent.global_step % train_config["log_interval"] == 0 or (loss is not None and loss['actor_updated']):
+                if agent.global_step % train_config["log_interval"] == 0:
+                        # or (loss is not None and loss['actor_updated'])):
                     logger.info(f"  Step {agent.global_step}: reward={reward:.3f}, total={total_reward:.2f}")
                     if 'speed' in info:
                         logger.info(f"    速度: {info['speed']:.2f} km/h,动作：{action}")

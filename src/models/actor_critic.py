@@ -10,16 +10,17 @@ class ActorNet(nn.Module):
         self.fc2 = nn.Linear(hidden_dim, hidden_dim)
         self.fc3 = nn.Linear(hidden_dim, 2)
 
-        # 【关键修复】最后一层初始化为极小值，让初始输出接近 0
-        nn.init.uniform_(self.fc3.weight, -1e-4, 1e-4)
-        nn.init.zeros_(self.fc3.bias)
+        # 【修复】正确的初始化方式
+        nn.init.uniform_(self.fc3.weight, -1e-3, 1e-3)
+        # 直接给bias赋值，而不是用constant_
+        with torch.no_grad():
+            self.fc3.bias[0] = 0.5  # 加速度通道初始偏置0.5
+            self.fc3.bias[1] = 0.0  # 转向通道初始偏置0
 
     def forward(self, x):
         x = F.elu(self.fc1(x))
         x = F.elu(self.fc2(x))
         x = self.fc3(x)
-        # 【关键修复】去掉 Tanh 前的 *0.1，改为直接输出
-        # 初始时 x 接近 0，tanh(x) 也接近 0，车会慢慢动起来
         x = torch.tanh(x)
         return x
 
