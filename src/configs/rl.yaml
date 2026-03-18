@@ -38,9 +38,9 @@ rl:
     hidden_dim: 256
     other_car_min_distance: 2.0
     road_min_distance: 1.0
-    min_start_train: 2000  # 20000步后再开始训练，先收集随机动作的正样本
+    min_start_train: 3000  # 20000步后再开始训练，先收集随机动作的正样本
     total_capacity: 200000
-    batch_size: 256
+    batch_size: 128
     horizon: 25  # 和论文完全一致，25步=2.5s
     dt: 0.1  # 和Carla仿真步长对齐
 

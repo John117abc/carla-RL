@@ -20,7 +20,6 @@ logger = get_logger('ocp_agent')
 class OcpAgent(BaseAgent):
     """
     严格对齐论文《Integrated Decision and Control》算法1实现
-    本次修复核心：解决车不动、动作锁死、学习失效问题
     """
 
     def __init__(
@@ -100,7 +99,7 @@ class OcpAgent(BaseAgent):
         self.globe_eps = 0
 
         # 【关键修复】参考速度固定为5m/s（18km/h），先让车能动，再提速
-        self.ref_vlon = 5.0
+        self.ref_vlon = self.env.ego_ref_speed
 
     def _calc_ref_error_from_state(self, ego_state: torch.Tensor, ref_path: torch.Tensor) -> torch.Tensor:
         """
@@ -231,7 +230,7 @@ class OcpAgent(BaseAgent):
 
     def select_action(self, obs: Any, deterministic: bool = False):
         """
-        【完全修复】动作链路：归一化动作 → 物理量映射，强制起步加速
+         动作链路：归一化动作 → 物理量映射，强制起步加速
         """
         with torch.no_grad():
             # 1. 统一观测格式
@@ -251,7 +250,7 @@ class OcpAgent(BaseAgent):
                 obs_np = obs_121
 
             # --------------------------
-            # 【核心修复1】前30000步完全强制随机正加速，打破刹车死循环
+            # 前n步完全强制随机正加速，打破刹车死循环
             # --------------------------
             if not deterministic and not self.buffer.should_start_training():
                 # 强制正加速度：归一化加速度 [0.2, 1.0] → 物理量 [0, 1.5]m/s²，绝对不会刹车
@@ -271,7 +270,7 @@ class OcpAgent(BaseAgent):
                     norm_action = np.clip(norm_action + noise, -1.0, 1.0)
 
             # --------------------------
-            # 【核心修复2】归一化动作 → 论文物理量 映射，100%对齐链路
+            # 归一化动作 → 论文物理量 映射，100%对齐链路
             # --------------------------
             # 归一化加速度 [-1,1] → 物理加速度 [-3, 1.5] m/s²
             a_phy = np.interp(norm_action[0], [-1, 1], [-3.0, 1.5])
