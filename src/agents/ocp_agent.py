@@ -149,13 +149,28 @@ class OcpAgent(BaseAgent):
 
     def _forward_horizon(self, state_tensor: torch.Tensor, ref_path_tensor: torch.Tensor) -> Tuple[
         torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        严格对齐论文OCP公式与GEP算法，修复所有维度不匹配问题
+        :param state_tensor: 初始状态 [B, 121]
+        :param ref_path_tensor: 参考路径 [1, N, 2]
+        :return: step_l 每步成本, step_phi 每步约束违反量, states_traj 推演状态轨迹
+        """
         B = state_tensor.shape[0]
         # 初始状态解包
         ego_state, other_states, ref_error, road_state = self.unpack_tensor(state_tensor.unsqueeze(1))
         current_ego = ego_state.clone()
         current_other = other_states.clone()
-        current_road = road_state.clone()
         current_ref_error = self._calc_ref_error_from_state(current_ego, ref_path_tensor)
+
+        # 【修复1】道路状态Reshape，确保维度严格对齐 [B,1,80] → 分离左右边缘
+        # 前40维：20个左边缘点(x,y) → [B, 1, 20, 2]
+        # 后40维：20个右边缘点(x,y) → [B, 1, 20, 2]
+        road_left = road_state[..., :40].contiguous().view(B, 1, 20, 2)
+        road_right = road_state[..., 40:].contiguous().view(B, 1, 20, 2)
+
+        # 安全距离平方（避免开根号，提升计算效率）
+        safe_veh_sq = self.other_car_min_distance ** 2
+        safe_road_sq = self.road_min_distance ** 2
 
         step_l_list = []
         step_phi_list = []
@@ -167,65 +182,91 @@ class OcpAgent(BaseAgent):
                 current_ego.view(-1, self.DIM_EGO),
                 current_other.view(-1, self.DIM_OTHER),
                 current_ref_error.view(-1, self.DIM_REF_ERROR),
-                current_road.view(-1, self.DIM_ROAD)
+                road_state.view(-1, self.DIM_ROAD)
             ], dim=1)
 
-            # --------------------------
-            # 【修复】网络输出归一化动作 → 映射到物理量，和select_action完全对齐
-            # --------------------------
-            norm_action = self.actor(current_state)  # 网络输出[-1,1]
-            # 映射到物理量
-            a_phy = norm_action[:, 0:1] * 2.25 - 0.75  # [-1,1] → [-3, 1.5]
-            delta_phy = norm_action[:, 1:2] * 0.4  # [-1,1] → [-0.4, 0.4]
-            phy_action = torch.cat([a_phy, delta_phy], dim=1)
+            # 网络输出归一化动作 → 映射到物理量
+            norm_action = self.actor(current_state)  # [B, 2]
+            a_phy = norm_action[:, 0:1] * 2.25 - 0.75  # [-1,1] → [-3, 1.5] m/s²
+            delta_phy = norm_action[:, 1:2] * 0.4  # [-1,1] → [-0.4, 0.4] rad
+            phy_action = torch.cat([a_phy, delta_phy], dim=1)  # [B, 2]
 
-            # 动力学推演（用物理量输入）
+            # 动力学推演
             next_ego = self.dynamics_model(current_ego, phy_action)
             next_other = self.predict_other_next_batch(current_other, self.dt)
             next_ref_error = self._calc_ref_error_from_state(next_ego, ref_path_tensor)
-            next_road = current_road.clone()
 
             # 拼接下一状态
             next_state = torch.cat([
                 next_ego.view(-1, self.DIM_EGO),
                 next_other.view(-1, self.DIM_OTHER),
                 next_ref_error.view(-1, self.DIM_REF_ERROR),
-                next_road.view(-1, self.DIM_ROAD)
+                road_state.view(-1, self.DIM_ROAD)
             ], dim=1)
             trajectory_states.append(next_state)
 
             # --------------------------
-            # 【修复】速度误差权重调大，强制网络关注速度跟踪
+            # 1. 计算OCP成本项 step_l（修复维度匹配）
             # --------------------------
-            lat_err_t = next_ref_error[..., 0].squeeze(1)
+            # 跟踪误差成本：[B]
+            lat_err_t = next_ref_error[..., 0].squeeze(1)  # [B,1] -> [B]
             head_err_t = next_ref_error[..., 1].squeeze(1)
             speed_err_t = next_ref_error[..., 2].squeeze(1)
-
-            # 速度权重从0.01调到0.1，让网络优先把速度提起来
             err_cost = self.q_lat * (lat_err_t ** 2) + \
                        self.q_head * (head_err_t ** 2) + \
-                       0.1 * (speed_err_t ** 2)
+                       self.q_speed * (speed_err_t ** 2)  # [B]
 
-            # 控制成本
-            r_weights = torch.tensor([0.005, 0.1], device=self.device).float()
-            control_cost = (phy_action ** 2) @ r_weights
+            # 【修复2】控制量成本：确保结果为 [B]，使用逐元素相乘再求和
+            # 论文公式：u^T * R * u
+            r_weights = torch.tensor([0.005, 0.1], device=self.device).float()  # 直接取对角元素 [2]
+            control_cost = torch.sum((phy_action ** 2) * r_weights, dim=1)  # [B,2] * [2] -> [B,2] -> sum -> [B]
+
+            # 单步总成本：[B]
             step_l = err_cost + control_cost
 
-            # 训练初期关闭约束，先学加速和跟踪
-            step_phi = torch.zeros_like(step_l)
+            # --------------------------
+            # 2. 补全约束违反量 step_phi（修复维度广播）
+            # --------------------------
+            ego_xy = next_ego[..., :2]  # [B, 1, 2]
+            phi_violation = torch.zeros(B, device=self.device)  # [B]
 
-            step_l_list.append(step_l.squeeze())
-            step_phi_list.append(step_phi.squeeze())
+            # --- 2.1 周车安全距离约束 ---
+            other_xy = next_other[..., :2]  # [B, 1, 8, 2]
+            # 计算自车与每个周车的距离平方：[B, 1, 8]
+            dist_veh_sq = torch.sum((ego_xy.unsqueeze(3) - other_xy.unsqueeze(2)) ** 2, dim=-1)
+            # 约束违反量：max(0, 安全距离 - 实际距离)，求和所有周车 -> [B]
+            veh_violation = torch.maximum(safe_veh_sq - dist_veh_sq, torch.zeros_like(dist_veh_sq))
+            phi_violation += veh_violation.sum(dim=[1, 2])  # 求和第1、2维 -> [B]
+
+            # --- 2.2 道路边缘安全距离约束 ---
+            # 计算自车到左、右边缘所有点的距离平方：[B, 1, 20]
+            dist_left_sq = torch.sum((ego_xy.unsqueeze(3) - road_left.unsqueeze(2)) ** 2, dim=-1)
+            dist_right_sq = torch.sum((ego_xy.unsqueeze(3) - road_right.unsqueeze(2)) ** 2, dim=-1)
+            # 取最近的边缘点距离：[B, 1]
+            min_left_sq, _ = torch.min(dist_left_sq, dim=-1)
+            min_right_sq, _ = torch.min(dist_right_sq, dim=-1)
+            # 约束违反量：[B]
+            left_violation = torch.maximum(safe_road_sq - min_left_sq, torch.zeros_like(min_left_sq)).squeeze(1)
+            right_violation = torch.maximum(safe_road_sq - min_right_sq, torch.zeros_like(min_right_sq)).squeeze(1)
+            phi_violation += left_violation + right_violation
+
+            # 单步总约束违反量：[B]
+            step_phi = phi_violation
+
+            # 加入列表
+            step_l_list.append(step_l)
+            step_phi_list.append(step_phi)
 
             # 更新状态
             current_ego = next_ego
             current_other = next_other
             current_ref_error = next_ref_error
-            current_road = next_road
 
+        # 拼接时域结果：[B, horizon]
         step_l = torch.stack(step_l_list).transpose(0, 1)
         step_phi = torch.stack(step_phi_list).transpose(0, 1)
         states_traj = torch.stack(trajectory_states).transpose(0, 1)
+
         return step_l, step_phi, states_traj
 
     def select_action(self, obs: Any, deterministic: bool = False):
@@ -283,8 +324,8 @@ class OcpAgent(BaseAgent):
 
     def update(self, ref_path_tensor: torch.Tensor = None):
         """
-        【关键修复】严格对齐论文GEP算法逻辑
-        每步更新Critic，每步更新Actor，保证梯度有效
+        严格对齐论文算法1 GEP训练逻辑
+        每步执行策略评估(Critic更新)，每步执行策略改进(Actor更新)，每m步放大惩罚因子
         """
         # 无数据/无参考路径直接返回
         batch_data = self.buffer.sample_batch(self.batch_size)
@@ -297,7 +338,7 @@ class OcpAgent(BaseAgent):
                 "actor_updated": False
             }
 
-        # 解析批量状态
+        # 解析批量状态，严格校验维度
         states_list = []
         for item in batch_data:
             state, _, _, _, _, _ = item
@@ -310,23 +351,19 @@ class OcpAgent(BaseAgent):
             states_list.append(state_np)
         state_tensor = torch.from_numpy(np.stack(states_list)).to(self.device).float()
 
-        # 前向推演
-        step_l, step_phi, states_traj = self._forward_horizon(state_tensor, ref_path_tensor)
-        step_aug_l = step_l + self.init_penalty * step_phi
+        # --------------------------
+        # 1. Critic更新（策略评估，每步执行，对齐论文有限时域OCP）
+        # --------------------------
+        with torch.no_grad():
+            step_l, step_phi, states_traj = self._forward_horizon(state_tensor, ref_path_tensor)
+            step_aug_l = step_l + self.init_penalty * step_phi
+            # 有限时域累计成本（无折扣γ=1，和论文OCP完全等价）
+            targets = torch.flip(torch.cumsum(torch.flip(step_aug_l, [1]), dim=1), [1])
 
-        # --------------------------
-        # 1. Critic更新（策略评估，每步执行）
-        # --------------------------
+        # 拟合Critic：V(s) ≈ 累计未来成本
         all_states = torch.cat([state_tensor.unsqueeze(1), states_traj], dim=1)
-        # 有限时域累计成本（无折扣，和论文OCP完全等价）
-        targets = torch.zeros_like(step_aug_l)
-        targets[:, -1] = step_aug_l[:, -1]
-        for t in reversed(range(self.horizon - 1)):
-            targets[:, t] = step_aug_l[:, t] + targets[:, t + 1]
-
-        # 拟合Critic
-        critic_inputs = all_states[:, :-1].detach().reshape(-1, self.TOTAL_STATE_DIM)
-        critic_targets = targets.detach().reshape(-1, 1)
+        critic_inputs = all_states[:, :-1].reshape(-1, self.TOTAL_STATE_DIM)
+        critic_targets = targets.reshape(-1, 1)
         pred = self.critic(critic_inputs)
         critic_loss = F.mse_loss(pred, critic_targets)
 
@@ -336,22 +373,23 @@ class OcpAgent(BaseAgent):
         self.critic_optimizer.step()
 
         # --------------------------
-        # 2. Actor更新（策略改进，每步执行，对齐GEP）
+        # 2. Actor更新（策略改进，每步执行，对齐GEP算法）
         # --------------------------
         # 重新前向推演，保留完整计算图
         step_l_actor, step_phi_actor, _ = self._forward_horizon(state_tensor, ref_path_tensor)
+        # GEP总损失：成本项 + 惩罚因子×约束违反项
         actor_loss = step_l_actor.mean() + self.init_penalty * step_phi_actor.mean()
 
         self.actor_optimizer.zero_grad()
-        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=0.5)
+        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.0)  # 放大梯度裁剪阈值，避免梯度消失
         actor_loss.backward()
         self.actor_optimizer.step()
         actor_updated = True
 
         # --------------------------
-        # 3. GEP惩罚因子放大（每m步执行，对齐论文）
+        # 3. GEP惩罚因子放大（每m步执行，严格对齐论文）
         # --------------------------
-        if self.global_step % self.amplifier_m == 0:
+        if self.global_step % self.amplifier_m == 0 and self.global_step > 0:
             old_penalty = self.init_penalty
             self.init_penalty = min(self.init_penalty * self.amplifier_c, self.max_penalty)
             self.gep_iteration += 1
