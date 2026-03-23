@@ -29,18 +29,19 @@ rl:
 
   OCP:
     gamma: 1.0  # 有限时域OCP必须无折扣，和论文完全一致
-    amplifier_c: 1.05  # 惩罚因子放大系数
-    amplifier_m: 5000  # 每5000步放大一次惩罚因子，先学跟踪再加约束
-    lr_actor: 3e-4  # Actor学习率
-    lr_critic: 1e-3  # Critic学习率
-    init_penalty: 1.0  # 初始惩罚因子
-    max_penalty: 10.0  # 最大惩罚因子
+    amplifier_c: 1.1  # 还原论文的1.1放大系数，加快约束生效
+    amplifier_m: 10000  # 每10000步放大一次，给网络足够时间学习跟踪，再加约束
+    lr_actor: 3e-4  # 保持不变
+    lr_critic: 8e-4  # 还原论文的8e-4，加快价值网络收敛
+    init_penalty: 0.1  # 初始惩罚因子调小，先学跟踪再学安全约束
+    max_penalty: 100.0  # 放大最大惩罚因子，保证约束最终生效
     hidden_dim: 256
     other_car_min_distance: 2.0
     road_min_distance: 1.0
-    min_start_train: 3000  # 20000步后再开始训练，先收集随机动作的正样本
-    total_capacity: 200000
-    batch_size: 128
+    min_start_train: 10000  # 先收集10000步随机样本，再开始训练
+    total_capacity: 500000  # 还原论文的5e5缓冲区大小
+    batch_size: 1024  # 放大batch_size，提升训练稳定性
     horizon: 25  # 和论文完全一致，25步=2.5s
     dt: 0.1  # 和Carla仿真步长对齐
+
 
