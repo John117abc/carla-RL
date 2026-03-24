@@ -6,6 +6,7 @@ import carla
 import random
 import time
 import math
+import traceback
 from typing import Dict, Any, Tuple, Optional, Union, List
 from gymnasium import spaces
 from src.envs.sensors import CameraSensor, CollisionSensor, LaneInvasionSensor,ObstacleSensor,IMUSensor
@@ -285,7 +286,7 @@ class CarlaEnv(gym.Env):
                 remove_layer = LAYERS_TO_REMOVE_4
             case _:
                 remove_layer = []
-        # 批量卸载
+        # 批量加载
         for layer in remove_layer:
             self.world.load_map_layer(layer)
             logger.info(f"加载层级: {layer}")
@@ -463,24 +464,21 @@ class CarlaEnv(gym.Env):
             obs["measurements"] = meas_normalized
         if "ocp_obs" in self.env_cfg["obs_type"]:
             # 获取ocp观察信息
-            s_ego, s_other, s_road, s_ref_raw, s_ref_error = get_ocp_observation(self.vehicle,self.imu_sensor,self.actors,self.path_locations,self.ego_ref_speed)
-            network_input = np.concatenate([
-                s_ego,  # 6维
-                s_other.flatten(),
-                s_ref_error,  # 3维
-                s_road
-            ])  # 共121维，可根据实际调整
-            obs["ocp_obs"] = network_input
+            network_state, s_road, s_ref_raw, s_ref_error = get_ocp_observation(self.vehicle,self.imu_sensor,self.actors,self.path_locations,self.ego_ref_speed)
+            obs["ocp_obs"] = network_state
+            obs["s_road"] = s_road
+            obs["s_ref_raw"] = s_ref_raw
+            obs["s_ref_raw"] = s_ref_error
             # # 如果是debug模式，在训练页面上显示和各个点的连线
             if self._ocp_debug:
-                self._debug_ocp(obs["ocp_obs"],s_ref_raw)
+                self._debug_ocp(obs["ocp_obs"],s_ref_raw,s_road)
         if len(obs) == 1:
             return list(obs.values())[0]
         return obs
 
-    def _debug_ocp(self,ocp_obs,s_ref_raw):
+    def _debug_ocp(self,ocp_obs,s_ref_raw,s_road):
         ocp_obs_np = np.array(ocp_obs, dtype=np.float32).flatten().reshape([1,1,-1])
-        ego_state, other_states, ref_error, road_state = unpack_ocp_numpy(ocp_obs_np,self.env_cfg['ocp']['num_points'],self.env_cfg['ocp']['others'])
+        ego_state, other_states, ref_error = unpack_ocp_numpy(ocp_obs_np,self.env_cfg['ocp']['num_points'],self.env_cfg['ocp']['others'])
         ego_text = f'v_lon:{ego_state[0][0][2]:.2f} \n v_lat:{ego_state[0][0][3]:.2f} \n φ:{ego_state[0][0][4]:.2f} \n 0:{ego_state[0][0][5]:.2f}'
 
         # 显示ego文字
@@ -489,10 +487,10 @@ class CarlaEnv(gym.Env):
                               display_time=0.01,
                               color=carla.Color(0, 0, 255))
 
-        road_left = road_state[..., :self.env_cfg['ocp']['num_points'] * 2].reshape(self.env_cfg['ocp'][
+        road_left = s_road[..., :self.env_cfg['ocp']['num_points'] * 2].reshape(self.env_cfg['ocp'][
                                                                                         'num_points'],
                                                                                     2)
-        road_right = road_state[..., self.env_cfg['ocp']['num_points'] * 2:].reshape(self.env_cfg['ocp'][
+        road_right = s_road[..., self.env_cfg['ocp']['num_points'] * 2:].reshape(self.env_cfg['ocp'][
                                                                                          'num_points'],
                                                                                      2)
 
@@ -565,8 +563,8 @@ class CarlaEnv(gym.Env):
                 'speed': v}
 
         # 碰撞actors和障碍物公用一个终止条件
-        # if collision > self.env_cfg["termination"]["collision_threshold"] or obstacle:
-        #     info["collision"] = True
+        if collision > self.env_cfg["termination"]["collision_threshold"] or obstacle:
+            info["collision"] = True
 
         if self.step_count >= self.env_cfg["termination"]["max_episode_steps"]:
             info["TimeLimit.truncated"] = True
@@ -812,6 +810,7 @@ class CarlaEnv(gym.Env):
         reward = self._compute_reward(lane_inv, collision, obstacle)
         terminated, truncated, info = self._check_termination(lane_inv, collision, obstacle)
         info.update(reward)
+        info['road_state'] = obs["s_road"]  # 单独存道路信息
         info['ref_path_xy'] = self.ref_path_xy
         left_pts, right_pts = get_current_lane_forward_edges(self.vehicle, self.world)
         info['static_road_left'] = [[item.x, item.y] for item in left_pts]
@@ -992,6 +991,7 @@ class CarlaEnv(gym.Env):
 
             obs = self._get_observation()
             info = {}  # 可扩展
+            info['road_state'] = obs["s_road"]  # 单独存道路信息
             info['ref_path_locations'] = self.ref_path_xy
             # 重置观察者视角
             self._place_spectator_above_vehicle()
@@ -1062,24 +1062,46 @@ class CarlaEnv(gym.Env):
         return None
 
     def close(self):
-        # 销毁所有旧资源
-        if self.vehicle is not None:
-            self._destroy_all_sensors()
-            self.vehicle.destroy()
-            self.vehicle = None
+        """补充地图层级恢复 + 全量Actor清理的close函数"""
+        try:
+            # 恢复所有卸载的地图层级
+            self._load_map_layers()
+            # 销毁车辆和传感器
+            if self.vehicle is not None:
+                self._destroy_all_sensors()
+                self.vehicle.destroy()
+                self.vehicle = None
 
-        # if self.enable_sumo:
+            # if self.enable_sumo:
             # self.synchronization.close()
 
-        # 恢复异步模式
-        if self.carla_cfg["sync_mode"]:
-            settings = self.world.get_settings()
-            settings.synchronous_mode = False
-            settings.fixed_delta_seconds = None
-            self.world.apply_settings(settings)
+            # 清理所有额外生成的Actor（如行人、其他车辆等
+            # 如果你有存储所有Actor的列表（比如self.actors），补充这部分清理
+            if hasattr(self, 'actors') and self.actors:
+                for actor in self.actors:
+                    try:
+                        if actor.is_alive:
+                            actor.destroy()
+                            print(f"销毁额外Actor: {actor.id}")
+                    except Exception as e:
+                        print(f"销毁Actor {actor.id} 失败: {e}")
+                self.actors = []
 
-        # 加载层级（显示回来）
-        self._load_map_layers()
+            # 恢复异步模式
+            if self.carla_cfg["sync_mode"]:
+                settings = self.world.get_settings()
+                settings.synchronous_mode = False
+                settings.fixed_delta_seconds = None
+                self.world.apply_settings(settings)
+
+            # 重置世界
+            if hasattr(self, 'client') and self.client is not None:
+                self.client.reload_world()
+            print("Carla资源清理完成")
+
+        except Exception as e:
+            print(f"close函数执行出错: {e}")
+            traceback.print_exc()
 
     def route_plane(self,end_x,end_y,end_z):
         start_location = self.vehicle.get_transform().location

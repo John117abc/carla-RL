@@ -13,7 +13,7 @@ def get_ocp_observation(
         other_vehicles: List[carla.Vehicle],
         path_locations: List[carla.Location],
         ego_ref_speed: float
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     获取完全对齐论文的OCP控制所需全量观测信息
     :param ego_vehicle: 自车
@@ -44,7 +44,15 @@ def get_ocp_observation(
     # 5. 计算参考路径误差状态
     s_ref_error = calc_ref_error(s_ego, s_ref_raw)
 
-    return s_ego, s_other, s_road, s_ref_raw, s_ref_error
+    # 网络输入状态：s_ego(6) + s_other(32) + s_ref_error(3) = 41/45维
+    network_state = np.concatenate([
+        s_ego,
+        s_other.flatten(),  # (8,4) -> (32,)
+        s_ref_error
+    ], axis=0)
+
+    # 单独返回道路信息，仅用于约束计算
+    return network_state, s_road, s_ref_raw, s_ref_error
 
 
 def get_ego_observation(

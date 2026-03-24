@@ -40,8 +40,12 @@ class OcpAgent(BaseAgent):
         self.DIM_EGO = 6  # 自车 [x,y,v_lon,v_lat,phi,omega]
         self.DIM_OTHER = self.env.env_cfg['ocp']['others'] * 4  # 8车×4维
         self.DIM_REF_ERROR = 3  # 跟踪误差 [δ_p, δ_φ, δ_v]
+        self.TOTAL_STATE_DIM = self.DIM_EGO + self.DIM_OTHER + self.DIM_REF_ERROR
+
+        # 道路维度
         self.DIM_ROAD = self.env.env_cfg['ocp']['num_points'] * 4  # 道路80维
-        self.TOTAL_STATE_DIM = self.DIM_EGO + self.DIM_OTHER + self.DIM_REF_ERROR + self.DIM_ROAD
+
+        self.road_state_buffer = None  # 用于存储当前的道路边缘信息
 
         # 核心参数初始化
         self.dt = self.ocp_config['dt']
@@ -147,7 +151,10 @@ class OcpAgent(BaseAgent):
         ref_error = torch.stack([delta_p, delta_phi, delta_v], dim=-1)
         return ref_error
 
-    def _forward_horizon(self, state_tensor: torch.Tensor, ref_path_tensor: torch.Tensor) -> Tuple[
+    def _forward_horizon(self,
+                         state_tensor: torch.Tensor,
+                         ref_path_tensor: torch.Tensor,
+                         road_state: torch.Tensor = None) -> Tuple[
         torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         严格对齐论文OCP公式与GEP算法，修复所有维度不匹配问题
@@ -157,16 +164,20 @@ class OcpAgent(BaseAgent):
         """
         B = state_tensor.shape[0]
         # 初始状态解包
-        ego_state, other_states, ref_error, road_state = self.unpack_tensor(state_tensor.unsqueeze(1))
+        ego_state, other_states, ref_error = self.unpack_tensor(state_tensor.unsqueeze(1))
         current_ego = ego_state.clone()
         current_other = other_states.clone()
         current_ref_error = self._calc_ref_error_from_state(current_ego, ref_path_tensor)
 
-        # 【修复1】道路状态Reshape，确保维度严格对齐 [B,1,80] → 分离左右边缘
-        # 前40维：20个左边缘点(x,y) → [B, 1, 20, 2]
-        # 后40维：20个右边缘点(x,y) → [B, 1, 20, 2]
-        road_left = road_state[..., :40].contiguous().view(B, 1, 20, 2)
-        road_right = road_state[..., 40:].contiguous().view(B, 1, 20, 2)
+        # 【道路状态仅在这里使用，用于约束计算】
+        if road_state is not None:
+            road_left = road_state[..., :int(self.DIM_ROAD/2)].contiguous().view(B, 1, int(self.DIM_ROAD/4), 2)
+            road_right = road_state[..., int(self.DIM_ROAD/2):].contiguous().view(B, 1, int(self.DIM_ROAD/4), 2)
+        else:
+            # 若没有道路信息，约束违反量设为0
+            road_left = torch.zeros(B, 1, 20, 2, device=self.device)
+            road_right = torch.zeros(B, 1, 20, 2, device=self.device)
+
 
         # 安全距离平方（避免开根号，提升计算效率）
         safe_veh_sq = self.other_car_min_distance ** 2
@@ -181,8 +192,7 @@ class OcpAgent(BaseAgent):
             current_state = torch.cat([
                 current_ego.view(-1, self.DIM_EGO),
                 current_other.view(-1, self.DIM_OTHER),
-                current_ref_error.view(-1, self.DIM_REF_ERROR),
-                road_state.view(-1, self.DIM_ROAD)
+                current_ref_error.view(-1, self.DIM_REF_ERROR)
             ], dim=1)
 
             # 网络输出归一化动作 → 映射到物理量
@@ -200,8 +210,7 @@ class OcpAgent(BaseAgent):
             next_state = torch.cat([
                 next_ego.view(-1, self.DIM_EGO),
                 next_other.view(-1, self.DIM_OTHER),
-                next_ref_error.view(-1, self.DIM_REF_ERROR),
-                road_state.view(-1, self.DIM_ROAD)
+                next_ref_error.view(-1, self.DIM_REF_ERROR)
             ], dim=1)
             trajectory_states.append(next_state)
 
@@ -216,7 +225,7 @@ class OcpAgent(BaseAgent):
                        self.q_head * (head_err_t ** 2) + \
                        self.q_speed * (speed_err_t ** 2)  # [B]
 
-            # 【修复2】控制量成本：确保结果为 [B]，使用逐元素相乘再求和
+            # 控制量成本：确保结果为 [B]，使用逐元素相乘再求和
             # 论文公式：u^T * R * u
             r_weights = torch.tensor([0.005, 0.1], device=self.device).float()  # 直接取对角元素 [2]
             control_cost = torch.sum((phy_action ** 2) * r_weights, dim=1)  # [B,2] * [2] -> [B,2] -> sum -> [B]
@@ -233,15 +242,15 @@ class OcpAgent(BaseAgent):
             # --- 2.1 周车安全距离约束 ---
             other_xy = next_other[..., :2]  # [B, 1, 8, 2]
             # 计算自车与每个周车的距离平方：[B, 1, 8]
-            dist_veh_sq = torch.sum((ego_xy.unsqueeze(3) - other_xy.unsqueeze(2)) ** 2, dim=-1)
+            dist_veh_sq = torch.sum((ego_xy.unsqueeze(2) - other_xy) ** 2, dim=-1)
             # 约束违反量：max(0, 安全距离 - 实际距离)，求和所有周车 -> [B]
             veh_violation = torch.maximum(safe_veh_sq - dist_veh_sq, torch.zeros_like(dist_veh_sq))
             phi_violation += veh_violation.sum(dim=[1, 2])  # 求和第1、2维 -> [B]
 
             # --- 2.2 道路边缘安全距离约束 ---
             # 计算自车到左、右边缘所有点的距离平方：[B, 1, 20]
-            dist_left_sq = torch.sum((ego_xy.unsqueeze(3) - road_left.unsqueeze(2)) ** 2, dim=-1)
-            dist_right_sq = torch.sum((ego_xy.unsqueeze(3) - road_right.unsqueeze(2)) ** 2, dim=-1)
+            dist_left_sq = torch.sum((ego_xy.unsqueeze(2) - road_left) ** 2, dim=-1)
+            dist_right_sq = torch.sum((ego_xy.unsqueeze(2) - road_right) ** 2, dim=-1)
             # 取最近的边缘点距离：[B, 1]
             min_left_sq, _ = torch.min(dist_left_sq, dim=-1)
             min_right_sq, _ = torch.min(dist_right_sq, dim=-1)
@@ -322,7 +331,8 @@ class OcpAgent(BaseAgent):
 
             return phy_action, np.zeros(1, dtype=np.float32)
 
-    def update(self, ref_path_tensor: torch.Tensor = None):
+    def update(self, ref_path_tensor: torch.Tensor = None,
+               road_state_tensor: torch.Tensor = None):
         """
         严格对齐论文算法1 GEP训练逻辑
         每步执行策略评估(Critic更新)，每步执行策略改进(Actor更新)，每m步放大惩罚因子
@@ -340,8 +350,9 @@ class OcpAgent(BaseAgent):
 
         # 解析批量状态，严格校验维度
         states_list = []
+        road_list = []
         for item in batch_data:
-            state, _, _, _, _, _ = item
+            state, _, _, _, _, info = item
             state_np = np.array(state, dtype=np.float32).flatten()
             if state_np.shape[0] != self.TOTAL_STATE_DIM:
                 state_121 = np.zeros(self.TOTAL_STATE_DIM, dtype=np.float32)
@@ -349,13 +360,15 @@ class OcpAgent(BaseAgent):
                 state_121[:valid_len] = state_np[:valid_len]
                 state_np = state_121
             states_list.append(state_np)
+            road_list.append(info['road_state'])
         state_tensor = torch.from_numpy(np.stack(states_list)).to(self.device).float()
+        road_tensor = torch.from_numpy(np.stack(road_list)).to(self.device).float()
 
         # --------------------------
         # 1. Critic更新（策略评估，每步执行，对齐论文有限时域OCP）
         # --------------------------
         with torch.no_grad():
-            step_l, step_phi, states_traj = self._forward_horizon(state_tensor, ref_path_tensor)
+            step_l, step_phi, states_traj = self._forward_horizon(state_tensor, ref_path_tensor,road_tensor)
             step_aug_l = step_l + self.init_penalty * step_phi
             # 有限时域累计成本（无折扣γ=1，和论文OCP完全等价）
             targets = torch.flip(torch.cumsum(torch.flip(step_aug_l, [1]), dim=1), [1])
@@ -376,7 +389,7 @@ class OcpAgent(BaseAgent):
         # 2. Actor更新（策略改进，每步执行，对齐GEP算法）
         # --------------------------
         # 重新前向推演，保留完整计算图
-        step_l_actor, step_phi_actor, _ = self._forward_horizon(state_tensor, ref_path_tensor)
+        step_l_actor, step_phi_actor, _ = self._forward_horizon(state_tensor, ref_path_tensor,road_tensor)
         # GEP总损失：成本项 + 惩罚因子×约束违反项
         actor_loss = step_l_actor.mean() + self.init_penalty * step_phi_actor.mean()
 
@@ -394,9 +407,6 @@ class OcpAgent(BaseAgent):
             self.init_penalty = min(self.init_penalty * self.amplifier_c, self.max_penalty)
             self.gep_iteration += 1
             logger.info(f"[GEP] 惩罚因子更新: {old_penalty:.4f} → {self.init_penalty:.4f}")
-
-        # 全局步长更新
-        self.global_step += 1
 
         return {
             "actor_loss": actor_loss.item(),
@@ -428,8 +438,7 @@ class OcpAgent(BaseAgent):
         other_raw = data[:, :, self.DIM_EGO:self.DIM_EGO + self.DIM_OTHER]
         other_states = other_raw.view(B, N, self.env.env_cfg['ocp']['others'], 4)
         ref_error = data[:, :, self.DIM_EGO + self.DIM_OTHER:self.DIM_EGO + self.DIM_OTHER + self.DIM_REF_ERROR]
-        road_state = data[:, :, self.DIM_EGO + self.DIM_OTHER + self.DIM_REF_ERROR:]
-        return ego_state, other_states, ref_error, road_state
+        return ego_state, other_states, ref_error
 
     def save(self, save_info: Dict[str, Any]) -> None:
         model = {'actor': self.actor, 'critic': self.critic}

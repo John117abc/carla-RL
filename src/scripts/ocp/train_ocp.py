@@ -88,32 +88,28 @@ def main():
 
             total_reward = 0.0
             done = False
-            states, actions, rewards, infos ,log_probs= [], [], [], [],[]
             while not done:
                 action, _ = agent.select_action(state)
                 next_obs, reward, _, _, info = env.step(action)
                 next_state = next_obs['ocp_obs']
-                done = info['collision'] or info['off_route'] or info['TimeLimit.truncated']
-                total_reward += reward
-                # 数据加入buffer
-                actions.append(action)
-                states.append(state)
-                rewards.append(reward)
-                infos.append(info)
-                state = next_state
+                # 【修改】获取道路信息，转为tensor
+                road_state_np = info['road_state']
+                road_state_tensor = torch.from_numpy(road_state_np).unsqueeze(0).to(
+                    device) if road_state_np is not None else None
 
-                # 加入buffer
-                agent.buffer.handle_new_experience((state, action, reward, _, done, info))
+                done = info['TimeLimit.truncated']
+                # 加入buffer时，同时存储road_state
+                agent.buffer.handle_new_experience((state, action, reward, road_state_np, done, info))
 
-                # 更新参数
+                # 更新时传入road_state
                 loss = None
                 if agent.buffer.should_start_training():
-                    loss = agent.update(ref_path_tensor)
+                    loss = agent.update(ref_path_tensor, road_state_tensor)
+
+                state = next_state
 
                 # 打印关键信息
                 if agent.global_step % train_config["log_interval"] == 0:
-                        # or (loss is not None and loss['actor_updated'])):
-                    logger.info(f"  Step {agent.global_step}: reward={reward:.3f}, total={total_reward:.2f}")
                     if 'speed' in info:
                         logger.info(f"    速度: {info['speed']:.2f} km/h,动作：{action}")
 

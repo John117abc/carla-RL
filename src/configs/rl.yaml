@@ -38,7 +38,7 @@ rl:
     hidden_dim: 256
     other_car_min_distance: 2.0
     road_min_distance: 1.0
-    min_start_train: 10000  # 先收集10000步随机样本，再开始训练
+    min_start_train: 10240  # 先收集10000步随机样本，再开始训练
     total_capacity: 500000  # 还原论文的5e5缓冲区大小
     batch_size: 1024  # 放大batch_size，提升训练稳定性
     horizon: 25  # 和论文完全一致，25步=2.5s

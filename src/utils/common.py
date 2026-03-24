@@ -208,8 +208,7 @@ def unpack_ocp_numpy(data,road_num,other_number):
     DIM_EGO = 6  # 自车状态维度 [x,y,vx,vy,psi,omega]
     DIM_OTHER = other_number * 4  # 其他车辆状态 8×4
     DIM_REF_ERROR = 3  # 参考误差 [横向误差δp, 航向误差δφ, 速度误差δv]
-    DIM_ROAD = road_num * 4  # 道路边界 80维 [左1x,左1y,...左20x,左20y,右1x,右1y,...右20x,右20y]
-    TOTAL_STATE_DIM = DIM_EGO + DIM_OTHER + DIM_REF_ERROR + DIM_ROAD  # 121维
+    TOTAL_STATE_DIM = DIM_EGO + DIM_OTHER + DIM_REF_ERROR
 
     if data.ndim != 3 or data.shape[2] != TOTAL_STATE_DIM:
         raise ValueError(
@@ -223,6 +222,5 @@ def unpack_ocp_numpy(data,road_num,other_number):
     other_raw = data[:, :, DIM_EGO : DIM_EGO + DIM_OTHER]  # 6-37
     other_states = other_raw.reshape(B, N, other_number, 4)  # 8×4=32
     ref_error = data[:, :, DIM_EGO + DIM_OTHER : DIM_EGO + DIM_OTHER + DIM_REF_ERROR]  # 38-40
-    road_state = data[:, :, DIM_EGO + DIM_OTHER + DIM_REF_ERROR:]  # 41-120
 
-    return ego_state, other_states, ref_error, road_state
+    return ego_state, other_states, ref_error
