@@ -401,8 +401,8 @@ class SumoSimulation(object):
 
         type_id = results.get(traci.constants.VAR_TYPE)
         if type_id is None:
-            print(f"Warning: Vehicle {actor_id} has no VAR_TYPE in subscription results. "
-                  f"Available keys: {list(results.keys())}")
+            # print(f"Warning: Vehicle {actor_id} has no VAR_TYPE in subscription results. "
+            #       f"Available keys: {list(results.keys())}")
             return None
 
         vclass = SumoActorClass(results[traci.constants.VAR_VEHICLECLASS])

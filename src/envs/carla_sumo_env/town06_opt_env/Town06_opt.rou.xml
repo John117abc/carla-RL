@@ -4,8 +4,8 @@
 
     <!-- 定义车辆类型（避免 DEFAULT_VEHTYPE 警告） -->
     <vType id="vehicle.tesla.model3" length="4.8" maxSpeed="1" />
-    <vType id="vehicle.nissan.micra" length="3.9" maxSpeed="1" />
-    <vType id="vehicle.audi.a2"      length="4.2" maxSpeed="1" />
+    <vType id="vehicle.nissan.micra" length="3.9" maxSpeed="2" />
+    <vType id="vehicle.audi.a2"      length="4.2" maxSpeed="3" />
 
     <!-- 交通流：使用已定义的 vType -->
     <flow id="flow1" type="vehicle.tesla.model3"

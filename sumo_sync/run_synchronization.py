@@ -125,6 +125,11 @@ class SimulationSynchronization(object):
             carla_actor_id = self.sumo2carla_ids[sumo_actor_id]
 
             sumo_actor = self.sumo.get_actor(sumo_actor_id)
+            # 如果 SUMO 里已经找不到这个车了，说明它刚消失
+            # 我们记录一下，稍后统一清理，或者直接跳过本次同步
+            if sumo_actor is None:
+                continue
+
             carla_actor = self.carla.get_actor(carla_actor_id)
 
             carla_transform = BridgeHelper.get_carla_transform(sumo_actor.transform,

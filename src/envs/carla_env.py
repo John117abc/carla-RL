@@ -834,14 +834,17 @@ class CarlaEnv(gym.Env):
                         del self.synchronization.carla2sumo_ids[ego_id]
                         logger.debug(f"已从同步映射中移除自车：{ego_id}")
 
+                # 🌟 【关键修复点】：在同步之前，必须先清理掉已经到达终点的僵尸车辆！
+                self._cleanup_finished_vehicles()
+
                 # 防护性调用桥接
                 try:
-                    self.synchronization.tick()  # 2. 桥接同步（现在绝对不会碰自车）
+                    self.synchronization.tick()  # 2. 桥接同步（现在绝对不会碰自车和死车）
                 except (AttributeError, TraCIException) as e:
                     logger.warning(f"同步跳过异常：{str(e)}")
                     pass
+
                 obs = self._get_observation()
-                # self._cleanup_finished_vehicles()  # 3. 清理残留车辆
                 self.world.tick()  # 4. CARLA推进一步
             else:
                 obs = self._get_observation()
@@ -903,27 +906,37 @@ class CarlaEnv(gym.Env):
         logger.info(f"已销毁 {destroyed_count} 辆周车（共尝试 {len(npc_vehicles)} 辆）")
 
     def _cleanup_finished_vehicles(self):
-        """清理SUMO中已销毁的车辆"""
+        """清理 SUMO 中已销毁（到达终点或离开路网）的车辆"""
         if not self.enable_sumo or not hasattr(self.synchronization, '_sumo2carla'):
             return
-        # 获取桥接的SUMO→CARLA车辆映射
-        sumo2carla = self.synchronization._sumo2carla
-        # 遍历所有已离开SUMO的车辆ID
-        for sumo_veh_id in list(sumo2carla.keys()):
-            try:
-                # 校验车辆是否仍在SUMO中
-                if not self.sumo_simulation.traci.vehicle.getRoadID(sumo_veh_id):
+
+        try:
+            # 获取当前真正在 SUMO 中存活的车辆 ID 列表
+            active_sumo_vehicles = set(self.sumo_simulation.traci.vehicle.getIDList())
+            sumo2carla = self.synchronization._sumo2carla
+
+            # 必须用 list() 包裹，因为我们要在遍历时修改字典本身
+            for sumo_veh_id in list(sumo2carla.keys()):
+                if sumo_veh_id not in active_sumo_vehicles:
+                    # 说明该车辆已经到达终点，被 SUMO 移除了
                     carla_actor_id = sumo2carla[sumo_veh_id]
                     carla_actor = self.world.get_actor(carla_actor_id)
-                    # 空值校验：仅销毁存在的CARLA演员
-                    if carla_actor:
+
+                    # 1. 销毁 CARLA 中的物理残留车辆
+                    if carla_actor is not None and carla_actor.is_alive:
                         carla_actor.destroy()
-                        logger.debug(f"销毁残留SUMO车辆：{carla_actor_id}")
-                    # 从映射中删除
+                        logger.debug(f"销毁已到达终点的残留 CARLA 车辆：{carla_actor_id}")
+
+                    # 2. 【核心修复】从同步字典中彻底移除，防止 bridge_helper 接着同步它报错
                     del sumo2carla[sumo_veh_id]
-            except Exception:
-                # 跳过SUMO车辆不存在的异常
-                continue
+
+                    # 顺手把 _carla2sumo 映射也清了（双向安全）
+                    if hasattr(self.synchronization,
+                               '_carla2sumo') and carla_actor_id in self.synchronization._carla2sumo:
+                        del self.synchronization._carla2sumo[carla_actor_id]
+
+        except Exception as e:
+            logger.warning(f"清理 SUMO 车辆时发生异常: {e}")
 
     def _interpolate_ref_path(self, sparse_path, interval=0.5):
         """
@@ -1030,13 +1043,22 @@ class CarlaEnv(gym.Env):
                     self.world.apply_settings(settings)
                     logger.info(f"强制CARLA同步模式：步长{self.carla_cfg['fixed_delta_seconds']}s")
 
-            # tick 一次确保状态稳定
-            if not self.enable_sumo and self.carla_cfg["sync_mode"]:
-                self.tm = self.client.get_trafficmanager(self.tm_port)
-                self.tm.set_random_device_seed(22)  # 重置随机性
-                self.world.tick()
-            elif self.enable_sumo and self.carla_cfg["sync_mode"]:
-                self.synchronization.tick()
+                # tick 一次确保状态稳定
+                if not self.enable_sumo and self.carla_cfg["sync_mode"]:
+                    self.tm = self.client.get_trafficmanager(self.tm_port)
+                    self.tm.set_random_device_seed(22)  # 重置随机性
+                    self.world.tick()
+                elif self.enable_sumo and self.carla_cfg["sync_mode"]:
+                    # 🌟 【关键修复】：在重置时，tick 之前必须先清理上一轮残留的幽灵车！
+                    self._cleanup_finished_vehicles()
+
+                    # 手动把新生成的自车从同步列表中移除（防止自车被桥接接管）
+                    if hasattr(self.synchronization, 'carla2sumo_ids') and self.vehicle:
+                        ego_id = self.vehicle.id
+                        if ego_id in self.synchronization.carla2sumo_ids:
+                            del self.synchronization.carla2sumo_ids[ego_id]
+
+                    self.synchronization.tick()
 
         except Exception as e:
             logger.error(f"重置环境失败: {e}")
