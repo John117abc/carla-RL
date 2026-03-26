@@ -43,12 +43,14 @@ BIRTH_POINT = {
     "Town05_Opt":[carla.Location(x=26.4, y=-207.6, z=0.3)]
 }
 
+# 出生角度
 BIRTH_YAW = {
     "Town05_Opt":179.8,
     "Town06_Opt":0.0
 }
 
+# 终点
 END_POINT = {
-    "Town06_Opt": carla.Location(x = 700.3154,y = 251.56,z = 0.300000),
+    "Town06_Opt": carla.Location(x = 1200.3154,y = 251.56,z = 0.300000),
     "Town05_Opt": carla.Location(x=37.3, y=208.8, z=0.3)
 }

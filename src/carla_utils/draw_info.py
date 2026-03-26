@@ -58,26 +58,6 @@ def draw_points(world, points, display_time=5.0, color=None, size=0.2):
             display_time
         )
 
-# ====================== 显示文字函数（终极修复） ======================
-def draw_text_at_location(world, text, location, display_time=5.0, color=None):
-    if color is None:
-        color = carla.Color(255, 255, 255)
-
-    debug = world.debug
-
-    # 【核心修复】严格判断：只有不是Location时才转换
-    if not isinstance(location, carla.Location):
-        location = carla.Location(float(location[0]), float(location[1]), float(location[2]) if len(location)>=3 else 0.0)
-
-    # 严格按位置传参（CARLA 0.9.16 强制要求）
-    debug.draw_string(
-        location,    # 坐标
-        text,        # 文字
-        False,       # 阴影
-        color,       # 颜色
-        display_time # 显示时间
-    )
-
 
 def draw_text_at_location(world, text, location, display_time=5.0, color=None, size=0.5):
     """
