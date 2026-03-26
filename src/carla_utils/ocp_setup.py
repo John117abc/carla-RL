@@ -6,6 +6,204 @@ from typing import List, Optional, Tuple
 import src.envs.sensors
 from src.carla_utils.vehicle_control import world_to_vehicle_frame
 
+import carla
+import math
+from typing import Tuple
+
+
+def batch_world_to_ego(path_locations, ego_transform):
+    """
+    批量将 CARLA Location 列表 转换为 自车坐标系 xy 坐标
+    无循环、纯向量化计算，速度极快
+    """
+    # 1. 一次性把所有坐标转成 numpy 数组（关键提速点）
+    xy_world = np.array([[p.x, p.y] for p in path_locations], dtype=np.float32)
+
+    # 2. 自车位置与航向角
+    ego_x = ego_transform.location.x
+    ego_y = ego_transform.location.y
+    yaw = np.radians(ego_transform.rotation.yaw)
+    c, s = np.cos(yaw), np.sin(yaw)
+
+    # 3. 相对位移
+    dx = xy_world[:, 0] - ego_x
+    dy = xy_world[:, 1] - ego_y
+
+    # 4. 旋转矩阵（向量化，一次性转换所有点）
+    x_ego = dx * c + dy * s
+    y_ego = -dx * s + dy * c
+
+    # 5. 组合成和你原来格式一样的 [[x,y], [x,y], ...]
+    return np.stack([x_ego, y_ego], axis=1).tolist()
+
+def ego_to_world_coordinate(
+        ego_x: float,
+        ego_y: float,
+        ego_transform: carla.Transform
+) -> Tuple[float, float]:
+    """
+    将自车坐标系下的坐标还原为世界坐标系（world_to_ego_coordinate的反函数）
+    自车坐标系定义：自车位置为原点，车头朝向为x轴正方向，左侧为y轴正方向
+    :param ego_x: 自车坐标系x
+    :param ego_y: 自车坐标系y
+    :param ego_transform: 自车的transform（包含世界坐标位置和航向角）
+    :return: (world_x, world_y) 世界坐标系下的坐标
+    """
+    # 1. 获取自车在世界坐标系的位置
+    ego_x_world = ego_transform.location.x
+    ego_y_world = ego_transform.location.y
+
+    # 2. 获取自车航向角（弧度）
+    ego_yaw_rad = math.radians(ego_transform.rotation.yaw)
+
+    # 3. 旋转矩阵：自车坐标系 -> 世界坐标系（原旋转矩阵的逆矩阵/转置矩阵）
+    # 原矩阵：世界→自车 = [cosθ  sinθ; -sinθ cosθ]
+    # 逆矩阵：自车→世界 = [cosθ -sinθ; sinθ  cosθ]
+    dx = ego_x * math.cos(ego_yaw_rad) - ego_y * math.sin(ego_yaw_rad)
+    dy = ego_x * math.sin(ego_yaw_rad) + ego_y * math.cos(ego_yaw_rad)
+
+    # 4. 加上自车在世界坐标系的偏移，得到最终世界坐标
+    world_x = ego_x_world + dx
+    world_y = ego_y_world + dy
+
+    return world_x, world_y
+
+def world_to_ego_coordinate(
+        world_x: float,
+        world_y: float,
+        ego_transform: carla.Transform
+) -> Tuple[float, float]:
+    """
+    将世界坐标系下的坐标转换为自车坐标系
+    自车坐标系定义：自车位置为原点，车头朝向为x轴正方向，左侧为y轴正方向
+    :param world_x: 世界坐标系x
+    :param world_y: 世界坐标系y
+    :param ego_transform: 自车的transform
+    :return: (ego_x, ego_y) 自车坐标系下的坐标
+    """
+    # 自车在世界坐标系下的位置
+    ego_x_world = ego_transform.location.x
+    ego_y_world = ego_transform.location.y
+
+    # 自车航向角（弧度）
+    ego_yaw_rad = math.radians(ego_transform.rotation.yaw)
+
+    # 计算相对位移
+    dx = world_x - ego_x_world
+    dy = world_y - ego_y_world
+
+    # 旋转矩阵：世界坐标系 -> 自车坐标系
+    # [x_ego]   [cosθ  sinθ] [dx]
+    # [y_ego] = [-sinθ cosθ] [dy]
+    ego_x = dx * math.cos(ego_yaw_rad) + dy * math.sin(ego_yaw_rad)
+    ego_y = -dx * math.sin(ego_yaw_rad) + dy * math.cos(ego_yaw_rad)
+
+    return ego_x, ego_y
+
+
+def get_ocp_observation_ego_frame(
+        ego_vehicle: carla.Vehicle,
+        ego_imu: Optional[src.envs.sensors.IMUSensor],
+        other_vehicles: List[carla.Vehicle],
+        path_locations: List[carla.Location],
+        ego_ref_speed: float
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray,np.ndarray, np.ndarray]:
+    """
+    获取OCP观测信息并转换为自车坐标系（保持原函数返回格式）
+    :param ego_vehicle: 自车
+    :param ego_imu: IMU传感器（允许为空）
+    :param other_vehicles: 周车列表
+    :param path_locations: 静态路径点列表
+    :param ego_ref_speed: 自车参考速度 (m/s)
+    :return: 与原函数完全相同的返回格式，但位置数据已转换为自车坐标系
+        - network_state: 网络输入状态 (41/45维)
+        - s_road: 多帧道路边缘 (80,) 自车坐标系
+        - s_ref_raw: 参考路径原始状态 (6,) 自车坐标系
+        - s_ref_error: 参考路径误差状态 (3,) 保持不变
+        - s_road: 世界坐标下的道路
+        - s_ref_raw: 世界坐标下的参考路线
+    """
+    # 1. 调用原函数获取世界坐标系下的观测数据
+    network_state, s_road, s_ref_raw, s_ref_error = get_ocp_observation(
+        ego_vehicle, ego_imu, other_vehicles, path_locations, ego_ref_speed
+    )
+
+    # 2. 获取自车transform用于坐标转换
+    ego_transform = ego_vehicle.get_transform()
+
+    # --------------------------
+    # 转换network_state中的位置数据
+    # --------------------------
+    # network_state结构：s_ego(6) + s_other(32) + s_ref_error(3)
+    # 先拆分network_state
+    s_ego_world = network_state[:6].copy()
+    s_other_world = network_state[6:6 + 32].copy().reshape(8, 4)
+    s_ref_error_original = network_state[6 + 32:].copy()
+
+    # 转换自车位置（自车坐标系下自车位置为(0,0)）
+    s_ego_ego = s_ego_world.copy()
+    s_ego_ego[0], s_ego_ego[1] = 0.0, 0.0  # 自车在自身坐标系原点
+
+    # 转换周车位置
+    s_other_ego = s_other_world.copy()
+    for i in range(s_other_ego.shape[0]):
+        if s_other_ego[i, 0] != 0 or s_other_ego[i, 1] != 0:  # 非零值才转换
+            x, y = world_to_ego_coordinate(
+                s_other_ego[i, 0], s_other_ego[i, 1], ego_transform
+            )
+            s_other_ego[i, 0] = x
+            s_other_ego[i, 1] = y
+
+    # 重新组合network_state
+    network_state_ego = np.concatenate([
+        s_ego_ego,
+        s_other_ego.flatten(),
+        s_ref_error_original
+    ], axis=0)
+
+    # --------------------------
+    # 转换s_road中的道路边缘点
+    # --------------------------
+    s_road_ego = s_road.copy()
+    # s_road结构：[左x1,左y1,左x2,左y2,...(20个左点), 右x1,右y1,右x2,右y2,...(20个右点)]
+    num_points = 20
+    # 处理左边缘点
+    for i in range(num_points):
+        idx = i * 2
+        if idx + 1 < len(s_road_ego) and (s_road_ego[idx] != 0 or s_road_ego[idx + 1] != 0):
+            x, y = world_to_ego_coordinate(
+                s_road_ego[idx], s_road_ego[idx + 1], ego_transform
+            )
+            s_road_ego[idx] = x
+            s_road_ego[idx + 1] = y
+    # 处理右边缘点
+    right_start_idx = num_points * 2
+    for i in range(num_points):
+        idx = right_start_idx + i * 2
+        if idx + 1 < len(s_road_ego) and (s_road_ego[idx] != 0 or s_road_ego[idx + 1] != 0):
+            x, y = world_to_ego_coordinate(
+                s_road_ego[idx], s_road_ego[idx + 1], ego_transform
+            )
+            s_road_ego[idx] = x
+            s_road_ego[idx + 1] = y
+
+    # --------------------------
+    # 转换s_ref_raw中的参考路径点
+    # --------------------------
+    s_ref_raw_ego = s_ref_raw.copy()
+    if s_ref_raw_ego[0] != 0 or s_ref_raw_ego[1] != 0:
+        x, y = world_to_ego_coordinate(
+            s_ref_raw_ego[0], s_ref_raw_ego[1], ego_transform
+        )
+        s_ref_raw_ego[0] = x
+        s_ref_raw_ego[1] = y
+
+    # --------------------------
+    # 保持s_ref_error不变（本身就是相对误差）
+    # --------------------------
+
+    # 返回与原函数格式完全一致的结果
+    return network_state_ego, s_road_ego, s_ref_raw_ego, s_ref_error,s_road,s_ref_raw
 
 def get_ocp_observation(
         ego_vehicle: carla.Vehicle,

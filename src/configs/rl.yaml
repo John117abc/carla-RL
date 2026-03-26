@@ -11,8 +11,8 @@ rl:
   save_freq: 50            # 每多少回合保存一次模型
   continue_a2c: False    # 是否继续训练，如果需要继续训练，则需要填写模型地址
   model_path_a2c: 'checkpoints/20260131/a2c-v1.0_Town06_Opt_020547_episode=4000.pth'
-  continue_ocp: False    # 是否继续训练，如果需要继续训练，则需要填写模型地址
-  model_path_ocp: 'checkpoints/20260316/ocp-v1.0_Town06_Opt_235303_episode=100.pth'
+  continue_ocp: True    # 是否继续训练，如果需要继续训练，则需要填写模型地址
+  model_path_ocp: 'checkpoints/20260324/ocp-v1.0_Town06_Opt_160759_episode=100.pth'
   num_eps_eval: 10    # 评估步数
 
   A2C:
@@ -38,9 +38,9 @@ rl:
     hidden_dim: 256
     other_car_min_distance: 2.0
     road_min_distance: 1.0
-    min_start_train: 10240  # 先收集10000步随机样本，再开始训练
+    min_start_train: 1024  # 先收集10000步随机样本，再开始训练
     total_capacity: 500000  # 还原论文的5e5缓冲区大小
-    batch_size: 1024  # 放大batch_size，提升训练稳定性
+    batch_size: 512  # 放大batch_size，提升训练稳定性
     horizon: 25  # 和论文完全一致，25步=2.5s
     dt: 0.1  # 和Carla仿真步长对齐
 

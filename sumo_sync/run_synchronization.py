@@ -26,7 +26,7 @@ import time
 if 'SUMO_HOME' in os.environ:
     sys.path.append(os.path.join(os.environ['SUMO_HOME'], 'tools'))
 else:
-    sys.exit("3please declare environment variable 'SUMO_HOME'")
+    sys.exit("please declare environment variable 'SUMO_HOME'")
 
 # ==================================================================================================
 # -- sumo integration imports ----------------------------------------------------------------------
@@ -81,7 +81,7 @@ class SimulationSynchronization(object):
         self.carla.world.apply_settings(settings)
 
         if use_traffic_manager:
-            traffic_manager = self.carla.client.get_trafficmanager()
+            traffic_manager = self.carla.client.get_trafficmanager(8005)
             traffic_manager.set_synchronous_mode(True)
 
     def tick(self):
@@ -100,6 +100,7 @@ class SimulationSynchronization(object):
             sumo_actor = self.sumo.get_actor(sumo_actor_id)
 
             carla_blueprint = BridgeHelper.get_carla_blueprint(sumo_actor, self.sync_vehicle_color)
+
             if carla_blueprint is not None:
                 carla_transform = BridgeHelper.get_carla_transform(sumo_actor.transform,
                                                                    sumo_actor.extent)
@@ -107,6 +108,10 @@ class SimulationSynchronization(object):
                 carla_actor_id = self.carla.spawn_actor(carla_blueprint, carla_transform)
                 if carla_actor_id != INVALID_ACTOR_ID:
                     self.sumo2carla_ids[sumo_actor_id] = carla_actor_id
+                carla_blueprint.set_attribute('role_name', 'sumo_driver')
+                # ✅ 添加：确保车辆启用物理模拟
+                if carla_blueprint.has_attribute('physics'):
+                    carla_blueprint.set_attribute('physics', 'true')
             else:
                 self.sumo.unsubscribe(sumo_actor_id)
 
@@ -170,11 +175,6 @@ class SimulationSynchronization(object):
 
             carla_actor = self.carla.get_actor(carla_actor_id)
             sumo_actor = self.sumo.get_actor(sumo_actor_id)
-            if sumo_actor is None:
-                # 车辆已消失，从映射中移除，避免后续再查
-                if sumo_actor_id in self.sumo2carla_ids:
-                    del self.sumo2carla_ids[sumo_actor_id]
-                continue  # 跳过该车辆同步
 
             sumo_transform = BridgeHelper.get_sumo_transform(carla_actor.get_transform(),
                                                              carla_actor.bounding_box.extent)

@@ -11,4 +11,7 @@
         <gui-settings-file value="viewsettings.xml"/>
     </gui_only>
 
+    <time>
+        <step-length value="0.05"/>
+    </time>
 </configuration>

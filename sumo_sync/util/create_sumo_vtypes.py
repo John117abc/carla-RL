@@ -113,7 +113,10 @@ def main(args):
         for blueprint in vehicle_blueprints:
             logging.info('processing vtype for %s', blueprint.id)
             vehicle = world.spawn_actor(blueprint, transform)
-
+            # ✅ 强制开启物理模拟 = 能碰撞！
+            vehicle.set_simulate_physics(True)
+            # ✅ 强制开启碰撞检测
+            vehicle.set_collision_aware(True)
             vtype = generate_vtype(vehicle)
             if vtype:
                 vtypes.append(vtype)
