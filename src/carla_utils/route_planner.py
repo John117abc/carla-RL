@@ -41,6 +41,24 @@ class RoutePlanner:
         self._target_waypoint: Optional[carla.Location] = None  # 目标终点
         self._current_index = 0  # 当前最近路径点索引
 
+    def route_plane(self,start_location:carla.Location,end_location:carla.Location,life_time:float = 60.0):
+        end_location = end_location
+        logger.info("开始进行路径规划")
+        self.set_destination(start_location,end_location)
+        path_locations = self.get_route()
+        # 可视化路径
+        for i, loc in enumerate(path_locations):
+            self.world.debug.draw_point(loc, size=0.01, color=carla.Color(0, 255, 0), life_time=60.0)
+            if i > 0:
+                self.world.debug.draw_line(
+                    path_locations[i - 1], loc,
+                    thickness=0.1,
+                    color=carla.Color(255, 0, 0),
+                    life_time=life_time
+                )
+        return path_locations
+
+
     def set_destination(self, start_location: carla.Location, end_location: carla.Location) -> bool:
         """
         设置新的起点和终点，重新规划路径。

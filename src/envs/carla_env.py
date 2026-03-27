@@ -1,33 +1,25 @@
-# src/envs/carla_env.py
+# src/envs/carla_env_bak.py
 
 import gymnasium as gym
 import numpy as np
 import carla
-import random
-import time
-import math
-import traceback
-from typing import Dict, Any, Tuple, Optional, Union, List
-from gymnasium import spaces
-from traci import TraCIException
+from typing import Dict, Any, Optional
+from src.carla_utils import RoutePlanner,batch_world_to_ego
 
-from src.envs.sensors import CameraSensor, CollisionSensor, LaneInvasionSensor,ObstacleSensor,IMUSensor
-from src.carla_utils import get_compass, world_to_vehicle_frame, RoutePlanner, get_ocp_observation, \
-    get_current_lane_forward_edges, draw_text_at_location, draw_lines_between_points, draw_points, \
-    get_ocp_observation_ego_frame, ego_to_world_coordinate, batch_world_to_ego
-from src.utils import get_logger, RunningNormalizer, unpack_ocp_numpy
+from src.utils import get_logger, RunningNormalizer
 from src.configs.constant import (LAYERS_TO_REMOVE_1,
                                   LAYERS_TO_REMOVE_2,
                                   LAYERS_TO_REMOVE_3,
                                   LAYERS_TO_REMOVE_4,
                                   BIRTH_POINT,END_POINT,BIRTH_YAW)
 
-# SUMO 相关导入
-import traci
-from sumo_sync.sumo_integration.sumo_simulation import SumoSimulation
-from sumo_sync.sumo_integration.carla_simulation import CarlaSimulation
-from sumo_sync.sumo_integration.bridge_helper import BridgeHelper
-from sumo_sync.run_synchronization import SimulationSynchronization
+from src.envs.env_model.vehicle_manager import VehicleManager
+from src.envs.env_model.sensors_manager import SensorManager
+from src.envs.env_model.observation_processor import ObservationProcessor
+from src.envs.env_model.sumo_integration import SumoIntegration
+from src.envs.env_model.debug_visualizer import DebugVisualizer
+from src.envs.env_model.reward_calculator import RewardCalculator
+from src.envs.env_model.termination_checker import TerminationChecker
 
 logger = get_logger(name='carla_env')
 
@@ -40,75 +32,110 @@ class CarlaEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 20}
 
     def __init__(
-        self,
-        carla_config: Dict[str, Any],
-        env_config: Dict[str, Any],
-        sumo_config: Dict[str, Any] = None,
-        render_mode: Optional[str] = None,
-        is_eval: bool = False
+            self,
+            carla_config: Dict[str, Any],
+            env_config: Dict[str, Any],
+            sumo_config: Dict[str, Any] = None,
+            render_mode: Optional[str] = None,
+            is_eval: bool = False
     ):
         super().__init__()
+        # 1. 基础参数初始化（最核心的配置/模式变量）
+        self._init_basic_params(carla_config, env_config, sumo_config, render_mode, is_eval)
+        # 2. CARLA客户端&世界初始化
+        self._init_carla_client()
+        # 6. 归一化器初始化
+        self._init_normalizer()
+        # 8. 观测空间构建
+        self._init_observation_space()
+
+        self._init_module()
+
+        # 3. 交通仿真初始化（SUMO / 原生TM 二选一）
+        self._init_traffic_simulation()
+        # 4. CARLA世界环境配置（天气）
+        self._init_carla_world_env()
+        # 7. 动作空间构建
+        self._init_action_space()
+        # 9. 地图层级初始化
+        self._init_map_layers()
+
+    def _init_basic_params(
+            self,
+            carla_config: Dict[str, Any],
+            env_config: Dict[str, Any],
+            sumo_config: Dict[str, Any] = None,
+            render_mode: Optional[str] = None,
+            is_eval: bool = False
+    ):
+        """初始化基础配置和模式参数（无业务逻辑，仅变量赋值）"""
+        # 配置文件
         self.carla_cfg = carla_config
         self.env_cfg = env_config
+        self.sumo_cfg = sumo_config
+        # 渲染/评估模式
         self.render_mode = render_mode
-
-        # 是否启用sumo控制交通
+        self._is_eval = is_eval
+        # 核心开关
         self.enable_sumo = env_config['traffic']['enable_sumo']
+        # OCP调试模式
+        self._ocp_debug = True
+        # 自车参考速度
+        self.ego_ref_speed = self.env_cfg['actors']['ego']['ref_speed']
 
-        # 初始化 CARLA 客户端
-        self.carla_host = self.carla_cfg["host"]
-        self.carla_port = self.carla_cfg["port"]
-        self.client = carla.Client(self.carla_host, self.carla_port)
+        # 计数器
+        self.step_count = 0
+
+        # 路径规划相关变量
+        self.route_planner = None
+        self.path_locations = None
+        self.ref_path_xy = None
+        self.ref_path_xy_raw = None
+        self.current_path_id = 0
+        self.static_road_xy = None
+
+        # 参考线投影加速变量
+        self.last_ref_idx = 0
+
+        # 视角平滑相关变量
+        self.prev_spectator_transform = None
+
+        # 参考线插值后密集路径（后续reset中生成）
+        self.dense_ref_path = None
+
+        # Z轴平滑相关变量（后续_place_spectator_above_vehicle中初始化）
+        self.smoothed_z = None
+
+    def _init_carla_client(self):
+        """初始化CARLA客户端并加载指定地图世界"""
+        self.client = carla.Client(
+            self.carla_cfg["host"],
+            self.carla_cfg["port"]
+        )
         self.client.set_timeout(self.carla_cfg["timeout"])
         self.world = self.client.load_world(self.env_cfg["world"]["map"])
+        # 蓝图库（后续生成车辆/传感器需要，提前初始化）
+        self.blueprint_library = self.world.get_blueprint_library()
 
-        # 初始化 SUMO 仿真
+    def _init_traffic_simulation(self):
+        """初始化交通仿真：启用SUMO则初始化SUMO桥接，否则初始化CARLA原生TM"""
         if self.enable_sumo:
-            self.simulation_step_length = self.carla_cfg["fixed_delta_seconds"]  # 确保与 CARLA 同步
-            self.cfg_file = sumo_config['default']['sumo_config_file']
-            self.sumo_gui = sumo_config['default']['sumo_gui']
-            self.sumo_host = sumo_config['default']['sumo_host']
-            self.sumo_port = sumo_config['default']['sumo_port']
-
-            self.carla_simulation = CarlaSimulation(host=self.carla_host,
-                                                    port=self.carla_port,
-                                                    step_length=self.simulation_step_length)
-
-            self.sumo_simulation = SumoSimulation(self.cfg_file,
-                                                  self.simulation_step_length,
-                                                  host=self.sumo_host,
-                                                  port=self.sumo_port,
-                                                  sumo_gui=self.sumo_gui,
-                                                  client_order=1)
-
-            self.synchronization = SimulationSynchronization(self.sumo_simulation,
-                                                             self.carla_simulation,
-                                                             'none',  # 交通信号灯管理('carla', 'sumo', 'none')
-                                                             False,  # 是否同步车颜色
-                                                             False)
-
-            # 重写桥接的车辆生成回调
-            def _on_sumo_vehicle_spawn(carla_vehicle):
-                # 空值校验，防止车辆未生成完成就调用属性
-                if not carla_vehicle:
-                    return
-                if carla_vehicle.attributes.get('role_name') != 'hero':
-                    carla_vehicle.set_simulate_physics(False)
-                    logger.debug(f"关闭SUMO周车物理：{carla_vehicle.id}")
-
-            # 绑定回调
-            self.carla_simulation.on_vehicle_spawned = _on_sumo_vehicle_spawn
-
+            # SUMO仿真初始化
+            self.simulation_step_length = self.carla_cfg["fixed_delta_seconds"]
+            self.sumo_integration.init_sumo(self.simulation_step_length,self.carla_cfg["host"],self.carla_cfg["port"])
         else:
-            # 交通管理器（即使不用背景车也建议初始化，避免端口冲突）
+            # CARLA原生TrafficManager初始化（原逻辑完全保留）
             self.tm_port = self.carla_cfg["world"]["traffic_manager"]["port"]
             self.synchronous_mode = self.carla_cfg["world"]["traffic_manager"]["synchronous_mode"]
+
             # 同步模式设置
             if self.carla_cfg["sync_mode"]:
                 settings = self.world.get_settings()
                 settings.synchronous_mode = True
                 settings.fixed_delta_seconds = self.carla_cfg["fixed_delta_seconds"]
                 self.world.apply_settings(settings)
+
+            # TM初始化+异常处理
             try:
                 self.tm = self.client.get_trafficmanager(self.tm_port)
                 self.tm.set_synchronous_mode(self.synchronous_mode)
@@ -119,8 +146,8 @@ class CarlaEnv(gym.Env):
             except RuntimeError as e:
                 logger.error(f"⚠️ TrafficManager 初始化失败（可能端口被占用）: {e}")
 
-
-            # 天气
+    def _init_carla_world_env(self):
+        """初始化CARLA世界环境（目前仅天气，后续可扩展时间/光照等）"""
         weather = carla.WeatherParameters(
             cloudiness=self.carla_cfg["world"]["weather"]["cloudiness"],
             precipitation=self.carla_cfg["world"]["weather"]["precipitation"],
@@ -128,36 +155,16 @@ class CarlaEnv(gym.Env):
         )
         self.world.set_weather(weather)
 
-        self.blueprint_library = self.world.get_blueprint_library()
-
-        # 传感器与状态
-        self.camera_sensor: Optional[CameraSensor] = None
-        self.collision_sensor: Optional[CollisionSensor] = None
-        self.lane_invasion_sensor: Optional[LaneInvasionSensor] = None
-        self.obstacle_sensor: Optional[ObstacleSensor] = None
-        self.imu_sensor: Optional[IMUSensor] = None
-        self.vehicle = None
-        self.step_count = 0
-
-        # 归一化处理
+    def _init_normalizer(self):
+        """初始化观测数据归一化器（仅measurements）"""
         meas_dim = self._get_measurements_dim()
         self.meas_normalizer = RunningNormalizer(shape=(meas_dim,))
 
-        # 控制是否更新归一化统计量（评估 时不更新）
-        self._is_eval = is_eval
-
-        # ocp观察模式是否为debug模式
-        self._ocp_debug = True
-
-        # 周车
-        self.actors = []
-
-        # 自车参考速度
-        self.ego_ref_speed = self.env_cfg['actors']['ego']['ref_speed']
-
-        # 动作空间
+    def _init_action_space(self):
+        """构建Gym动作空间（连续/离散二选一，按配置）"""
         action_type = self.env_cfg["action"]["type"]
         if action_type == "continuous":
+            # 连续动作空间：油门+转向
             low = np.array([
                 self.env_cfg["action"]["continuous"]["throttle_range"][0],
                 self.env_cfg["action"]["continuous"]["steer_range"][0]
@@ -168,15 +175,18 @@ class CarlaEnv(gym.Env):
             ], dtype=np.float32)
             self.action_space = gym.spaces.Box(low=low, high=high, dtype=np.float32)
         elif action_type == "discrete":
+            # 离散动作空间：按配置的动作数量
             n_actions = len(self.env_cfg["action"]["discrete"]["actions"])
             self.action_space = gym.spaces.Discrete(n_actions)
         else:
             raise ValueError(f"不支持的操作类型: {action_type}")
 
-        # 观测空间
+    def _init_observation_space(self):
+        """构建Gym观测空间（多模态Dict，按配置的obs_type）"""
         obs_type = self.env_cfg["obs_type"]
         obs_spaces = {}
 
+        # 图像观测
         if "image" in obs_type:
             img_shape = (
                 self.env_cfg["image"]["height"],
@@ -187,12 +197,14 @@ class CarlaEnv(gym.Env):
                 low=0, high=255, shape=img_shape, dtype=np.uint8
             )
 
+        # 数值测量观测
         if "measurements" in obs_type:
             n_meas = self._get_measurements_dim()
             obs_spaces["measurements"] = gym.spaces.Box(
                 low=-np.inf, high=np.inf, shape=(n_meas,), dtype=np.float32
             )
 
+        # OCP观测
         if "ocp_obs" in obs_type:
             n_meas = self._get_ocp_dim()
             obs_spaces["ocp_obs"] = gym.spaces.Box(
@@ -201,27 +213,8 @@ class CarlaEnv(gym.Env):
 
         self.observation_space = gym.spaces.Dict(obs_spaces)
 
-        # 卸载地图层级
-        self._init_map_layers()
-
-        # 初始化路径规划器
-        self.route_planner = None
-        self.path_locations = None
-        self.ref_path_xy = None
-        self.ref_path_xy_raw = None
-        # 路径id
-        self.current_path_id = 0
-
-        # 静态道路坐标
-        self.static_road_xy = None
-
-        # 保存上一帧在参考线上的投影点索引（加速搜索，避免每帧从头找）
-        self.last_ref_idx = 0
-        # 保存上一帧的视角（用于极轻微的平滑，防止参考线本身有抖动）
-        self.prev_spectator_transform = None
-
     def _init_notice_str_world(self):
-        location = self.vehicle.get_location()
+        location = self.vehicle_manager.ego_vehicle.get_location()
         # 在车顶上方 5 米处显示文字
         self.world.debug.draw_string(
             location + carla.Location(z=5.0),
@@ -271,6 +264,7 @@ class CarlaEnv(gym.Env):
         return dim
 
     def _init_map_layers(self):
+        remove_layer = []
         match self.carla_cfg["world"]["map_layer"]:
             case 1:
                 remove_layer = LAYERS_TO_REMOVE_1
@@ -288,682 +282,93 @@ class CarlaEnv(gym.Env):
             logger.info(f"卸载层级: {layer}")
 
     def _load_map_layers(self):
+        load_layer = []
         match self.carla_cfg["world"]["map_layer"]:
             case 1:
-                remove_layer = LAYERS_TO_REMOVE_1
+                load_layer = LAYERS_TO_REMOVE_1
             case 2:
-                remove_layer = LAYERS_TO_REMOVE_2
+                load_layer = LAYERS_TO_REMOVE_2
             case 3:
-                remove_layer = LAYERS_TO_REMOVE_3
+                load_layer = LAYERS_TO_REMOVE_3
             case 4:
-                remove_layer = LAYERS_TO_REMOVE_4
+                load_layer = LAYERS_TO_REMOVE_4
             case _:
-                remove_layer = []
+                load_layer = []
         # 批量加载
-        for layer in remove_layer:
+        for layer in load_layer:
             self.world.load_map_layer(layer)
             logger.info(f"加载层级: {layer}")
 
 
-    def _spawn_ego_vehicle(
-            self,
-            spawn_point_index: Optional[Union[int, List[carla.Location], Dict[str, float]]] = None,
-            yaw=0
-    ) -> carla.Vehicle:
-        """
-        在世界中生成主控车辆（ego vehicle）。
+    def _init_module(self):
+        # 车辆模块初始化
+        self.vehicle_manager = VehicleManager(world=self.world,client=self.client,config=self.env_cfg)
+        # 传感器模块初始化
+        self.sensor_manager = SensorManager(world=self.world,config=self.env_cfg)
+        # sumo交通模块初始化
+        self.sumo_integration = SumoIntegration(carla_client=self.client,carla_world=self.world,sumo_config=self.sumo_cfg,vehicle_manager=self.vehicle_manager)
+        # 观察模块初始化
+        self.observation_processor = ObservationProcessor(vehicle_manager=self.vehicle_manager,
+                                                          sensor_manager=self.sensor_manager,
+                                                          world=self.world,
+                                                          config=self.env_cfg,
+                                                          normalizer=self.meas_normalizer)
+        # debug模块初始化
+        self.debug_visualizer = DebugVisualizer(world=self.world,vehicle_manager=self.vehicle_manager,config=self.env_cfg)
+        # 奖励计算模块初始化
+        self.reward_calculator = RewardCalculator(vehicle_manager=self.vehicle_manager,config=self.env_cfg)
+        # 终止模块初始化
+        self.termination_checker = TerminationChecker(vehicle_manager=self.vehicle_manager,sensor_manager=self.sensor_manager,config=self.env_cfg)
 
-        参数：
-            spawn_point_index (Optional[Union[int, List[carla.Location], Dict[str, float]]]):
-                - 若为 int：使用地图预设 spawn points 中对应索引的位置。
-                - 若为 List[carla.Location]：从这些自定义位置中随机选择一个。
-                - 若为 Dict[str, float]：形如 {"x": 100, "y": 200, "z": 0.6}，表示一个自定义位置。
-                - 若为 None：从所有地图预设 spawn points 中随机选择。
-
-        返回：
-            carla.Vehicle: 成功生成的主车对象。
-
-        异常：
-            RuntimeError: 当无法在多次尝试后生成车辆时抛出。
-        """
-        blueprint_library = self.world.get_blueprint_library()
-        vehicle_bp = random.choice(blueprint_library.filter(self.env_cfg["actors"]['ego']["ego_car_type"]))
-        vehicle_bp.set_attribute('role_name', 'hero')
-
-        spawn_points = self.world.get_map().get_spawn_points()
-        if not spawn_points:
-            raise RuntimeError("当前地图没有可用的出生点！")
-
-        # 构建候选 spawn point 列表（Transform）
-        candidate_points: List[carla.Transform] = []
-
-        if spawn_point_index is None:
-            # 随机选择一个预设 spawn point
-            candidate_points = [sp for sp in spawn_points]
-        elif isinstance(spawn_point_index, int):
-            # 指定预设索引
-            if spawn_point_index < 0 or spawn_point_index >= len(spawn_points):
-                raise ValueError(f"出生点索引 {spawn_point_index} 超出范围（共 {len(spawn_points)} 个）")
-            candidate_points = [spawn_points[spawn_point_index]]
-        elif isinstance(spawn_point_index, list):
-            # 列表形式的自定义位置
-            if not spawn_point_index:
-                raise ValueError("自定义出生点列表不能为空")
-            for loc in spawn_point_index:
-                if not isinstance(loc, carla.Location):
-                    raise TypeError(f"列表中的项必须是 carla.Location，但得到的是 {type(loc)}")
-                candidate_points.append(carla.Transform(loc, carla.Rotation(yaw=yaw)))
-        elif isinstance(spawn_point_index, dict):
-            # 字典形式：{"x": ..., "y": ..., "z": ...}
-            required_keys = {"x", "y", "z"}
-            if not required_keys.issubset(spawn_point_index.keys()):
-                missing = required_keys - spawn_point_index.keys()
-                raise ValueError(f"缺少必要键：{missing}")
-            try:
-                location = carla.Location(
-                    x=spawn_point_index["x"],
-                    y=spawn_point_index["y"],
-                    z=spawn_point_index["z"]
-                )
-                candidate_points.append(carla.Transform(location, carla.Rotation(yaw=yaw)))
-            except Exception as e:
-                raise ValueError(f"无法创建 Location：{e}")
+    def _cleanup(self):
+        # 销毁所有旧资源
+        # 清除周车
+        if not self.enable_sumo:
+            self.vehicle_manager.cleanup_npc()
         else:
-            raise TypeError(f"不支持的 spawn_point_index 类型: {type(spawn_point_index)}")
+            pass  # 由sumo控制周车生命周期
+        # 销毁自车
+        self.vehicle_manager.cleanup_ego()
+        self.sensor_manager.cleanup()
 
-        # 尝试生成车辆（最多重试20次）
-        max_attempts = 20
-        for attempt in range(max_attempts):
-            spawn_point = random.choice(candidate_points)
-            self.vehicle = self.world.try_spawn_actor(vehicle_bp, spawn_point)
-            if self.vehicle is not None:
-                break
-            logger.info(f"出生点被占用，重试第 {attempt + 1} 次...")
 
-        if self.vehicle is None:
-            msg = f"无法初始化自车，最后尝试位置：x={spawn_point.location.x:.2f}, y={spawn_point.location.y:.2f}"
-            logger.error(msg)
-            raise RuntimeError(msg)
+    def _init_episode_state(self):
+        # 规划静态路径
+        ego_vehicle = self.vehicle_manager.ego_vehicle
+        self.route_planner = RoutePlanner(self.world, self.carla_cfg["world"]["sampling_resolution"])
 
-        logger.info(f"主车已生成，位置：x={spawn_point.location.x:.2f}, y={spawn_point.location.y:.2f}")
-        return self.vehicle
+        self.path_locations = self.route_planner.route_plane(BIRTH_POINT[self.env_cfg["world"]["map"]][0],END_POINT[self.env_cfg["world"]["map"]],240)
+        self.ref_path_xy = batch_world_to_ego(self.path_locations, ego_vehicle.get_transform())
+        self.ref_path_xy_raw = np.array([[item.x, item.y] for item in self.path_locations],dtype=np.float32)
+        logger.info(f"路径规划成功！已规划{len(self.path_locations)}个坐标点")
 
-    def _setup_sensors(self):
-        # 先清理旧传感器
-        if self.camera_sensor:
-            self.camera_sensor.destroy()
-        if self.collision_sensor:
-            self.collision_sensor.destroy()
-        if self.lane_invasion_sensor:
-            self.lane_invasion_sensor.destroy()
-        if self.obstacle_sensor:
-            self.obstacle_sensor.destroy()
-        if self.imu_sensor:
-            self.imu_sensor.destroy()
-
-        # 创建新传感器
-        if "image" in self.env_cfg["obs_type"]:
-            self.camera_sensor = CameraSensor(
-                self.vehicle,
-                self.world,
-                width=self.env_cfg["image"]["width"],
-                height=self.env_cfg["image"]["height"],
-                fov=self.env_cfg["image"]["fov"],
-            )
-        self.collision_sensor = CollisionSensor(self.vehicle)
-        self.lane_invasion_sensor = LaneInvasionSensor(self.vehicle)
-        self.obstacle_sensor = ObstacleSensor(self.vehicle)
-        self.imu_sensor = IMUSensor(self.vehicle)
-        # 等待传感器数据就绪，避免首次观测为空
-        for _ in range(5):  # 最多等待 5 帧
-            if self.carla_cfg["sync_mode"]:
-                self.world.tick()
-            else:
-                time.sleep(0.05)
-            if ("image" not in self.env_cfg["obs_type"]) or (self.camera_sensor.get_data() is not None):
-                break
-
-    def _get_observation(self) -> Union[np.ndarray, Dict[str, np.ndarray]]:
-        obs = {}
-        if "image" in self.env_cfg["obs_type"]:
-            img = self.camera_sensor.get_data()
-            if img is None:
-                img = np.zeros(
-                    (self.env_cfg["image"]["height"], self.env_cfg["image"]["width"], 3),
-                    dtype=np.uint8
-                )
-            obs["image"] = img
-        # 如果是sumo直接观察周车
-        self.actors = self._get_surrounding_vehicles()
-        if "measurements" in self.env_cfg["obs_type"]:
-            measurements = []
-            v = self.vehicle.get_velocity()
-            c = self.vehicle.get_control()
-            # 转换为车辆坐标系
-            vx,vy = world_to_vehicle_frame(v,self.vehicle.get_transform())
-            compass = get_compass(self.vehicle)  # 弧度
-            loc = self.vehicle.get_location()
-            if self.imu_sensor.get_acceleration() is None:
-                acc = 0.0
-            else:
-                acc = math.sqrt(self.imu_sensor.get_acceleration().x ** 2 + self.imu_sensor.get_acceleration().y ** 2 + self.imu_sensor.get_acceleration().z ** 2)
-
-            if self.imu_sensor.get_angular_velocity() is None:
-                ang_v = 0.0
-            else:
-                ang_v = math.sqrt(
-                    self.imu_sensor.get_angular_velocity().x ** 2 + self.imu_sensor.get_angular_velocity().y ** 2 + self.imu_sensor.get_angular_velocity().z ** 2)
-
-            for key in self.env_cfg["measurements"]["include"]:
-                if key == "speed":
-                    measurements.extend([vx, vy])
-                elif key == "steer":
-                    measurements.append(float(c.steer))
-                elif key == "compass":
-                    measurements.append(float(compass))
-                elif key == "gps":
-                    measurements.extend([float(loc.x), float(loc.y)])
-                elif key == "imu":
-                    measurements.extend([acc, ang_v, self.imu_sensor.get_yaw_rate()])
-                else:
-                    measurements.append(0.0)
-
-            # 归一化 measurements
-            meas_array = np.array(measurements, dtype=np.float32)
-            if not self._is_eval:
-                self.meas_normalizer.update(meas_array[None, :])
-            meas_normalized = self.meas_normalizer.normalize(meas_array)
-
-            obs["measurements"] = meas_normalized
-        if "ocp_obs" in self.env_cfg["obs_type"]:
-            # 获取ocp观察信息
-            network_state, s_road_ego, s_ref_raw_ego, s_ref_error,s_road,s_ref_raw = get_ocp_observation_ego_frame(self.vehicle,self.imu_sensor,self.actors,self.path_locations,self.ego_ref_speed)
-            obs["ocp_obs"] = network_state
-            obs["s_road"] = s_road_ego
-            obs["s_ref_raw"] = s_ref_raw_ego
-            obs["s_ref_raw"] = s_ref_error
-            # # 如果是debug模式，在训练页面上显示和各个点的连线
-            if self._ocp_debug:
-                self._debug_ocp(obs["ocp_obs"],s_ref_raw,s_road)
-        if len(obs) == 1:
-            return list(obs.values())[0]
-        return obs
-
-    def _debug_ocp(self, ocp_obs, s_ref_raw, s_road):
-        ocp_obs_np = np.array(ocp_obs, dtype=np.float32).flatten().reshape([1, 1, -1])
-        ego_state, other_states, ref_error = unpack_ocp_numpy(ocp_obs_np, self.env_cfg['ocp']['num_points'],
-                                                              self.env_cfg['ocp']['others'])
-
-        # 显示当前步数和最大步数
-        step_num_text = f'now step:{self.step_count},\n max limit step:{self.env_cfg["termination"]["max_episode_steps"]}'
-        # 显示ego文字
-        world_ego_x, world_ego_y = ego_to_world_coordinate(ego_state[0][0][0], ego_state[0][0][1],
-                                                           self.vehicle.get_transform())
-
-        # CARLA+SUMO固定步长0.05s，显示时间统一适配，杜绝闪烁
-        SYNC_STEP = self.carla_cfg["fixed_delta_seconds"]  # 必须和fixed_delta_seconds一致
-
-        # 1. 步数文字
-        draw_text_at_location(
-            world=self.world,
-            text=step_num_text,
-            location=np.array([world_ego_x, world_ego_y + 20], dtype=np.float32),
-            display_time=SYNC_STEP,  # 0.3s，覆盖6帧，无断层
-            color=carla.Color(0, 0, 255)
-        )
-
-        # 2. 自车状态文字
-        ego_text = f'v_lon:{ego_state[0][0][2]:.2f} \n v_lat:{ego_state[0][0][3]:.2f} \n φ:{ego_state[0][0][4]:.2f} \n 0:{ego_state[0][0][5]:.2f}'
-        draw_text_at_location(
-            world=self.world,
-            text=ego_text,
-            location=np.array([world_ego_x, world_ego_y], dtype=np.float32),
-            display_time=SYNC_STEP ,
-            color=carla.Color(0, 0, 255)
-        )
-
-        road_left = s_road[..., :self.env_cfg['ocp']['num_points'] * 2].reshape(self.env_cfg['ocp']['num_points'], 2)
-        road_right = s_road[..., self.env_cfg['ocp']['num_points'] * 2:].reshape(self.env_cfg['ocp']['num_points'], 2)
-
-        # 左车道
-        draw_points(
-            world=self.world,
-            points=road_left,
-            display_time=SYNC_STEP * 20,
-            color=carla.Color(0, 255, 0),
-            size=0.05
-        )
-
-        # 右车道
-        draw_points(
-            world=self.world,
-            points=road_right,
-            display_time=SYNC_STEP * 20,
-            color=carla.Color(0, 255, 0),
-            size=0.05
-        )
-
-        # 参考路径绘制
-        draw_points(
-            world=self.world,
-            points=s_ref_raw[0:2].reshape(1, -1),
-            display_time=SYNC_STEP * 20,
-            color=carla.Color(0, 0, 255),
-            size=0.05
-        )
-
-        # 绘制误差文字
-        ref_error_text = f'e_p:{ref_error[0][0][0]:.2f} \n e_φ:{ref_error[0][0][1]:.2f} \n e_v:{ref_error[0][0][2]:.2f}\n'
-        draw_text_at_location(
-            world=self.world,
-            text=ref_error_text,
-            location=np.array([world_ego_x, world_ego_y + 10.0], dtype=np.float32),
-            display_time=SYNC_STEP,
-            color=carla.Color(0, 0, 255)
-        )
-
-    def _compute_reward(self,lane_inv,collision,obstacle) -> dict[str, Any]:
-        w = self.env_cfg["reward_weights"]
-        r = 0.0
-
-        v = self.vehicle.get_velocity()
-        speed = np.linalg.norm([v.x, v.y, v.z])
-        if speed < 2.0:
-            speed_reward = -w["low_speed_penalty"]  # e.g., 2.0
-        else:
-            speed_reward = w["speed"] * min(speed, 10.0)
-
-        r += speed_reward
-
-        centering_reward = w["centering"] * lane_inv * 5.0
-        r -= centering_reward
-
-        collision_reward = 0.0
-        if collision > self.env_cfg["termination"]["collision_threshold"]:
-            collision_reward = w["collision"]
-            r += w["collision"]
-
-        obstacle_reward = 0.0
-        if obstacle:
-            obstacle_reward = w["obstacle"]
-            r += obstacle_reward
-
-        # todo 缺少高性能样本计算高性能标准：高速、保持在道路上、在正确车道
-
-        # 航向对齐简化奖励
-        r += w["angle"] * (1.0 - abs(self.vehicle.get_transform().rotation.yaw) / 180.0)
-
-        return {
-            'total_reward':float(r),
-            'speed_reward':speed_reward,
-            'centering_reward':centering_reward,
-            'collision_reward':collision_reward,
-            'obstacle_reward':obstacle_reward,
-            'high_speed_reward':0.0,
-            'right_lane_reward':0.0
-        }
-
-    def _check_termination(self,lane_inv,collision,obstacle) -> Tuple[bool, bool, Dict[str, Any]]:
-        # 计算速度信息存到info中
-        vx,vy = world_to_vehicle_frame(self.vehicle.get_velocity(),self.vehicle.get_transform())
-        v = math.sqrt(vx**2 + vy**2)
-
-        info = {"collision": False,
-                "off_route": False,
-                "TimeLimit.truncated": False,
-                'speed': v}
-
-        # 碰撞actors和障碍物公用一个终止条件
-        if collision > self.env_cfg["termination"]["collision_threshold"] or obstacle:
-            info["collision"] = True
-
-        if self.step_count >= self.env_cfg["termination"]["max_episode_steps"]:
-            info["TimeLimit.truncated"] = True
-
-        return info["collision"] ,info["TimeLimit.truncated"] ,info
-
-    def _spawn_background_traffic(self):
-        """
-        生成背景交通车辆
-        """
-        blueprints = self.world.get_blueprint_library().filter('vehicle.*')
-        blueprints = [bp for bp in blueprints if int(bp.get_attribute('number_of_wheels')) == 4]
-
-        num_vehicles = self.env_cfg["actors"]['others']["num_vehicles"]
-
-        spawn_points = self.world.get_map().get_spawn_points()
-        if len(spawn_points) < num_vehicles:
-            logger.warning(
-                f'出生点数量 ({len(spawn_points)}) 少于请求车辆数 ({num_vehicles})，将生成 {len(spawn_points)} 辆。')
-            num_vehicles = len(spawn_points)
-
-        for i in range(num_vehicles):
-            blueprint = random.choice(blueprints)
-            if blueprint.has_attribute('color'):
-                color = random.choice(blueprint.get_attribute('color').recommended_values)
-                blueprint.set_attribute('color', color)
-            blueprint.set_attribute('role_name', 'background')
-
-            # 修改索引以避免越界
-            spawn_point = spawn_points[i % len(spawn_points)]
-
-            v = self.world.try_spawn_actor(blueprint, spawn_point)
-            if v is not None:  # 检查是否成功生成
-                v.set_autopilot(True, self.tm_port)
-                self.actors.append(v)  # 只有在成功生成后才添加到列表
-
-        if self.carla_cfg["sync_mode"]:
-            self.world.tick()  # 确保车辆完全激活
-        logger.info(f"成功生成 {len(self.actors)} 辆背景交通车辆（TM 端口: {self.tm_port}）。")
-
-    def _get_surrounding_vehicles(self, max_distance=50.0):
-        """
-        获取 ego 车辆周围一定范围内的所有 SUMO 背景车辆（排除 ego 自身）
-        """
-        if self.vehicle is None:
-            return []
-
-        # 获取世界中所有车辆
-        all_vehicles = self.world.get_actors().filter('vehicle.*')
-
-        surrounding = []
-        ego_transform = self.vehicle.get_transform()
-        ego_location = ego_transform.location
-
-        for v in all_vehicles:
-            # 跳过 ego 车辆（通过 role_name 或 id 判断）
-            if v.id == self.vehicle.id or v.attributes.get('role_name') == 'hero':
-                continue
-
-            dist = ego_location.distance(v.get_location())
-            if dist <= max_distance:
-                surrounding.append(v)
-
-        return surrounding
-
-    def _place_spectator_above_vehicle(self):
-        """
-        车辆Z轴震动导致的抖动 + 上下坡显示异常
-        兼容纯2D参考线 [x,y]
-        """
-        if self.vehicle is None or len(self.dense_ref_path) < 2:
-            return
-
-        # 1. 获取车辆当前位置
-        vehicle_loc = self.vehicle.get_location()
-        vehicle_xy = np.array([vehicle_loc.x, vehicle_loc.y])
-
-        # 2. 找到车辆在密集参考线上的「最近投影点」（用上一帧索引加速）
-        search_window = 100
-        start_idx = max(0, self.last_ref_idx - search_window)
-        end_idx = min(len(self.dense_ref_path), self.last_ref_idx + search_window)
-        search_path = self.dense_ref_path[start_idx:end_idx]
-
-        # 计算距离，找到最近点
-        dists = np.hypot(search_path[:, 0] - vehicle_xy[0], search_path[:, 1] - vehicle_xy[1])
-        local_min_idx = np.argmin(dists)
-        closest_idx = start_idx + local_min_idx
-        self.last_ref_idx = closest_idx  # 更新索引供下一帧使用
-
-        # 3. 计算参考线在该点的「切线方向」（保证视角平行于道路）
-        lookahead_idx = min(closest_idx + 5, len(self.dense_ref_path) - 1)
-        lookbehind_idx = max(closest_idx - 1, 0)
-
-        forward_pt = self.dense_ref_path[lookahead_idx]
-        backward_pt = self.dense_ref_path[lookbehind_idx]
-
-        # 计算切线角度（yaw）
-        dx = forward_pt[0] - backward_pt[0]
-        dy = forward_pt[1] - backward_pt[1]
-        ref_yaw = np.degrees(np.arctan2(dy, dx))
-
-        # 4. 设置相机位置：参考线投影点正上方
-        x_offset = 10.0
-        z_height = 50.0
-
-        # 把x_offset投影到参考线方向上
-        offset_x = x_offset * np.cos(np.radians(ref_yaw))
-        offset_y = x_offset * np.sin(np.radians(ref_yaw))
-
-        # ===================== 唯一修改：平滑车辆Z轴，解决抖动+上下坡 =====================
-        # 初始化平滑Z值
-        if not hasattr(self, 'smoothed_z'):
-            self.smoothed_z = vehicle_loc.z
-        # 一阶低通滤波：消除车辆Z轴抖动，保留上下坡大趋势
-        alpha = 0.1  # 平滑系数，越小越稳
-        self.smoothed_z = self.smoothed_z * (1 - alpha) + vehicle_loc.z * alpha
-
-        target_location = carla.Location(
-            x=float(self.dense_ref_path[closest_idx, 0] + offset_x),
-            y=float(self.dense_ref_path[closest_idx, 1] + offset_y),
-            z=float(self.smoothed_z + z_height)  # 用平滑后的Z，不抖+上下坡正常
-        )
-
-        # 5. 设置相机朝向（原版完全不变）
-        target_rotation = carla.Rotation(
-            pitch=-90.0,
-            yaw=float(ref_yaw),
-            roll=0.0
-        )
-        target_transform = carla.Transform(target_location, target_rotation)
-
-        # 6. 极轻微平滑
-        if self.prev_spectator_transform is None:
-            final_transform = target_transform
-        else:
-            lerp_factor = 0.5
-            prev_loc = self.prev_spectator_transform.location
-            final_loc = carla.Location(
-                x=prev_loc.x + (target_location.x - prev_loc.x) * lerp_factor,
-                y=prev_loc.y + (target_location.y - prev_loc.y) * lerp_factor,
-                z=prev_loc.z + (target_location.z - prev_loc.z) * lerp_factor
-            )
-
-            prev_rot = self.prev_spectator_transform.rotation
-            delta_yaw = target_rotation.yaw - prev_rot.yaw
-            if delta_yaw > 180: delta_yaw -= 360
-            if delta_yaw < -180: delta_yaw += 360
-            final_yaw = prev_rot.yaw + delta_yaw * lerp_factor
-
-            final_rot = carla.Rotation(
-                pitch=prev_rot.pitch + (target_rotation.pitch - prev_rot.pitch) * lerp_factor,
-                yaw=final_yaw,
-                roll=0.0
-            )
-            final_transform = carla.Transform(final_loc, final_rot)
-
-        # 7. 应用视角
-        self.world.get_spectator().set_transform(final_transform)
-        self.prev_spectator_transform = final_transform
 
     def step(self, action):
-        if self.vehicle is None:
-            raise RuntimeError("环境没有重置. 请先 reset()。")
-
-        if not isinstance(self.action_space, gym.spaces.Discrete):
-            # 接收论文物理动作：[a (m/s²), δ (rad)]
-            a_phy = float(np.clip(action[0], -3.0, 1.5))  # 物理加速度
-            delta_phy = float(np.clip(action[1], -0.4, 0.4))  # 物理前轮转角
-
-            # 1. 物理加速度 → Carla油门/刹车
-            if a_phy > 0.1:
-                # 正加速：[0.1, 1.5] → 油门[0.1, 1.0]
-                throttle_val = np.interp(a_phy, [0.1, 1.5], [0.1, 1.0])
-                brake_val = 0.0
-            elif a_phy < -0.1:
-                # 刹车：[-3.0, -0.1] → 刹车[0.1, 1.0]
-                throttle_val = 0.0
-                brake_val = np.interp(abs(a_phy), [0.1, 3.0], [0.1, 1.0])
-            else:
-                # 滑行
-                throttle_val = 0.0
-                brake_val = 0.0
-
-            # 2. 物理前轮转角 → Carla转向
-            # Carla steer [-1,1] 对应最大转角约0.6rad，我们用0.4rad对应0.67的steer
-            steer_val = np.interp(delta_phy, [-0.4, 0.4], [-0.67, 0.67])
-            steer_val = float(np.clip(steer_val, -1.0, 1.0))
-
-            # 强制禁止倒车，论文场景不需要
-            reverse_flag = False
-
-        else:
-            throttle_val = 0.0
-            brake_val = 0.0
-            steer_val = 0.0
-            reverse_flag = False
-
-        # 应用控制
-        ctrl = carla.VehicleControl()
-        ctrl.throttle = throttle_val
-        ctrl.brake = brake_val
-        ctrl.steer = steer_val
-        ctrl.reverse = reverse_flag
-        ctrl.hand_brake = False
-        self.vehicle.apply_control(ctrl)
-
-        # 仿真推进逻辑（解决carla0报错）
-        if self.carla_cfg["sync_mode"]:
-            if self.enable_sumo:
-                self.sumo_simulation.tick()  # 1. SUMO执行一步
-
-                # 手动把自车从同步列表中移除
-                if hasattr(self.synchronization, 'carla2sumo_ids'):
-                    ego_id = self.vehicle.id  # 自车ID：carla0
-                    if ego_id in self.synchronization.carla2sumo_ids:
-                        del self.synchronization.carla2sumo_ids[ego_id]
-                        logger.debug(f"已从同步映射中移除自车：{ego_id}")
-
-                # 🌟 【关键修复点】：在同步之前，必须先清理掉已经到达终点的僵尸车辆！
-                self._cleanup_finished_vehicles()
-
-                # 防护性调用桥接
-                try:
-                    self.synchronization.tick()  # 2. 桥接同步（现在绝对不会碰自车和死车）
-                except (AttributeError, TraCIException) as e:
-                    logger.warning(f"同步跳过异常：{str(e)}")
-                    pass
-
-                obs = self._get_observation()
-                self.world.tick()  # 4. CARLA推进一步
-            else:
-                obs = self._get_observation()
-                self.world.tick()
-
-        # 调用视角跟随函数（仿真推进后，车辆位置已更新）
-        self._place_spectator_above_vehicle()
+        # 1. 执行动作 → 委托 VehicleManager
+        self.vehicle_manager.apply_control(action,self.action_space)
+        # 2. 推进仿真步（SUMO/原生模式）
+        if self.enable_sumo:
+            self.sumo_integration.sync_step()
 
         self.step_count += 1
-
-        # 传感器、观测、奖励、终止判断
-        lane_inv = self.lane_invasion_sensor.get_count()
-        collision = self.collision_sensor.get_intensity()
-        obstacle = self.obstacle_sensor.is_obstacle_ahead(self.env_cfg["termination"]["obstacle_threshold"])
-
-        reward = self._compute_reward(lane_inv, collision, obstacle)
-        terminated, truncated, info = self._check_termination(lane_inv, collision, obstacle)
+        # 3. 获取观测 → 委托 ObservationProcessor
+        input_params = {'path_locations':self.path_locations,'ego_ref_speed':self.ego_ref_speed}
+        obs = self.observation_processor.get_observation(self.is_eval,input_params)
+        # 4. 计算奖励 → 委托 RewardCalculator
+        lane_inv = self.sensor_manager.lane_invasion_sensor.get_count()
+        collision = self.sensor_manager.collision_sensor.get_intensity()
+        obstacle = self.sensor_manager.obstacle_sensor.is_obstacle_ahead(self.env_cfg["termination"]["obstacle_threshold"])
+        reward = self.reward_calculator.compute_reward(lane_inv,collision,obstacle)
+        # 5. 检查终止 → 委托 TerminationChecker
+        terminated, truncated, info = self.termination_checker.check_termination(collision,obstacle,self.step_count)
         info.update(reward)
-        info['road_state'] = obs["s_road"]  # 单独存道路信息
-        info['ref_path_xy'] = self.ref_path_xy
-        left_pts, right_pts = get_current_lane_forward_edges(self.vehicle, self.world)
-        info['static_road_left'] = [[item.x, item.y] for item in left_pts]
-        info['static_road_right'] = [[item.x, item.y] for item in right_pts]
-
-        # if self.enable_sumo:
-        #     self._cleanup_finished_vehicles()
-
+        # 6. 调试可视化（可选）→ 委托 DebugVisualizer
+        if self._ocp_debug:
+            self.debug_visualizer.debug_ocp(obs['ocp_obs'],obs['s_ref_raw'],obs['s_road_raw'],self.step_count,self.carla_cfg["fixed_delta_seconds"])
+            self.last_ref_idx ,self.prev_spectator_transform= self.debug_visualizer.update_spectator(self.ref_path_xy_raw,self.last_ref_idx,self.prev_spectator_transform)
+        # 仿真推进一步，解决debug闪烁问题
+        self.world.tick()
         return obs, reward['total_reward'], terminated, truncated, info
-
-    def _destroy_all_sensors(self):
-        for sensor in [self.camera_sensor, self.collision_sensor,
-                       self.lane_invasion_sensor, self.obstacle_sensor, self.imu_sensor]:
-            if sensor is not None:
-                sensor.destroy()
-        # 重置引用
-        self.camera_sensor = None
-        self.collision_sensor = None
-        self.lane_invasion_sensor = None
-        self.obstacle_sensor = None
-        self.imu_sensor = None
-
-    def _destroy_all_npc_vehicles(self):
-        # 获取所有车辆
-        actors = self.world.get_actors()
-        vehicles = [a for a in actors if "vehicle" in a.type_id]
-
-        # 排除自车（如果还存在）
-        npc_vehicles = [v for v in vehicles if v.id != self.vehicle.id] if self.vehicle else vehicles
-
-        destroyed_count = 0
-        for v in npc_vehicles:
-            try:
-                v.destroy()
-                destroyed_count += 1
-            except Exception as e:
-                # 车辆可能已被自动销毁（如碰撞后），忽略错误
-                pass  # 或者 logger.debug(f"跳过已销毁车辆 {v.id}: {e}")
-
-        logger.info(f"已销毁 {destroyed_count} 辆周车（共尝试 {len(npc_vehicles)} 辆）")
-
-    def _cleanup_finished_vehicles(self):
-        """清理 SUMO 中已销毁（到达终点或离开路网）的车辆"""
-        if not self.enable_sumo or not hasattr(self.synchronization, '_sumo2carla'):
-            return
-
-        try:
-            # 获取当前真正在 SUMO 中存活的车辆 ID 列表
-            active_sumo_vehicles = set(self.sumo_simulation.traci.vehicle.getIDList())
-            sumo2carla = self.synchronization._sumo2carla
-
-            # 必须用 list() 包裹，因为我们要在遍历时修改字典本身
-            for sumo_veh_id in list(sumo2carla.keys()):
-                if sumo_veh_id not in active_sumo_vehicles:
-                    # 说明该车辆已经到达终点，被 SUMO 移除了
-                    carla_actor_id = sumo2carla[sumo_veh_id]
-                    carla_actor = self.world.get_actor(carla_actor_id)
-
-                    # 1. 销毁 CARLA 中的物理残留车辆
-                    if carla_actor is not None and carla_actor.is_alive:
-                        carla_actor.destroy()
-                        logger.debug(f"销毁已到达终点的残留 CARLA 车辆：{carla_actor_id}")
-
-                    # 2. 【核心修复】从同步字典中彻底移除，防止 bridge_helper 接着同步它报错
-                    del sumo2carla[sumo_veh_id]
-
-                    # 顺手把 _carla2sumo 映射也清了（双向安全）
-                    if hasattr(self.synchronization,
-                               '_carla2sumo') and carla_actor_id in self.synchronization._carla2sumo:
-                        del self.synchronization._carla2sumo[carla_actor_id]
-
-        except Exception as e:
-            logger.warning(f"清理 SUMO 车辆时发生异常: {e}")
-
-    def _interpolate_ref_path(self, sparse_path, interval=0.5):
-        """
-        对稀疏参考线进行插值加密
-        :param sparse_path: 原始稀疏参考线 [[x1,y1], [x2,y2], ...]
-        :param interval: 插值后点与点的间隔（米），越小越密集，0.5~1.0米推荐
-        :return: 加密后的参考线 array(N, 2)
-        """
-        if len(sparse_path) < 2:
-            return np.array(sparse_path)
-
-        sparse_array = np.array(sparse_path)
-        # 计算原始路径上每个点之间的累积距离
-        diffs = np.diff(sparse_array, axis=0)
-        seg_dists = np.hypot(diffs[:, 0], diffs[:, 1])
-        cum_dists = np.concatenate(([0], np.cumsum(seg_dists)))
-        total_dist = cum_dists[-1]
-
-        # 生成新的密集距离点
-        num_new_points = int(np.ceil(total_dist / interval))
-        new_dists = np.linspace(0, total_dist, num_new_points)
-
-        # 对x和y分别进行线性插值
-        x_new = np.interp(new_dists, cum_dists, sparse_array[:, 0])
-        y_new = np.interp(new_dists, cum_dists, sparse_array[:, 1])
-
-        return np.column_stack((x_new, y_new))
 
     def pause_simulation(self):
         """同时暂停CARLA和SUMO仿真"""
@@ -979,97 +384,36 @@ class CarlaEnv(gym.Env):
             self.sumo_simulation.resume()
         logger.info("仿真已恢复")
 
-    def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
+    def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        try:
-            # 销毁所有旧资源
-            # 清除周车
-            if not self.enable_sumo:
-                for actor in self.actors:
-                    if actor is not None and actor.is_alive:
-                        actor.destroy()
-                # 生成周车
-                self.actors = []
-                self._spawn_background_traffic()
-            else:
-                pass    # 由sumo控制周车生命周期
-            # 销毁自车
-            if self.vehicle is not None:
-                self._destroy_all_sensors()
-                self.vehicle.destroy()
-                self.vehicle = None
-
-            # 生成自车
-            if self.env_cfg["actors"]['ego']["random_place"]:
-                self._spawn_ego_vehicle()
-            else:
-                self._spawn_ego_vehicle(BIRTH_POINT[self.env_cfg["world"]["map"]],BIRTH_YAW[self.env_cfg["world"]["map"]])
-
-
-            self._setup_sensors()
-
-            # 重置计数器
-            self.step_count = 0
-
-            # 规划静态路径
-            self.route_planner = RoutePlanner(self.world, self.carla_cfg["world"]["sampling_resolution"])
-
-            self.route_plane(END_POINT[self.env_cfg["world"]["map"]])
-
-            # 对参考线进行插值加密
-            self.dense_ref_path = self._interpolate_ref_path(self.ref_path_xy_raw)
-
-            obs = self._get_observation()
-            info = {}
-            info['road_state'] = obs["s_road"]  # 单独存道路信息
-            info['ref_path_locations'] = self.ref_path_xy
-            # 重置观察者视角
-            self._place_spectator_above_vehicle()
-
-            # 路径id+1
-            self.current_path_id +=1
-
-            # 初始化提示文字，有便与区分不同环境训练
-            self._init_notice_str_world()
-
-            # 确保同步模式正确
-            if self.carla_cfg["sync_mode"]:
-                settings = self.world.get_settings()
-                if not settings.synchronous_mode or settings.fixed_delta_seconds != self.carla_cfg[
-                    "fixed_delta_seconds"]:
-                    settings.synchronous_mode = True
-                    settings.fixed_delta_seconds = self.carla_cfg["fixed_delta_seconds"]
-                    settings.no_rendering_mode = False  # 保留渲染，按需关闭
-                    self.world.apply_settings(settings)
-                    logger.info(f"强制CARLA同步模式：步长{self.carla_cfg['fixed_delta_seconds']}s")
-
-                # tick 一次确保状态稳定
-                if not self.enable_sumo and self.carla_cfg["sync_mode"]:
-                    self.tm = self.client.get_trafficmanager(self.tm_port)
-                    self.tm.set_random_device_seed(22)  # 重置随机性
-                    self.world.tick()
-                elif self.enable_sumo and self.carla_cfg["sync_mode"]:
-                    # 🌟 【关键修复】：在重置时，tick 之前必须先清理上一轮残留的幽灵车！
-                    self._cleanup_finished_vehicles()
-
-                    # 手动把新生成的自车从同步列表中移除（防止自车被桥接接管）
-                    if hasattr(self.synchronization, 'carla2sumo_ids') and self.vehicle:
-                        ego_id = self.vehicle.id
-                        if ego_id in self.synchronization.carla2sumo_ids:
-                            del self.synchronization.carla2sumo_ids[ego_id]
-
-                    self.synchronization.tick()
-
-        except Exception as e:
-            logger.error(f"重置环境失败: {e}")
-            self.close()
-            raise
-        return obs, info
+        sync_mode = self.carla_cfg["sync_mode"]
+        # 1. 清理上一轮残留资源
+        self._cleanup()
+        # 2. 生成自车 → 委托 VehicleManager
+        if self.env_cfg["actors"]['ego']["random_place"]:
+            self.vehicle_manager.spawn_ego_vehicle()
+        else:
+            self.vehicle_manager.spawn_ego_vehicle(BIRTH_POINT[self.env_cfg["world"]["map"]], BIRTH_YAW[self.env_cfg["world"]["map"]])
+        # 3. 初始化传感器 → 委托 SensorManager
+        self.sensor_manager.setup_sensors(self.vehicle_manager.ego_vehicle,sync_mode)
+        # 4. 生成NPC/同步SUMO → 委托对应模块
+        if self.enable_sumo:
+            self.sumo_integration.sync_reset()
+        else:
+            self.vehicle_manager.spawn_npcs(self.tm,sync_mode)
+        # 5. 初始化路径规划/视角等状态
+        self._init_episode_state()
+        # 6. 获取初始观测 → 委托 ObservationProcessor
+        input_params = {'path_locations':self.path_locations,'ego_ref_speed':self.ego_ref_speed}
+        obs = self.observation_processor.get_observation(self._is_eval,input_params)
+        obs['ref_path_locations'] = self.ref_path_xy
+        self.step_count = 0
+        return obs
 
     def render(self) -> Optional[np.ndarray]:
         if self.render_mode == "rgb_array":
-            if self.camera_sensor and self.camera_sensor.get_data() is not None:
-                return self.camera_sensor.get_data()
+            if self.sensor_manager.camera_sensor and self.sensor_manager.camera_sensor.get_data() is not None:
+                return self.sensor_manager.camera_sensor.get_data()
             else:
                 return np.zeros(
                     (self.env_cfg["image"]["height"], self.env_cfg["image"]["width"], 3),
@@ -1078,96 +422,27 @@ class CarlaEnv(gym.Env):
         return None
 
     def close(self):
-        """补充地图层级恢复 + 全量Actor清理的close函数"""
-        try:
-            # 恢复所有卸载的地图层级
-            self._load_map_layers()
-            # 销毁车辆和传感器
-            if self.vehicle is not None:
-                self._destroy_all_sensors()
-                self.vehicle.destroy()
-                self.vehicle = None
+        # 恢复所有卸载的地图层级
+        self._load_map_layers()
+        # 1. 销毁传感器 → SensorManager
+        self.sensor_manager.cleanup()
+        # 2. 销毁车辆 → VehicleManager
+        self.vehicle_manager.cleanup()
+        # 3. 关闭SUMO → SumoIntegration
+        if self.enable_sumo:
+            self.sumo_integration.cleanup()
 
-            # 清理所有额外生成的Actor（如行人、其他车辆等
-            # 如果你有存储所有Actor的列表（比如self.actors），补充这部分清理
-            if hasattr(self, 'actors') and self.actors:
-                for actor in self.actors:
-                    try:
-                        if actor.is_alive:
-                            actor.destroy()
-                            print(f"销毁额外Actor: {actor.id}")
-                    except Exception as e:
-                        print(f"销毁Actor {actor.id} 失败: {e}")
-                self.actors = []
+        # 恢复异步模式
+        if self.carla_cfg["sync_mode"]:
+            settings = self.world.get_settings()
+            settings.synchronous_mode = False
+            settings.fixed_delta_seconds = None
+            self.world.apply_settings(settings)
 
-            # 恢复异步模式
-            if self.carla_cfg["sync_mode"]:
-                settings = self.world.get_settings()
-                settings.synchronous_mode = False
-                settings.fixed_delta_seconds = None
-                self.world.apply_settings(settings)
+        # 重置世界
+        if self.client is not None:
+            self.client.reload_world()
 
-            # 重置世界
-            if hasattr(self, 'client') and self.client is not None:
-                self.client.reload_world()
-            print("Carla资源清理完成")
-
-        except Exception as e:
-            print(f"close函数执行出错: {e}")
-            traceback.print_exc()
-
-    def route_plane(self,end_location:carla.Location):
-        start_location = self.vehicle.get_transform().location
-        end_location = end_location
-        logger.info("开始进行路径规划")
-        self.route_planner.set_destination(start_location,end_location)
-        path_locations = self.route_planner.get_route()
-        # 可视化路径
-        for i, loc in enumerate(path_locations):
-            self.world.debug.draw_point(loc, size=0.01, color=carla.Color(0, 255, 0), life_time=60.0)
-            if i > 0:
-                self.world.debug.draw_line(
-                    path_locations[i - 1], loc,
-                    thickness=0.1,
-                    color=carla.Color(255, 0, 0),
-                    life_time=60.0
-                )
-        self.path_locations = path_locations
-        self.ref_path_xy = batch_world_to_ego(path_locations, self.vehicle.get_transform())
-        self.ref_path_xy_raw = [[item.x, item.y] for item in path_locations]
-        logger.info(f"路径规划成功！已规划{len(path_locations)}个坐标点")
-
-    def get_random_driving_action(self):
-        """
-        生成用于探索的随机驾驶动作。
-        返回: [steer, accel]
-        范围: 均为 [-1, 1]
-
-        逻辑优化:
-        - 转向: 完全随机 [-1, 1]
-        - 加速: 70% 概率给正向油门 (0.3 ~ 1.0)，30% 概率刹车或滑行 (-1.0 ~ 0.2)
-          (这样能保证车大概率是向前动的，避免原地不动)
-        """
-
-        # # 1. 转向角 (Steering): -1 (左满) 到 1 (右满)
-        # steer = np.random.uniform(-1.0, 1.0)
-        #
-        # # 2. 加速度/油门 (Acceleration): -1 (急刹) 到 1 (地板油)
-        # # 策略：大部分时间给油，让车动起来
-        # if np.random.rand() < 0.7:
-        #     # 70% 概率：给一个明显的油门 (0.3 到 1.0)，确保克服静摩擦力
-        #     accel = np.random.uniform(0.3, 1.0)
-        # else:
-        #     # 30% 概率：刹车或松油门 (-1.0 到 0.2)
-        #     accel = np.random.uniform(-1.0, 0.2)
-
-        # return np.array([accel,steer], dtype=np.float32)
-
-        # 强制正加速度：归一化加速度 [0.2, 1.0] → 物理量 [0, 1.5]m/s²，绝对不会刹车
-        a_norm = np.random.uniform(0.2, 1.0, size=1)
-        # 小范围转向，避免转圈
-        delta_norm = np.random.uniform(-0.2, 0.2, size=1)
-        norm_action = np.concatenate([a_norm, delta_norm])
 
     @property
     def is_eval(self):

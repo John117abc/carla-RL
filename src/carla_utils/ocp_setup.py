@@ -1,9 +1,7 @@
 # src/carla_utils/ocp_setup.py
-import carla
 import numpy as np
-import math
-from typing import List, Optional, Tuple
-import src.envs.sensors
+from typing import List, Optional
+import src.envs.env_model.sensors_manager
 from src.carla_utils.vehicle_control import world_to_vehicle_frame
 
 import carla
@@ -103,7 +101,7 @@ def world_to_ego_coordinate(
 
 def get_ocp_observation_ego_frame(
         ego_vehicle: carla.Vehicle,
-        ego_imu: Optional[src.envs.sensors.IMUSensor],
+        ego_imu: Optional[src.envs.env_model.sensors_manager.IMUSensor],
         other_vehicles: List[carla.Vehicle],
         path_locations: List[carla.Location],
         ego_ref_speed: float
@@ -207,7 +205,7 @@ def get_ocp_observation_ego_frame(
 
 def get_ocp_observation(
         ego_vehicle: carla.Vehicle,
-        ego_imu: Optional[src.envs.sensors.IMUSensor],
+        ego_imu: Optional[src.envs.env_model.sensors_manager.IMUSensor],
         other_vehicles: List[carla.Vehicle],
         path_locations: List[carla.Location],
         ego_ref_speed: float
@@ -255,7 +253,7 @@ def get_ocp_observation(
 
 def get_ego_observation(
         ego_vehicle: carla.Vehicle,
-        ego_imu: Optional[src.envs.sensors.IMUSensor]
+        ego_imu: Optional[src.envs.env_model.sensors_manager.IMUSensor]
 ) -> np.ndarray:
     """
     获取论文定义的自车状态 (6维)

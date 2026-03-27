@@ -1,9 +1,62 @@
 import carla
+import time
 import numpy as np
 from typing import Optional
 from src.utils import get_logger
 
 logger = get_logger('sensors')
+
+class SensorManager:
+    def __init__(self, world, config):
+        self.world = world
+        self.ego_vehicle = None
+        self.config = config
+        # 传感器与状态
+        self.camera_sensor: Optional[CameraSensor] = None
+        self.collision_sensor: Optional[CollisionSensor] = None
+        self.lane_invasion_sensor: Optional[LaneInvasionSensor] = None
+        self.obstacle_sensor: Optional[ObstacleSensor] = None
+        self.imu_sensor: Optional[IMUSensor] = None
+
+    def setup_sensors(self,ego_vehicle,sync_mode):
+        self.ego_vehicle = ego_vehicle
+        # 创建新传感器
+        if "image" in self.config["obs_type"]:
+            self.camera_sensor = CameraSensor(
+                self.ego_vehicle,
+                self.world,
+                width=self.config["image"]["width"],
+                height=self.config["image"]["height"],
+                fov=self.config["image"]["fov"],
+            )
+        self.collision_sensor = CollisionSensor(self.ego_vehicle)
+        self.lane_invasion_sensor = LaneInvasionSensor(self.ego_vehicle)
+        self.obstacle_sensor = ObstacleSensor(self.ego_vehicle)
+        self.imu_sensor = IMUSensor(self.ego_vehicle)
+        # 等待传感器数据就绪，避免首次观测为空
+        for _ in range(5):  # 最多等待 5 帧
+            if sync_mode:
+                self.world.tick()
+            else:
+                time.sleep(0.05)
+            if ("image" not in self.config["obs_type"]) or (self.camera_sensor.get_data() is not None):
+                break
+
+    def collect_sensor_data(self):
+        pass
+
+    def cleanup(self):
+        # 清理旧传感器
+        if self.camera_sensor:
+            self.camera_sensor.destroy()
+        if self.collision_sensor:
+            self.collision_sensor.destroy()
+        if self.lane_invasion_sensor:
+            self.lane_invasion_sensor.destroy()
+        if self.obstacle_sensor:
+            self.obstacle_sensor.destroy()
+        if self.imu_sensor:
+            self.imu_sensor.destroy()
 
 class CameraSensor:
     """

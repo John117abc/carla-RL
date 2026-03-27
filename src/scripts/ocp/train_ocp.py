@@ -79,10 +79,10 @@ def main():
             # logger.info(f"初始观测类型: {type(state)}, 形状/结构: {get_obs_shape(state)}")
             # 在reset之后，获取规划好的参考路径，转换为tensor
             # 在reset之后添加这段代码
-            state, info = env.reset()
-            state = state['ocp_obs']
+            obs = env.reset()
+            state = obs['ocp_obs']
             # 提取参考路径，转为tensor [1, N, 2]
-            ref_path_locations = info['ref_path_locations']  # 你的路径规划输出的carla.Location列表
+            ref_path_locations = obs['ref_path_locations']  # 你的路径规划输出的carla.Location列表
             ref_path_np = np.array([[loc[0], loc[1]] for loc in ref_path_locations], dtype=np.float32)
             ref_path_tensor = torch.from_numpy(ref_path_np).unsqueeze(0).to(device)
 
@@ -93,11 +93,12 @@ def main():
                 next_obs, reward, _, _, info = env.step(action)
                 next_state = next_obs['ocp_obs']
                 # 【修改】获取道路信息，转为tensor
-                road_state_np = info['road_state']
+                road_state_np = obs['s_road']
                 road_state_tensor = torch.from_numpy(road_state_np).unsqueeze(0).to(
                     device) if road_state_np is not None else None
 
                 done = info['TimeLimit.truncated']
+                info['road_state'] = road_state_np
                 # 加入buffer时，同时存储road_state
                 agent.buffer.handle_new_experience((state, action, reward, road_state_np, done, info))
 

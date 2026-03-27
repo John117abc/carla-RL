@@ -15,7 +15,7 @@ from src.buffer import Trajectory
 # sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
 import gymnasium as gym
-from src.envs.carla_env import CarlaEnv
+from src.envs.carla_env_bak import CarlaEnv
 from src.utils import Plotter
 
 logger = get_logger('eval_ocp')
