@@ -67,7 +67,14 @@ class ObservationProcessor:
             # 观察周车
             self.vehicle_manager.get_surrounding_vehicles()
             network_state, s_road_ego, s_ref_raw_ego, s_ref_error, s_road, s_ref_raw = get_ocp_observation_ego_frame(
-                self.vehicle_manager.ego_vehicle, self.sensor_manager.imu_sensor, self.vehicle_manager.npc_vehicles, input_params['path_locations'], input_params['ego_ref_speed'])
+                self.vehicle_manager.ego_vehicle,
+                self.sensor_manager.imu_sensor,
+                self.vehicle_manager.npc_vehicles,
+                input_params['path_locations'],
+                input_params['ego_ref_speed'],
+                input_params["ref_offset"]
+            )
+
             obs["ocp_obs"] = network_state
             obs["s_road"] = s_road_ego
             obs["s_road_raw"] = s_road

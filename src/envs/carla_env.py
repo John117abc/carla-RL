@@ -352,7 +352,7 @@ class CarlaEnv(gym.Env):
 
         self.step_count += 1
         # 3. 获取观测 → 委托 ObservationProcessor
-        input_params = {'path_locations':self.path_locations,'ego_ref_speed':self.ego_ref_speed}
+        input_params = {'path_locations':self.path_locations,'ego_ref_speed':self.ego_ref_speed,'ref_offset':self.carla_cfg['world']['ref_offset']}
         obs = self.observation_processor.get_observation(self.is_eval,input_params)
         # 4. 计算奖励 → 委托 RewardCalculator
         lane_inv = self.sensor_manager.lane_invasion_sensor.get_count()
@@ -404,7 +404,7 @@ class CarlaEnv(gym.Env):
         # 5. 初始化路径规划/视角等状态
         self._init_episode_state()
         # 6. 获取初始观测 → 委托 ObservationProcessor
-        input_params = {'path_locations':self.path_locations,'ego_ref_speed':self.ego_ref_speed}
+        input_params = {'path_locations':self.path_locations,'ego_ref_speed':self.ego_ref_speed,'ref_offset':self.carla_cfg['world']['ref_offset']}
         obs = self.observation_processor.get_observation(self._is_eval,input_params)
         obs['ref_path_locations'] = self.ref_path_xy
         self.step_count = 0

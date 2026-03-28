@@ -104,10 +104,12 @@ def get_ocp_observation_ego_frame(
         ego_imu: Optional[src.envs.env_model.sensors_manager.IMUSensor],
         other_vehicles: List[carla.Vehicle],
         path_locations: List[carla.Location],
-        ego_ref_speed: float
+        ego_ref_speed: float,
+        ref_offset: int,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray,np.ndarray, np.ndarray]:
     """
     获取OCP观测信息并转换为自车坐标系（保持原函数返回格式）
+    :param ref_offset: 参考偏移
     :param ego_vehicle: 自车
     :param ego_imu: IMU传感器（允许为空）
     :param other_vehicles: 周车列表
@@ -123,7 +125,7 @@ def get_ocp_observation_ego_frame(
     """
     # 1. 调用原函数获取世界坐标系下的观测数据
     network_state, s_road, s_ref_raw, s_ref_error = get_ocp_observation(
-        ego_vehicle, ego_imu, other_vehicles, path_locations, ego_ref_speed
+        ego_vehicle, ego_imu, other_vehicles, path_locations, ego_ref_speed,ref_offset
     )
 
     # 2. 获取自车transform用于坐标转换
@@ -208,10 +210,12 @@ def get_ocp_observation(
         ego_imu: Optional[src.envs.env_model.sensors_manager.IMUSensor],
         other_vehicles: List[carla.Vehicle],
         path_locations: List[carla.Location],
-        ego_ref_speed: float
+        ego_ref_speed: float,
+        ref_offset: int,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     获取完全对齐论文的OCP控制所需全量观测信息
+    :param ref_offset: 参考偏移
     :param ego_vehicle: 自车
     :param ego_imu: IMU传感器（允许为空）
     :param other_vehicles: 周车列表
@@ -235,7 +239,7 @@ def get_ocp_observation(
     s_road = get_road_observation_multi_frame(ego_vehicle, ego_vehicle.get_world())
 
     # 4. 获取参考路径原始状态
-    s_ref_raw = get_ref_observation(ego_vehicle, path_locations, ego_ref_speed)
+    s_ref_raw = get_ref_observation(ego_vehicle, path_locations, ego_ref_speed,ref_offset)
 
     # 5. 计算参考路径误差状态
     s_ref_error = calc_ref_error(s_ego, s_ref_raw)
@@ -350,11 +354,13 @@ def get_other_observation(
 def get_ref_observation(
         ego_vehicle: carla.Vehicle,
         path_locations: List[carla.Location],
-        default_longitudinal_velocity: float = 20.0
+        default_longitudinal_velocity: float = 20.0,
+        ref_offset: int = 10
 ) -> np.ndarray:
     """
     获取论文定义的参考路径原始状态 (6维)
     论文IV-A公式2: x_ref = [p_x^ref, p_y^ref, v_lon^ref, 0, φ^ref, 0]
+    :param ref_offset: 参考偏移
     :param ego_vehicle: 自车
     :param path_locations: 参考路径点列表
     :param default_longitudinal_velocity: 默认参考速度 (m/s)
@@ -375,7 +381,7 @@ def get_ref_observation(
             closest_idx = idx
 
     # 2. 参考点偏移+4 (舒适性设计，论文未禁止)
-    ref_index = min(closest_idx, len(path_locations) - 1)
+    ref_index = min(closest_idx + ref_offset, len(path_locations) - 1)
     ref_location = path_locations[ref_index]
 
     # 3. 计算参考点航向角 (弧度) - 基于前后路径点差分

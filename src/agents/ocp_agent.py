@@ -125,7 +125,7 @@ class OcpAgent(BaseAgent):
         # 找最近参考点
         dist = torch.norm(ego_xy.unsqueeze(2) - ref_path.unsqueeze(1), dim=-1)  # [B,1,N]
         min_dist, closest_idx = torch.min(dist, dim=-1)  # [B,1]
-        ref_idx = torch.clamp(closest_idx + 2, max=ref_path.shape[1] - 1)  # 前瞻2个点
+        ref_idx = torch.clamp(closest_idx + self.env.carla_cfg['world']['ref_offset'], max=ref_path.shape[1] - 1)  # 前瞻2个点
 
         # 批量获取参考点和航向
         ref_xy = torch.gather(ref_path, 1, ref_idx.unsqueeze(-1).repeat(1, 1, 2))  # [B,1,2]
