@@ -89,7 +89,7 @@ def main():
             total_reward = 0.0
             done = False
             while not done:
-                action, _ = agent.select_action(state)
+                action, _ = agent.select_action(state,train_config['continue_ocp'])
                 next_obs, reward, _, _, info = env.step(action)
                 next_state = next_obs['ocp_obs']
                 # 【修改】获取道路信息，转为tensor
@@ -137,7 +137,7 @@ def main():
                     'global_step':agent.global_step,
                     'map':env_config['world']['map'],
                     'history_loss':history.copy(),
-                    # 'ocp_normalizer': env.ocp_normalizer.state_dict()
+                    'buffer_data': agent.buffer.get_save_buffer_data()
                 }
                 agent.save(save_info)
 

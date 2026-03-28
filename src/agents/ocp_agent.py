@@ -446,11 +446,12 @@ class OcpAgent(BaseAgent):
         extra_info = {
             'config': save_info['rl_config'],
             'global_step': self.global_step,
-            'history': self.history_loss,
+            'history': save_info['history_loss'],
             'globe_eps': self.globe_eps + self.base_config['save_freq'],
             'state_dim': self.TOTAL_STATE_DIM,
             'punish_factor': self.init_penalty,
-            'gep_iteration': self.gep_iteration
+            'gep_iteration': self.gep_iteration,
+            'buffer_data': save_info['buffer_data']
         }
         metrics = {'episode': extra_info['globe_eps']}
         save_checkpoint(
@@ -472,11 +473,14 @@ class OcpAgent(BaseAgent):
         loaded_dim = checkpoint.get('state_dim', self.TOTAL_STATE_DIM)
         if loaded_dim != self.TOTAL_STATE_DIM:
             logger.warning(f"加载模型维度{loaded_dim}与当前{self.TOTAL_STATE_DIM}不一致")
+
+        # 获取缓冲区数据
         self.globe_eps = checkpoint['globe_eps']
         self.history_loss = checkpoint['history']
         self.global_step = checkpoint['global_step']
         self.init_penalty = checkpoint['punish_factor']
         self.gep_iteration = checkpoint['gep_iteration']
+        self.buffer.load_buffer_data(checkpoint['buffer_data'])
         return checkpoint
 
     def eval(self, num_episodes: int = 10) -> Tuple[float, float]:
