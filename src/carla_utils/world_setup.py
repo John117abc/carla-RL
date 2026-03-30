@@ -18,6 +18,46 @@ def find_free_port():
         s.bind(("", 0))
         return s.getsockname()[1]
 
+
+def remove_only_visible_traffic_signs(world: carla.World):
+    """
+    安全销毁所有可见交通标志Actor，不碰系统内部对象
+    """
+    # 覆盖所有常见可见路牌类型，不包含trafficmanager等危险对象
+    sign_filters = [
+        "traffic.stop*",
+        "traffic.yield*",
+        "traffic.speed_limit*",
+        "traffic.sign*",
+    ]
+    count = 0
+    for f in sign_filters:
+        try:
+            signs = world.get_actors().filter(f)
+            for s in signs:
+                if s and s.is_alive:
+                    s.destroy()
+                    count += 1
+        except:
+            continue
+
+    def hide_all_roadside_props(world: carla.World):
+        """
+        卸载Props图层，彻底隐藏路边广告牌、路牌、指示牌等静态道具
+        仅对_Opt优化地图生效（Town01_Opt、Town05_Opt等）
+        """
+        try:
+            # 卸载道具图层：包含所有路边广告牌、路牌、指示牌、垃圾桶等
+            world.unload_map_layer(carla.MapLayer.Props)
+            print("✅ 已卸载Props图层，路边所有牌子/道具已隐藏")
+        except Exception as e:
+            print(f"⚠️ 卸载Props失败（非Opt地图）：{e}")
+            print("💡 解决：加载带_Opt后缀的地图，如Town01_Opt")
+
+    hide_all_roadside_props(world)
+    print(f"✅ 销毁 {count} 个可见交通标志Actor")
+    return count
+
 def connect_to_carla(host: str = 'localhost', port: int = 2000, timeout: float = 10.0) -> carla.Client:
     """
     连接到 CARLA 仿真服务器。

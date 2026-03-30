@@ -14,8 +14,8 @@ word_01:
       precipitation: 0
       sun_altitude_angle: 10
     map_layer: 1  # 世界层级，级别越高越复杂,最高5级最小1级
-    sampling_resolution: 0.2    #  路径采样间隔（米），值越小路径越精细
-    ref_offset: 5  # 参考偏移
+    sampling_resolution: 0.1    #  路径采样间隔（米），值越小路径越精细
+    ref_offset: 2  # 参考偏移
     notice_world: 'OCP-train'
 
 word_02:

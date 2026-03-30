@@ -4,7 +4,7 @@ import gymnasium as gym
 import numpy as np
 import carla
 from typing import Dict, Any, Optional
-from src.carla_utils import RoutePlanner,batch_world_to_ego
+from src.carla_utils import RoutePlanner, batch_world_to_ego, remove_only_visible_traffic_signs
 
 from src.utils import get_logger, RunningNormalizer
 from src.configs.constant import (LAYERS_TO_REMOVE_1,
@@ -281,6 +281,8 @@ class CarlaEnv(gym.Env):
             self.world.unload_map_layer(layer)
             logger.info(f"卸载层级: {layer}")
 
+        remove_only_visible_traffic_signs(self.world)
+
     def _load_map_layers(self):
         load_layer = []
         match self.carla_cfg["world"]["map_layer"]:
@@ -337,7 +339,8 @@ class CarlaEnv(gym.Env):
         ego_vehicle = self.vehicle_manager.ego_vehicle
         self.route_planner = RoutePlanner(self.world, self.carla_cfg["world"]["sampling_resolution"])
 
-        self.path_locations = self.route_planner.route_plane(BIRTH_POINT[self.env_cfg["world"]["map"]][0],END_POINT[self.env_cfg["world"]["map"]],240)
+        self.path_locations = self.route_planner.route_plane(BIRTH_POINT[self.env_cfg["world"]["map"]][0],
+                                                             END_POINT[self.env_cfg["world"]["map"]],240)
         self.ref_path_xy = batch_world_to_ego(self.path_locations, ego_vehicle.get_transform())
         self.ref_path_xy_raw = np.array([[item.x, item.y] for item in self.path_locations],dtype=np.float32)
         logger.info(f"路径规划成功！已规划{len(self.path_locations)}个坐标点")
@@ -401,7 +404,7 @@ class CarlaEnv(gym.Env):
             self.sumo_integration.sync_reset()
         else:
             self.vehicle_manager.spawn_npcs(self.tm,sync_mode)
-        # 5. 初始化路径规划/视角等状态
+        # 5. 初始化路径规划
         self._init_episode_state()
         # 6. 获取初始观测 → 委托 ObservationProcessor
         input_params = {'path_locations':self.path_locations,'ego_ref_speed':self.ego_ref_speed,'ref_offset':self.carla_cfg['world']['ref_offset']}

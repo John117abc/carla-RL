@@ -80,9 +80,6 @@ class ObservationProcessor:
             obs["s_road_raw"] = s_road
             obs["s_ref_raw"] = s_ref_raw
             obs["s_ref_error"] = s_ref_error
-            # # # 如果是debug模式，在训练页面上显示和各个点的连线
-            # if self._ocp_debug:
-            #     self._debug_ocp(obs["ocp_obs"], s_ref_raw, s_road)
         if len(obs) == 1:
             return list(obs.values())[0]
         return obs

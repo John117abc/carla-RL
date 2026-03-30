@@ -23,7 +23,7 @@ class DebugVisualizer:
                                                            self.vehicle_manager.ego_vehicle.get_transform())
 
         # CARLA+SUMO固定步长0.05s，显示时间统一适配，杜绝闪烁
-        SYNC_STEP = fixed_delta_seconds  # 必须和fixed_delta_seconds一致
+        SYNC_STEP = fixed_delta_seconds/5  # 必须和fixed_delta_seconds一致
 
         # 1. 步数文字
         draw_text_at_location(

@@ -11,7 +11,7 @@ rl:
   save_freq: 5            # 每多少回合保存一次模型
   continue_a2c: False    # 是否继续训练，如果需要继续训练，则需要填写模型地址
   model_path_a2c: 'checkpoints/20260131/a2c-v1.0_Town06_Opt_020547_episode=4000.pth'
-  continue_ocp: True    # 是否继续训练，如果需要继续训练，则需要填写模型地址
+  continue_ocp: False    # 是否继续训练，如果需要继续训练，则需要填写模型地址
   model_path_ocp: 'checkpoints/20260328/ocp-v1.0_Town06_Opt_233201_episode=5.pth'
   num_eps_eval: 10    # 评估步数
 
@@ -30,10 +30,10 @@ rl:
   OCP:
     gamma: 1.0  # 有限时域OCP必须无折扣，和论文完全一致
     amplifier_c: 1.1  # 还原论文的1.1放大系数，加快约束生效
-    amplifier_m: 2000  # 每10000步放大一次，给网络足够时间学习跟踪，再加约束
+    amplifier_m: 8192  # 每10000步放大一次，给网络足够时间学习跟踪，再加约束
     lr_actor: 3e-4  # 保持不变
     lr_critic: 8e-4  # 还原论文的8e-4，加快价值网络收敛
-    init_penalty: 0.1  # 初始惩罚因子调小，先学跟踪再学安全约束
+    init_penalty: 1.0  # 初始惩罚因子调小，先学跟踪再学安全约束
     max_penalty: 100.0  # 放大最大惩罚因子，保证约束最终生效
     hidden_dim: 256
     other_car_min_distance: 3.0
