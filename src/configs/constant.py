@@ -38,7 +38,7 @@ BIRTH_POINT = {
         # carla.Location(x=106.3154, y=237.56, z=0.6),  # 最左侧车道中心
         #                    carla.Location(x=106.3154, y=241.06, z=0.6),
         #                    carla.Location(x=30.3154, y=244.56, z=0.6),
-                           carla.Location(x=20.3154, y=248.06, z=0.6),
+                           carla.Location(x=25.3154, y=248.06, z=0.6),
         #                    carla.Location(x=20.3154, y=251.56, z=0.6)
     ],
     "Town05_Opt":[carla.Location(x=26.4, y=-207.6, z=0.3)]
@@ -52,6 +52,6 @@ BIRTH_YAW = {
 
 # 终点
 END_POINT = {
-    "Town06_Opt": carla.Location(x = 300.3154,y = 248.0,z = 0.300000),
+    "Town06_Opt": carla.Location(x = 500.3154,y = 248.0,z = 0.300000),
     "Town05_Opt": carla.Location(x=37.3, y=208.8, z=0.3)
 }

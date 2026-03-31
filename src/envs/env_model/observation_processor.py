@@ -1,7 +1,7 @@
 import numpy as np
 import math
 import carla
-from src.carla_utils import get_compass, world_to_vehicle_frame, get_ocp_observation_ego_frame
+from src.carla_utils import get_compass, world_to_vehicle_frame, get_ocp_observation_ego_frame,batch_world_to_ego
 
 class ObservationProcessor:
     def __init__(self, vehicle_manager, sensor_manager,world, config, normalizer):
@@ -80,6 +80,11 @@ class ObservationProcessor:
             obs["s_road_raw"] = s_road
             obs["s_ref_raw"] = s_ref_raw
             obs["s_ref_error"] = s_ref_error
+            
+            # 【关键修复】转换 input_params['path_locations'] 到自车坐标系
+            #    get_ocp_observation_ego_frame 只转换了 1 个参考点，但我们需要所有路径点
+            ego_transform = self.vehicle_manager.ego_vehicle.get_transform()
+            obs["ref_path_locations"] = batch_world_to_ego(input_params['path_locations'], ego_transform)
         if len(obs) == 1:
             return list(obs.values())[0]
         return obs
