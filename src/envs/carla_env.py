@@ -846,9 +846,6 @@ class CarlaEnv(gym.Env):
 
                 obs = self._get_observation()
                 self.world.tick()  # 4. CARLA推进一步
-            else:
-                obs = self._get_observation()
-                self.world.tick()
 
         # 调用视角跟随函数（仿真推进后，车辆位置已更新）
         self._place_spectator_above_vehicle()
@@ -868,9 +865,6 @@ class CarlaEnv(gym.Env):
         left_pts, right_pts = get_current_lane_forward_edges(self.vehicle, self.world)
         info['static_road_left'] = [[item.x, item.y] for item in left_pts]
         info['static_road_right'] = [[item.x, item.y] for item in right_pts]
-
-        # if self.enable_sumo:
-        #     self._cleanup_finished_vehicles()
 
         return obs, reward['total_reward'], terminated, truncated, info
 
@@ -1043,22 +1037,22 @@ class CarlaEnv(gym.Env):
                     self.world.apply_settings(settings)
                     logger.info(f"强制CARLA同步模式：步长{self.carla_cfg['fixed_delta_seconds']}s")
 
-                # tick 一次确保状态稳定
-                if not self.enable_sumo and self.carla_cfg["sync_mode"]:
-                    self.tm = self.client.get_trafficmanager(self.tm_port)
-                    self.tm.set_random_device_seed(22)  # 重置随机性
-                    self.world.tick()
-                elif self.enable_sumo and self.carla_cfg["sync_mode"]:
-                    # 🌟 【关键修复】：在重置时，tick 之前必须先清理上一轮残留的幽灵车！
-                    self._cleanup_finished_vehicles()
+                    # tick 一次确保状态稳定
+                    if not self.enable_sumo and self.carla_cfg["sync_mode"]:
+                        self.tm = self.client.get_trafficmanager(self.tm_port)
+                        self.tm.set_random_device_seed(22)  # 重置随机性
+                        self.world.tick()
+                    elif self.enable_sumo and self.carla_cfg["sync_mode"]:
+                        # 🌟 【关键修复】：在重置时，tick 之前必须先清理上一轮残留的幽灵车！
+                        self._cleanup_finished_vehicles()
 
-                    # 手动把新生成的自车从同步列表中移除（防止自车被桥接接管）
-                    if hasattr(self.synchronization, 'carla2sumo_ids') and self.vehicle:
-                        ego_id = self.vehicle.id
-                        if ego_id in self.synchronization.carla2sumo_ids:
-                            del self.synchronization.carla2sumo_ids[ego_id]
+                        # 手动把新生成的自车从同步列表中移除（防止自车被桥接接管）
+                        if hasattr(self.synchronization, 'carla2sumo_ids') and self.vehicle:
+                            ego_id = self.vehicle.id
+                            if ego_id in self.synchronization.carla2sumo_ids:
+                                del self.synchronization.carla2sumo_ids[ego_id]
 
-                    self.synchronization.tick()
+                        self.synchronization.tick()
 
         except Exception as e:
             logger.error(f"重置环境失败: {e}")

@@ -3,6 +3,7 @@ import random
 import heapq
 import itertools
 from collections import defaultdict
+import torch
 
 
 class PriorityBuffer:
@@ -10,7 +11,7 @@ class PriorityBuffer:
 
     def __init__(self, capacity):
         self.capacity = capacity
-        self.buffer = []  # 使用堆实现优先级队列 [(priority, experience)]
+        self.buffer = []  # 使用堆实现优先级队列 [(priority, count, experience)]
         self.sum_priorities = 0.0
         self._counter = itertools.count()
 
@@ -18,14 +19,14 @@ class PriorityBuffer:
         count = next(self._counter)
         # 如果缓冲区未满，直接添加
         if len(self.buffer) < self.capacity:
-            heapq.heappush(self.buffer, (priority, count,experience))
+            heapq.heappush(self.buffer, (priority, count, experience))
             self.sum_priorities += priority
             return True
         # 如果新样本优先级高于最低优先级样本，替换
         elif priority > self.buffer[0][0]:
             removed = heapq.heappop(self.buffer)
             self.sum_priorities -= removed[0]
-            heapq.heappush(self.buffer, (priority, count,experience))
+            heapq.heappush(self.buffer, (priority, count, experience))
             self.sum_priorities += priority
             return True
         return False
@@ -38,7 +39,7 @@ class PriorityBuffer:
         if self.can_replace_low_priority(priority):
             removed = heapq.heappop(self.buffer)
             self.sum_priorities -= removed[0]
-            heapq.heappush(self.buffer, (priority, count,experience))
+            heapq.heappush(self.buffer, (priority, count, experience))
             self.sum_priorities += priority
             return True
         return False
@@ -73,6 +74,25 @@ class PriorityBuffer:
 
     def __len__(self):
         return len(self.buffer)
+
+    def get_buffer_data(self):
+        """获取缓冲区的所有数据（用于保存）"""
+        # 返回可序列化的格式：(buffer列表, sum_priorities, 当前counter值)
+        counter_val = next(self._counter) - 1  # 获取当前计数器值
+        return {
+            'buffer': self.buffer.copy(),
+            'sum_priorities': self.sum_priorities,
+            'counter': counter_val,
+            'capacity': self.capacity
+        }
+
+    def set_buffer_data(self, data):
+        """从加载的数据恢复缓冲区"""
+        self.buffer = data['buffer'].copy()
+        self.sum_priorities = data['sum_priorities']
+        self.capacity = data['capacity']
+        # 重置计数器到加载时的位置
+        self._counter = itertools.count(start=data['counter'] + 1)
 
 
 class SafetyCriticalBuffer(PriorityBuffer):
@@ -132,6 +152,17 @@ class SafetyCriticalBuffer(PriorityBuffer):
         super().clear()
         self.collision_history = []
 
+    def get_buffer_data(self):
+        """获取安全缓冲区的所有数据（包含碰撞历史）"""
+        base_data = super().get_buffer_data()
+        base_data['collision_history'] = self.collision_history.copy()
+        return base_data
+
+    def set_buffer_data(self, data):
+        """恢复安全缓冲区数据"""
+        super().set_buffer_data(data)
+        self.collision_history = data['collision_history'].copy()
+
 
 class PerformanceBuffer(PriorityBuffer):
     """存储有助于跟踪性能优化的样本"""
@@ -189,6 +220,19 @@ class PerformanceBuffer(PriorityBuffer):
         self.best_performance = -float('inf')
         self.performance_history = []
 
+    def get_buffer_data(self):
+        """获取性能缓冲区的所有数据"""
+        base_data = super().get_buffer_data()
+        base_data['best_performance'] = self.best_performance
+        base_data['performance_history'] = self.performance_history.copy()
+        return base_data
+
+    def set_buffer_data(self, data):
+        """恢复性能缓冲区数据"""
+        super().set_buffer_data(data)
+        self.best_performance = data['best_performance']
+        self.performance_history = data['performance_history'].copy()
+
 
 class DiversityBuffer(PriorityBuffer):
     """存储多样化场景的样本，确保策略泛化能力"""
@@ -206,7 +250,7 @@ class DiversityBuffer(PriorityBuffer):
         state, action, reward, value, done, info = experience
 
         # 创建场景指纹
-        scenario_fingerprint = self._create_scenario_fingerprint(info,reward)
+        scenario_fingerprint = self._create_scenario_fingerprint(info, reward)
 
         # 更新场景计数
         self.scenario_counts[scenario_fingerprint] += 1
@@ -226,7 +270,7 @@ class DiversityBuffer(PriorityBuffer):
 
         return max(0.1, min(10.0, base_priority + action_priority + state_priority))
 
-    def _create_scenario_fingerprint(self, info,reward):
+    def _create_scenario_fingerprint(self, info, reward):
         """创建场景指纹，用于识别不同场景"""
         speed = info.get('speed', 0.0)
         on_road = info['centering_reward'] > 0.5
@@ -283,6 +327,22 @@ class DiversityBuffer(PriorityBuffer):
         self.scenario_counts = defaultdict(int)
         self.total_samples = 0
 
+    def get_buffer_data(self):
+        """获取多样性缓冲区的所有数据"""
+        base_data = super().get_buffer_data()
+        # defaultdict 转普通dict以便序列化
+        base_data['scenario_counts'] = dict(self.scenario_counts)
+        base_data['total_samples'] = self.total_samples
+        return base_data
+
+    def set_buffer_data(self, data):
+        """恢复多样性缓冲区数据"""
+        super().set_buffer_data(data)
+        # 普通dict转回defaultdict
+        self.scenario_counts = defaultdict(int, data['scenario_counts'])
+        self.total_samples = data['total_samples']
+
+
 class CurriculumBuffer(PriorityBuffer):
     """实现课程学习的缓冲区，从简单到复杂"""
 
@@ -300,7 +360,7 @@ class CurriculumBuffer(PriorityBuffer):
         state, action, reward, value, done, info = experience
 
         # 评估样本难度
-        difficulty = self._assess_difficulty(info,reward)
+        difficulty = self._assess_difficulty(info, reward)
 
         # 根据当前学习阶段调整优先级
         if difficulty <= self.current_difficulty_threshold:
@@ -322,7 +382,7 @@ class CurriculumBuffer(PriorityBuffer):
         self.current_difficulty_threshold = 2.0
         self.difficulty_history = []
 
-    def _assess_difficulty(self, info,reward):
+    def _assess_difficulty(self, info, reward):
         """评估样本难度"""
         difficulty = 0.0
 
@@ -366,6 +426,23 @@ class CurriculumBuffer(PriorityBuffer):
                     self.current_difficulty_threshold + 0.1
                 )
 
+    def get_buffer_data(self):
+        """获取课程学习缓冲区的所有数据"""
+        base_data = super().get_buffer_data()
+        base_data['min_difficulty'] = self.min_difficulty
+        base_data['max_difficulty'] = self.max_difficulty
+        base_data['current_difficulty_threshold'] = self.current_difficulty_threshold
+        base_data['difficulty_history'] = self.difficulty_history.copy()
+        return base_data
+
+    def set_buffer_data(self, data):
+        """恢复课程学习缓冲区数据"""
+        super().set_buffer_data(data)
+        self.min_difficulty = data['min_difficulty']
+        self.max_difficulty = data['max_difficulty']
+        self.current_difficulty_threshold = data['current_difficulty_threshold']
+        self.difficulty_history = data['difficulty_history'].copy()
+
 
 class StochasticBuffer:
     def __init__(self,
@@ -378,10 +455,10 @@ class StochasticBuffer:
         """
         # 4个专用Buffers
         self.buffers = [
-            SafetyCriticalBuffer(capacity=total_capacity*0.25),  # 安全关键样本
-            PerformanceBuffer(capacity=total_capacity*0.3),  # 性能优化样本
-            DiversityBuffer(capacity=total_capacity*0.25),  # 多样性样本
-            CurriculumBuffer(capacity=total_capacity*0.2)  # 课程学习样本
+            SafetyCriticalBuffer(capacity=total_capacity * 0.25),  # 安全关键样本
+            PerformanceBuffer(capacity=total_capacity * 0.3),  # 性能优化样本
+            DiversityBuffer(capacity=total_capacity * 0.25),  # 多样性样本
+            CurriculumBuffer(capacity=total_capacity * 0.2)  # 课程学习样本
         ]
         self.total_capacity = total_capacity
         self.min_start_train = min_start_train  # 最小训练启动样本量
@@ -472,7 +549,7 @@ class StochasticBuffer:
         _, _, reward, _, _, info = experience
 
         # 创建场景指纹
-        scenario_fingerprint = self._create_scenario_fingerprint(info,reward)
+        scenario_fingerprint = self._create_scenario_fingerprint(info, reward)
 
         # 检查是否为稀有场景
         for i, buf in enumerate(self.buffers):
@@ -483,7 +560,7 @@ class StochasticBuffer:
                     return True
         return False
 
-    def _create_scenario_fingerprint(self, info,reward):
+    def _create_scenario_fingerprint(self, info, reward):
         """创建场景指纹，用于识别不同场景 - 简化版"""
         speed = info.get('speed', 0.0)
         on_road = info['centering_reward'] > 0.5
@@ -540,7 +617,7 @@ class StochasticBuffer:
 
         # 课程学习缓冲区：基于难度适应性
         else:  # CurriculumBuffer
-            difficulty = self.buffers[3]._assess_difficulty(info,reward)
+            difficulty = self.buffers[3]._assess_difficulty(info, reward)
             if difficulty <= self.buffers[3].current_difficulty_threshold:
                 return base_priority + 4.0  # 当前可处理的难度
             else:
@@ -597,3 +674,65 @@ class StochasticBuffer:
         if len(samples) > batch_size:
             return random.sample(samples, batch_size)
         return samples
+
+    def get_save_buffer_data(self):
+        """获取所有缓冲区数据"""
+        # 收集所有缓冲区数据
+        buffer_data = {
+            'safety_buffer': self.buffers[0].get_buffer_data(),
+            'performance_buffer': self.buffers[1].get_buffer_data(),
+            'diversity_buffer': self.buffers[2].get_buffer_data(),
+            'curriculum_buffer': self.buffers[3].get_buffer_data(),
+            'gep_penalty_factor': self.gep_penalty_factor,
+            'total_capacity': self.total_capacity,
+            'min_start_train': self.min_start_train
+        }
+
+        return buffer_data
+
+
+    def save_buffer_to_pth(self, file_path):
+        """
+        将所有缓冲区数据保存到.pth文件
+        :param file_path: 保存路径（如 'buffer_data.pth'）
+        """
+        # 收集所有缓冲区数据
+        buffer_data = self.get_save_buffer_data()
+
+        # 保存到pth文件
+        torch.save(buffer_data, file_path)
+        print(f"缓冲区数据已成功保存到: {file_path}")
+
+    def load_buffer_from_pth(self, file_path):
+        """
+        从.pth文件加载数据恢复缓冲区
+        :param file_path: 加载路径（如 'buffer_data.pth'）
+        """
+        # 加载数据
+        if not torch.cuda.is_available():
+            buffer_data = torch.load(file_path, map_location=torch.device('cpu'))
+        else:
+            buffer_data = torch.load(file_path)
+
+        self.load_buffer_data(buffer_data)
+
+
+    def load_buffer_data(self,buffer_data):
+        """把buffer_data写入缓冲区"""
+        # 恢复各缓冲区数据
+        self.buffers[0].set_buffer_data(buffer_data['safety_buffer'])
+        self.buffers[1].set_buffer_data(buffer_data['performance_buffer'])
+        self.buffers[2].set_buffer_data(buffer_data['diversity_buffer'])
+        self.buffers[3].set_buffer_data(buffer_data['curriculum_buffer'])
+
+        # 恢复StochasticBuffer的状态
+        self.gep_penalty_factor = buffer_data['gep_penalty_factor']
+        self.total_capacity = buffer_data['total_capacity']
+        self.min_start_train = buffer_data['min_start_train']
+
+        print(f"已加载缓冲区数据")
+        print(f"各缓冲区当前大小: "
+              f"安全缓冲区={len(self.buffers[0])}, "
+              f"性能缓冲区={len(self.buffers[1])}, "
+              f"多样性缓冲区={len(self.buffers[2])}, "
+              f"课程缓冲区={len(self.buffers[3])}")

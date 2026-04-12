@@ -136,7 +136,7 @@ def main():
                     'global_step':agent.global_step,
                     'map':env_config['world']['map'],
                     'history_loss':history.copy(),
-                    # 'ocp_normalizer': env.ocp_normalizer.state_dict()
+                    'buffer_data': agent.buffer.get_save_buffer_data()
                 }
                 agent.save(save_info)
 
