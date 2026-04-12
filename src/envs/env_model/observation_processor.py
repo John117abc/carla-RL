@@ -66,7 +66,7 @@ class ObservationProcessor:
             # 获取ocp观察信息
             # 观察周车
             self.vehicle_manager.get_surrounding_vehicles()
-            network_state, s_road_ego, s_ref_raw_ego, s_ref_error, s_road, s_ref_raw = get_ocp_observation_ego_frame(
+            network_state, s_road_ego, s_ref_ego, s_ref_error, s_road, s_ref_raw = get_ocp_observation_ego_frame(
                 self.vehicle_manager.ego_vehicle,
                 self.sensor_manager.imu_sensor,
                 self.vehicle_manager.npc_vehicles,

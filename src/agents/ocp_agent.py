@@ -112,6 +112,8 @@ class OcpAgent(BaseAgent):
         :param ref_path: [1, N, 2] 参考路径xy
         :return: [B, 1, 3] 跟踪误差 [δ_p, δ_φ, δ_v]
         """
+        print(f"[调试] 自车初始xy (自车坐标系): {ego_state[0, 0, :2]}")  # 应该接近 [0, 0]
+        print(f"[调试] 参考路径前3个点: {ref_path[0, :3]}")  # 应该在自车前方
         B = ego_state.shape[0]
         # 参考路径广播到batch维度
         if ref_path.shape[0] == 1 and B > 1:
