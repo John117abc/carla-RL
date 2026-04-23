@@ -11,8 +11,8 @@ rl:
   save_freq: 25            # 每多少回合保存一次模型
   continue_a2c: False    # 是否继续训练，如果需要继续训练，则需要填写模型地址
   model_path_a2c: 'checkpoints/20260131/a2c-v1.0_Town06_Opt_020547_episode=4000.pth'
-  continue_ocp: False    # 是否继续训练，如果需要继续训练，则需要填写模型地址
-  model_path_ocp: 'checkpoints/20260324/ocp-v1.0_Town06_Opt_160759_episode=100.pth'
+  continue_ocp: True    # 是否继续训练，如果需要继续训练，则需要填写模型地址
+  model_path_ocp: 'checkpoints/20260414/ocp-v1.0_Town06_Opt_081237_episode=675.pth'
   num_eps_eval: 10    # 评估步数
 
   A2C:
