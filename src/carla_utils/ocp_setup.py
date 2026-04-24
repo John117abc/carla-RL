@@ -127,7 +127,7 @@ def get_ocp_observation_ego_frame(
     s_other_world = network_state[6:6 + 32].copy().reshape(8, 4)
     s_ref_error_original = network_state[6 + 32:].copy()
 
-    # 【修复1】转换自车状态
+    # 【修复1】转换自车状态：在自车坐标系中，自车位置恒为原点，航向恒为0
     s_ego_ego = s_ego_world.copy()
     s_ego_ego[0], s_ego_ego[1] = 0.0, 0.0  # 自车在自身坐标系原点
     s_ego_ego[4] = 0.0  # 自车相对自身的航向角永远是 0

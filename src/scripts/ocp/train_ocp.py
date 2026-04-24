@@ -18,6 +18,7 @@ from src.buffer import Trajectory
 
 import gymnasium as gym
 from src.envs.carla_env import CarlaEnv
+from src.carla_utils.ocp_setup import batch_world_to_ego
 
 logger = get_logger('train_ocp')
 
@@ -83,12 +84,15 @@ def main():
             state = obs['ocp_obs']
             # 提取参考路径，转为tensor [1, N, 2]
             ref_path_locations = obs['ref_path_locations']  # 你的路径规划输出的carla.Location列表
-            ref_path_np = np.array([[loc[0], loc[1]] for loc in ref_path_locations], dtype=np.float32)
-            ref_path_tensor = torch.from_numpy(ref_path_np).unsqueeze(0).to(device)
-
+            
             total_reward = 0.0
             done = False
             while not done:
+                # 【修复】将参考路径动态转换到当前自车坐标系，与网络输入保持一致
+                ego_transform = env.vehicle_manager.ego_vehicle.get_transform()
+                ref_path_ego_np = np.array(batch_world_to_ego(ref_path_locations, ego_transform), dtype=np.float32)
+                ref_path_tensor = torch.from_numpy(ref_path_ego_np).unsqueeze(0).to(device)
+
                 action, _ = agent.select_action(state,train_config['continue_ocp'])
                 next_obs, reward, _, _, info = env.step(action)
                 next_state = next_obs['ocp_obs']
