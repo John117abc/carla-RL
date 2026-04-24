@@ -88,3 +88,17 @@ def draw_text_at_location(world, text, location, display_time=5.0, color=None, s
         display_time,       # 5. 显示时间
         True                # 6. 持久化（必须传）
     )
+
+
+def draw_predicted_trajectory(world, points, display_time=5.0, color=None, thickness=0.2):
+    """
+    绘制预测轨迹连线（封装函数，统一颜色与显示逻辑）
+    :param world: CARLA World
+    :param points: 世界坐标系下的点列表 [carla.Location]
+    :param display_time: 显示持续时间
+    :param color: 轨迹颜色
+    :param thickness: 线条粗细
+    """
+    if color is None:
+        color = carla.Color(0, 255, 0)  # 默认绿色轨迹
+    draw_lines_between_points(world, points, display_time, color, thickness)

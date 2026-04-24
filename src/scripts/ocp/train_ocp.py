@@ -62,6 +62,9 @@ def main():
     )
     try:
         agent = OcpAgent(env=env, rl_config=rl_config, device=device)
+        # 【新增】将智能体绑定至环境，用于 step 中实时可视化预测轨迹
+        env.agent = agent
+        
         if train_config['continue_ocp']:
             logger.info("开始读取智能体参数...")
             checkpoint = agent.load(train_config["model_path_ocp"])

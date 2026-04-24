@@ -3,8 +3,11 @@
 import gymnasium as gym
 import numpy as np
 import carla
+import torch
 from typing import Dict, Any, Optional
 from src.carla_utils import RoutePlanner, batch_world_to_ego, remove_only_visible_traffic_signs
+from src.carla_utils.draw_info import draw_lines_between_points
+from src.carla_utils.ocp_setup import ego_to_world_coordinate
 
 from src.utils import get_logger, RunningNormalizer
 from src.configs.constant import (LAYERS_TO_REMOVE_1,
@@ -105,6 +108,9 @@ class CarlaEnv(gym.Env):
 
         # Z轴平滑相关变量（后续_place_spectator_above_vehicle中初始化）
         self.smoothed_z = None
+        
+        # OCP智能体引用（用于可视化预测轨迹）
+        self.agent = None
 
     def _init_carla_client(self):
         """初始化CARLA客户端并加载指定地图世界"""
@@ -369,6 +375,31 @@ class CarlaEnv(gym.Env):
         if self._ocp_debug:
             self.debug_visualizer.debug_ocp(obs['ocp_obs'],obs['s_ref_raw'],obs['s_road_raw'],self.step_count,self.carla_cfg["fixed_delta_seconds"])
             self.last_ref_idx ,self.prev_spectator_transform= self.debug_visualizer.update_spectator(self.ref_path_xy_raw,self.last_ref_idx,self.prev_spectator_transform)
+            
+            # 【新增】可视化 OCP 预测轨迹
+            if self.agent is not None:
+                try:
+                    # 构造输入张量 (CPU 即可，仅用于可视化)
+                    state_tensor = torch.from_numpy(obs['ocp_obs']).unsqueeze(0).to(torch.device('cpu'))
+                    ref_tensor = torch.from_numpy(self.ref_path_xy).unsqueeze(0).to(torch.device('cpu'))
+                    road_tensor = torch.from_numpy(obs['s_road']).unsqueeze(0).to(torch.device('cpu')) if obs.get('s_road') is not None else None
+                    
+                    # 获取预测轨迹 states_traj: [B, horizon, TOTAL_DIM]
+                    _, _, states_traj = self.agent._forward_horizon(state_tensor, ref_tensor, road_tensor)
+                    traj_xy = states_traj[0, :, :2].cpu().numpy()  # [horizon, 2] 自车坐标系 xy
+                    
+                    # 转换至世界坐标系
+                    ego_transform = self.vehicle_manager.ego_vehicle.get_transform()
+                    world_points = []
+                    for x, y in traj_xy:
+                        wx, wy = ego_to_world_coordinate(float(x), float(y), ego_transform)
+                        world_points.append(carla.Location(wx, wy, ego_transform.location.z))
+                    
+                    if len(world_points) > 1:
+                        draw_lines_between_points(self.world, world_points, display_time=self.carla_cfg["fixed_delta_seconds"], color=carla.Color(0, 255, 0), thickness=0.2)
+                except Exception as e:
+                    logger.debug(f"OCP 轨迹可视化失败: {e}")
+                    
         # 仿真推进一步，解决debug闪烁问题
         self.world.tick()
         return obs, reward['total_reward'], terminated, truncated, info
