@@ -409,7 +409,8 @@ class CarlaEnv(gym.Env):
         # 6. 获取初始观测 → 委托 ObservationProcessor
         input_params = {'path_locations':self.path_locations,'ego_ref_speed':self.ego_ref_speed,'ref_offset':self.carla_cfg['world']['ref_offset']}
         obs = self.observation_processor.get_observation(self._is_eval,input_params)
-        obs['ref_path_locations'] = self.ref_path_xy
+        # 【修复】传递原始 carla.Location 列表，供训练脚本在每个时间步动态转换到当前自车坐标系
+        obs['ref_path_locations'] = self.path_locations
         self.step_count = 0
         return obs
 
@@ -450,4 +451,3 @@ class CarlaEnv(gym.Env):
     @property
     def is_eval(self):
         return self._is_eval
-
