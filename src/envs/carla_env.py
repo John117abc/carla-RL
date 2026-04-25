@@ -384,7 +384,7 @@ class CarlaEnv(gym.Env):
             self.last_ref_idx ,self.prev_spectator_transform= self.debug_visualizer.update_spectator(self.ref_path_xy_raw,self.last_ref_idx,self.prev_spectator_transform)
                     
         # 仿真推进一步，解决debug闪烁问题
-        # self.world.tick()
+        self.world.tick()
         return obs, reward['total_reward'], terminated, truncated, info
 
     def pause_simulation(self):
