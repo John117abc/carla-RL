@@ -266,18 +266,15 @@ class OcpAgent(BaseAgent):
 
         return step_l_tensor, step_phi_tensor, trajectory_states_tensor
 
-    def select_action(self, obs: Dict[str, Any], deterministic: bool = False) -> Tuple[np.ndarray, Dict[str, Any]]:
+    def select_action(self, obs: np.ndarray, deterministic: bool = False) -> Tuple[np.ndarray, Dict[str, Any]]:
         """
         严格对齐论文 Algorithm 2 的 Action Selection 步骤
+        obs: numpy array of shape (..., TOTAL_STATE_DIM)
         """
-        obs_np = obs['ocp_obs']
-        ref_path_np = obs['ref_path_locations']
-        road_state_np = obs['road_state']
-
-        # 【修复】推理时同样需要归一化
-        ego_state = torch.tensor(obs_np[..., :self.DIM_EGO], dtype=torch.float32, device=self.device).unsqueeze(0)
-        other_states = torch.tensor(obs_np[..., self.DIM_EGO:self.DIM_EGO + self.DIM_OTHER], dtype=torch.float32, device=self.device).unsqueeze(0)
-        ref_error = torch.tensor(obs_np[..., self.DIM_EGO + self.DIM_OTHER:], dtype=torch.float32, device=self.device).unsqueeze(0)
+        # 【修复】obs 现在是 np.ndarray 类型，直接按维度切片
+        ego_state = torch.tensor(obs[..., :self.DIM_EGO], dtype=torch.float32, device=self.device).unsqueeze(0)
+        other_states = torch.tensor(obs[..., self.DIM_EGO:self.DIM_EGO + self.DIM_OTHER], dtype=torch.float32, device=self.device).unsqueeze(0)
+        ref_error = torch.tensor(obs[..., self.DIM_EGO + self.DIM_OTHER:], dtype=torch.float32, device=self.device).unsqueeze(0)
 
         ego_norm = ego_state / self.state_std['ego_pos']
         other_norm = other_states / self.state_std['other_pos']
@@ -296,7 +293,7 @@ class OcpAgent(BaseAgent):
         delta_phy = norm_action[0, 1].item() * 0.4
 
         action = np.array([a_phy, delta_phy], dtype=np.float32)
-        info = {'ref_path': ref_path_np, 'road_state': road_state_np}
+        info = {}
         return action, info
 
     def update(self, ref_path_tensor: torch.Tensor = None, road_state_tensor: torch.Tensor = None) -> Dict[str, float]:
