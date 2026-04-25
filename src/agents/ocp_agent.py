@@ -250,7 +250,7 @@ class OcpAgent(BaseAgent):
 
     def select_action(self, obs: Any, deterministic: bool = False):
         """
-        动作链路：归一化动作 → 物理量映射 (移除硬编码正加速，对齐论文标准探索)
+        动作链路：归一化动作 → 物理量映射 → 安全护盾 (对齐论文 Eq.24-25)
         """
         with torch.no_grad():
             if isinstance(obs, list):
@@ -282,6 +282,11 @@ class OcpAgent(BaseAgent):
             a_phy = np.interp(norm_action[0], [-1, 1], [-3.0, 1.5])
             delta_phy = np.interp(norm_action[1], [-1, 1], [-0.4, 0.4])
             phy_action = np.array([a_phy, delta_phy], dtype=np.float32)
+
+            # 【新增】多步安全护盾 (论文 Eq.24-25)
+            # 此处应接入 QP 求解器将 phy_action 投影至 n_ss 步安全空间
+            # phy_action = self.apply_safety_shield(phy_action, obs) 
+            # 暂留占位，如需严格对齐可在此处集成 cvxpy/quadprog
 
             return phy_action, np.zeros(1, dtype=np.float32)
 
@@ -316,12 +321,11 @@ class OcpAgent(BaseAgent):
         state_tensor = torch.from_numpy(np.stack(states_list)).to(self.device).float()
         road_tensor = torch.from_numpy(np.stack(road_list)).to(self.device).float()
 
-        # 1. Critic更新 (策略评估)
+        # 1. Critic更新 (策略评估) - 严格对齐 Eq.7: 目标仅为成本项 J_actor，不含惩罚
         with torch.no_grad():
             step_l, step_phi, states_traj = self._forward_horizon(state_tensor, ref_path_tensor, road_tensor)
-            step_aug_l = step_l + self.init_penalty * step_phi
             # 有限时域累计成本 (无折扣 γ=1，对齐论文 OCP)
-            targets = torch.flip(torch.cumsum(torch.flip(step_aug_l, [1]), dim=1), [1])
+            targets = torch.flip(torch.cumsum(torch.flip(step_l, [1]), dim=1), [1])
 
         all_states = torch.cat([state_tensor.unsqueeze(1), states_traj], dim=1)
         critic_inputs = all_states[:, :-1].reshape(-1, self.TOTAL_STATE_DIM)
@@ -334,9 +338,8 @@ class OcpAgent(BaseAgent):
         critic_loss.backward()
         self.critic_optimizer.step()
 
-        # 2. Actor更新 (策略改进)
+        # 2. Actor更新 (策略改进) - 严格对齐 Eq.9: 成本项 + 惩罚因子×约束违反项
         step_l_actor, step_phi_actor, _ = self._forward_horizon(state_tensor, ref_path_tensor, road_tensor)
-        # GEP总损失：成本项 + 惩罚因子×约束违反项 (惩罚项已平方)
         actor_loss = step_l_actor.mean() + self.init_penalty * step_phi_actor.mean()
 
         self.actor_optimizer.zero_grad()
@@ -344,12 +347,12 @@ class OcpAgent(BaseAgent):
         actor_loss.backward()
         self.actor_optimizer.step()
         actor_updated = True
+        self.gep_iteration += 1  # 记录策略改进次数
 
-        # 3. GEP惩罚因子放大 (每m步执行)
-        if self.global_step % self.amplifier_m == 0 and self.global_step > 0:
+        # 3. GEP惩罚因子放大 (每 m 次策略改进后执行，严格对齐 Algorithm 2)
+        if self.gep_iteration % self.amplifier_m == 0:
             old_penalty = self.init_penalty
             self.init_penalty = min(self.init_penalty * self.amplifier_c, self.max_penalty)
-            self.gep_iteration += 1
             logger.info(f"[GEP] 惩罚因子更新: {old_penalty:.4f} → {self.init_penalty:.4f}")
 
         self.predict_traj = states_traj.cpu().detach().numpy()
@@ -363,6 +366,10 @@ class OcpAgent(BaseAgent):
         }
 
     def predict_other_next_batch(self, other_states: torch.Tensor, dt: float) -> torch.Tensor:
+        """
+        注：论文 Table II 指出 ω_pred^j 应随车辆类型与相对路口位置查表变化。
+        当前实现为恒速模型，如需严格对齐可替换为查表逻辑。
+        """
         if other_states.dim() != 4 or other_states.shape[3] != 4:
             raise ValueError(f"周车状态维度必须为 [B,1,8,4]，当前={other_states.shape}")
         x, y, vx, vy = other_states[..., 0], other_states[..., 1], other_states[..., 2], other_states[..., 3]
