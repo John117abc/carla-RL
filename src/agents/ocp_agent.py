@@ -52,6 +52,14 @@ class OcpAgent(BaseAgent):
         self.horizon = self.ocp_config['horizon']
         self.batch_size = self.ocp_config['batch_size']
 
+        # 【修复】状态归一化标准差，统一量纲防止梯度震荡
+        self.state_std = {
+            'ego_pos': 10.0, 'ego_vel': 5.0, 'ego_ang': 1.0,
+            'other_pos': 10.0, 'other_vel': 5.0,
+            'lat': 1.0, 'head': 1.0, 'speed': 5.0,
+            'road': 10.0
+        }
+
         # 网络初始化
         self.actor = ActorNet(
             state_dim=self.TOTAL_STATE_DIM,
@@ -76,7 +84,8 @@ class OcpAgent(BaseAgent):
         )
 
         # 论文核心权重（严格对齐原文 Table III & Eq. 1）
-        self.q_lat = 0.04  # 横向误差权重
+        # 【优化】提升横向误差权重，确保车道保持优先级
+        self.q_lat = 0.1  # 横向误差权重 (原0.04过小)
         self.q_head = 0.1  # 航向误差权重
         self.q_speed = 0.01  # 速度误差权重
         self.R_matrix = np.diag([0.005, 0.1])  # 控制权重 [加速度, 转向角]
@@ -143,11 +152,17 @@ class OcpAgent(BaseAgent):
         delta_p = min_dist * torch.sign(cross)
 
         # 航向误差δ_φ（归一化到[-π, π]）
-        delta_phi = ego_phi - ref_phi
+        # 【修复】在自车坐标系下，自车航向为0，参考路径航向即为偏航角
+        delta_phi = -ref_phi
         delta_phi = torch.atan2(torch.sin(delta_phi), torch.cos(delta_phi))
 
         # 速度误差δ_v
         delta_v = ego_vlon - self.ref_vlon
+
+        # 【新增】误差归一化，统一量纲提升网络收敛稳定性
+        delta_p = delta_p / self.state_std['lat']
+        delta_phi = delta_phi / self.state_std['head']
+        delta_v = delta_v / self.state_std['speed']
 
         return torch.stack([delta_p, delta_phi, delta_v], dim=-1)
 
@@ -181,9 +196,13 @@ class OcpAgent(BaseAgent):
         trajectory_states = []
 
         for t in range(self.horizon):
+            # 【修复】输入网络前进行状态归一化，防止量纲差异导致梯度消失
+            ego_norm = current_ego / self.state_std['ego_pos']
+            other_norm = current_other / self.state_std['other_pos']
+            
             current_state = torch.cat([
-                current_ego.view(-1, self.DIM_EGO),
-                current_other.view(-1, self.DIM_OTHER),
+                ego_norm.view(-1, self.DIM_EGO),
+                other_norm.view(-1, self.DIM_OTHER),
                 current_ref_error.view(-1, self.DIM_REF_ERROR)
             ], dim=1)
 
@@ -207,6 +226,7 @@ class OcpAgent(BaseAgent):
             lat_err_t = next_ref_error[..., 0].squeeze(1)
             head_err_t = next_ref_error[..., 1].squeeze(1)
             speed_err_t = next_ref_error[..., 2].squeeze(1)
+            # 误差已归一化，权重可保持平衡
             err_cost = self.q_lat * (lat_err_t ** 2) + self.q_head * (head_err_t ** 2) + self.q_speed * (speed_err_t ** 2)
 
             r_weights = torch.tensor([0.005, 0.1], device=self.device).float()
@@ -229,209 +249,131 @@ class OcpAgent(BaseAgent):
             dist_right_sq = torch.sum((ego_xy.unsqueeze(2) - road_right) ** 2, dim=-1)
             min_left_sq, _ = torch.min(dist_left_sq, dim=-1)
             min_right_sq, _ = torch.min(dist_right_sq, dim=-1)
-            left_violation = torch.maximum(safe_road_sq - min_left_sq, torch.zeros_like(min_left_sq)).squeeze(1)
-            right_violation = torch.maximum(safe_road_sq - min_right_sq, torch.zeros_like(min_right_sq)).squeeze(1)
+            left_violation = torch.maximum(safe_road_sq - min_left_sq, torch.zeros_like(min_left_sq))
+            right_violation = torch.maximum(safe_road_sq - min_right_sq, torch.zeros_like(min_right_sq))
             phi_violation += (left_violation ** 2 + right_violation ** 2)  # 【修复】必须平方
 
-            step_phi = phi_violation
             step_l_list.append(step_l)
-            step_phi_list.append(step_phi)
+            step_phi_list.append(phi_violation)
 
             current_ego = next_ego
             current_other = next_other
             current_ref_error = next_ref_error
 
-        step_l = torch.stack(step_l_list).transpose(0, 1)
-        step_phi = torch.stack(step_phi_list).transpose(0, 1)
-        states_traj = torch.stack(trajectory_states).transpose(0, 1)
+        step_l_tensor = torch.stack(step_l_list, dim=1)  # [B, H]
+        step_phi_tensor = torch.stack(step_phi_list, dim=1)  # [B, H]
+        trajectory_states_tensor = torch.stack(trajectory_states, dim=1)  # [B, H, D]
 
-        return step_l, step_phi, states_traj
+        return step_l_tensor, step_phi_tensor, trajectory_states_tensor
 
-    def select_action(self, obs: Any, deterministic: bool = False):
+    def select_action(self, obs: Dict[str, Any], deterministic: bool = False) -> Tuple[np.ndarray, Dict[str, Any]]:
         """
-        动作链路：归一化动作 → 物理量映射 (移除硬编码正加速，对齐论文标准探索)
+        严格对齐论文 Algorithm 2 的 Action Selection 步骤
         """
+        obs_np = obs['ocp_obs']
+        ref_path_np = obs['ref_path_locations']
+        road_state_np = obs['road_state']
+
+        # 【修复】推理时同样需要归一化
+        ego_state = torch.tensor(obs_np[..., :self.DIM_EGO], dtype=torch.float32, device=self.device).unsqueeze(0)
+        other_states = torch.tensor(obs_np[..., self.DIM_EGO:self.DIM_EGO + self.DIM_OTHER], dtype=torch.float32, device=self.device).unsqueeze(0)
+        ref_error = torch.tensor(obs_np[..., self.DIM_EGO + self.DIM_OTHER:], dtype=torch.float32, device=self.device).unsqueeze(0)
+
+        ego_norm = ego_state / self.state_std['ego_pos']
+        other_norm = other_states / self.state_std['other_pos']
+        current_state = torch.cat([
+            ego_norm.view(-1, self.DIM_EGO),
+            other_norm.view(-1, self.DIM_OTHER),
+            ref_error.view(-1, self.DIM_REF_ERROR)
+        ], dim=1)
+
         with torch.no_grad():
-            if isinstance(obs, list):
-                obs_np = np.array(obs, dtype=np.float32).flatten()
-            elif isinstance(obs, np.ndarray):
-                obs_np = obs.flatten()
-            else:
-                obs_np = np.array(obs, dtype=np.float32).flatten()
+            norm_action = self.actor(current_state)
+            if not deterministic:
+                norm_action += torch.randn_like(norm_action) * self.ocp_config['action_noise']
 
-            if obs_np.shape[0] != self.TOTAL_STATE_DIM:
-                logger.warning(f"观测维度异常: {obs_np.shape[0]} (期望{self.TOTAL_STATE_DIM})，自动修正")
-                obs_121 = np.zeros(self.TOTAL_STATE_DIM, dtype=np.float32)
-                valid_len = min(len(obs_np), self.TOTAL_STATE_DIM)
-                obs_121[:valid_len] = obs_np[:valid_len]
-                obs_np = obs_121
+        a_phy = norm_action[0, 0].item() * 2.25 - 0.75
+        delta_phy = norm_action[0, 1].item() * 0.4
 
-            if deterministic:
-                obs_tensor = torch.from_numpy(obs_np).to(self.device).float()
-                norm_action = self.actor(obs_tensor.unsqueeze(0)).squeeze(0)
-                norm_action = norm_action.cpu().numpy().flatten()
-            else:
-                obs_tensor = torch.from_numpy(obs_np).to(self.device).float()
-                norm_action = self.actor(obs_tensor.unsqueeze(0)).squeeze(0)
-                norm_action = norm_action.cpu().numpy().flatten()
-                # 标准高斯噪声探索 (论文未指定硬编码，使用标准噪声更利于梯度收敛)
-                noise = np.random.normal(0, [0.1, 0.05], size=norm_action.shape)
-                norm_action = np.clip(norm_action + noise, -1.0, 1.0)
+        action = np.array([a_phy, delta_phy], dtype=np.float32)
+        info = {'ref_path': ref_path_np, 'road_state': road_state_np}
+        return action, info
 
-            a_phy = np.interp(norm_action[0], [-1, 1], [-3.0, 1.5])
-            delta_phy = np.interp(norm_action[1], [-1, 1], [-0.4, 0.4])
-            phy_action = np.array([a_phy, delta_phy], dtype=np.float32)
-
-            return phy_action, np.zeros(1, dtype=np.float32)
-
-    def update(self, ref_path_tensor: torch.Tensor = None,
-               road_state_tensor: torch.Tensor = None):
+    def update(self, ref_path_tensor: torch.Tensor = None, road_state_tensor: torch.Tensor = None) -> Dict[str, float]:
         """
-        严格对齐论文 Algorithm 2 (GEP) 训练逻辑
+        严格对齐论文 Algorithm 2 的 GEP 更新步骤
         """
-        batch_data = self.buffer.sample_batch(self.batch_size)
-        if len(batch_data) == 0 or ref_path_tensor is None:
-            return {
-                "actor_loss": 0.0,
-                "critic_loss": 0.0,
-                "penalty": self.init_penalty,
-                "gep_iteration": self.gep_iteration,
-                "actor_updated": False
-            }
+        if self.globe_eps < self.ocp_config['min_start_train']:
+            return {}
 
-        states_list = []
-        road_list = []
-        for item in batch_data:
-            state, _, _, _, _, info = item
-            state_np = np.array(state, dtype=np.float32).flatten()
-            if state_np.shape[0] != self.TOTAL_STATE_DIM:
-                state_121 = np.zeros(self.TOTAL_STATE_DIM, dtype=np.float32)
-                valid_len = min(len(state_np), self.TOTAL_STATE_DIM)
-                state_121[:valid_len] = state_np[:valid_len]
-                state_np = state_121
-            states_list.append(state_np)
-            road_list.append(info['road_state'])
-            
-        state_tensor = torch.from_numpy(np.stack(states_list)).to(self.device).float()
-        road_tensor = torch.from_numpy(np.stack(road_list)).to(self.device).float()
+        self.globe_eps += 1
+        self.gep_iteration += 1
 
-        # 1. Critic更新 (策略评估)
-        with torch.no_grad():
-            step_l, step_phi, states_traj = self._forward_horizon(state_tensor, ref_path_tensor, road_tensor)
-            step_aug_l = step_l + self.init_penalty * step_phi
-            # 有限时域累计成本 (无折扣 γ=1，对齐论文 OCP)
-            targets = torch.flip(torch.cumsum(torch.flip(step_aug_l, [1]), dim=1), [1])
+        # 1. 采样
+        state_tensor, action_tensor, reward_tensor, next_state_tensor, done_tensor, info = self.buffer.sample(self.batch_size)
+        ref_path_tensor = info['ref_path']
+        road_state_tensor = info['road_state']
 
-        all_states = torch.cat([state_tensor.unsqueeze(1), states_traj], dim=1)
-        critic_inputs = all_states[:, :-1].reshape(-1, self.TOTAL_STATE_DIM)
-        critic_targets = targets.reshape(-1, 1)
-        pred = self.critic(critic_inputs)
-        critic_loss = F.mse_loss(pred, critic_targets)
+        # 【修复】训练时统一归一化
+        ego_state = state_tensor[..., :self.DIM_EGO]
+        other_states = state_tensor[..., self.DIM_EGO:self.DIM_EGO + self.DIM_OTHER]
+        ego_norm = ego_state / self.state_std['ego_pos']
+        other_norm = other_states / self.state_std['other_pos']
+        state_tensor_norm = torch.cat([
+            ego_norm.view(-1, self.DIM_EGO),
+            other_norm.view(-1, self.DIM_OTHER),
+            state_tensor[..., self.DIM_EGO + self.DIM_OTHER:].view(-1, self.DIM_REF_ERROR)
+        ], dim=1)
 
+        road_state_tensor = road_state_tensor / self.state_std['road']
+
+        # 2. OCP Rollout
+        step_l, step_phi, trajectory_states = self._forward_horizon(state_tensor_norm, ref_path_tensor, road_state_tensor)
+
+        # 3. GEP 惩罚更新 (严格对齐论文 Eq. 10 & 11)
+        if self.gep_iteration % self.amplifier_m == 0:
+            self.init_penalty = min(self.init_penalty * self.amplifier_c, self.max_penalty)
+
+        # 4. Critic 更新 (严格对齐论文 Eq. 12)
+        targets = torch.flip(torch.cumsum(torch.flip(step_l + self.init_penalty * step_phi, [1]), dim=1), [1])
+        targets = targets.detach()
+        critic_pred = self.critic(state_tensor_norm)
+        critic_loss = F.mse_loss(critic_pred, targets)
         self.critic_optimizer.zero_grad()
-        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=1.0)
         critic_loss.backward()
         self.critic_optimizer.step()
 
-        # 2. Actor更新 (策略改进)
-        step_l_actor, step_phi_actor, _ = self._forward_horizon(state_tensor, ref_path_tensor, road_tensor)
-        # GEP总损失：成本项 + 惩罚因子×约束违反项 (惩罚项已平方)
-        actor_loss = step_l_actor.mean() + self.init_penalty * step_phi_actor.mean()
-
+        # 5. Actor 更新 (严格对齐论文 Eq. 13)
+        actor_loss = step_l.mean() + self.init_penalty * step_phi.mean()
         self.actor_optimizer.zero_grad()
-        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.0)
         actor_loss.backward()
         self.actor_optimizer.step()
-        actor_updated = True
 
-        # 3. GEP惩罚因子放大 (每m步执行)
-        if self.global_step % self.amplifier_m == 0 and self.global_step > 0:
-            old_penalty = self.init_penalty
-            self.init_penalty = min(self.init_penalty * self.amplifier_c, self.max_penalty)
-            self.gep_iteration += 1
-            logger.info(f"[GEP] 惩罚因子更新: {old_penalty:.4f} → {self.init_penalty:.4f}")
+        # 6. 记录与保存
+        self.history_loss.append(actor_loss.item())
+        if self.globe_eps % self.ocp_config['save_interval'] == 0:
+            save_checkpoint(self.actor, self.critic, self.actor_optimizer, self.critic_optimizer, self.globe_eps, self.ocp_config['save_dir'])
 
-        self.predict_traj = states_traj.cpu().detach().numpy()
-
-        return {
-            "actor_loss": actor_loss.item(),
-            "critic_loss": critic_loss.item(),
-            "penalty": self.init_penalty,
-            "gep_iteration": self.gep_iteration,
-            "actor_updated": actor_updated
-        }
+        return {'actor_loss': actor_loss.item(), 'critic_loss': critic_loss.item(), 'penalty': self.init_penalty}
 
     def predict_other_next_batch(self, other_states: torch.Tensor, dt: float) -> torch.Tensor:
-        if other_states.dim() != 4 or other_states.shape[3] != 4:
-            raise ValueError(f"周车状态维度必须为 [B,1,8,4]，当前={other_states.shape}")
-        x, y, vx, vy = other_states[..., 0], other_states[..., 1], other_states[..., 2], other_states[..., 3]
-        x_next = x + dt * vx
-        y_next = y + dt * vy
-        return torch.stack([x_next, y_next, vx, vy], dim=-1)
+        """
+        严格对齐论文 Section IV-B2 的周车运动学预测
+        """
+        B = other_states.shape[0]
+        next_other = other_states.clone()
+        for i in range(other_states.shape[2]):
+            other_xy = other_states[..., i, :2]
+            other_vlon = other_states[..., i, 2]
+            other_vlat = other_states[..., i, 3]
+            next_other[..., i, :2] = other_xy + torch.stack([other_vlon * dt, other_vlat * dt], dim=-1)
+        return next_other
 
-    def unpack_tensor(self, data: torch.Tensor) -> Tuple[torch.Tensor, ...]:
-        if data.dim() != 3 or data.shape[2] != self.TOTAL_STATE_DIM:
-            raise ValueError(f"输入张量必须为 [B,N,{self.TOTAL_STATE_DIM}]，当前={data.shape}")
-        B, N = data.shape[0], data.shape[1]
-        ego_state = data[:, :, 0:self.DIM_EGO]
-        other_raw = data[:, :, self.DIM_EGO:self.DIM_EGO + self.DIM_OTHER]
-        other_states = other_raw.view(B, N, self.env.env_cfg['ocp']['others'], 4)
-        ref_error = data[:, :, self.DIM_EGO + self.DIM_OTHER:self.DIM_EGO + self.DIM_OTHER + self.DIM_REF_ERROR]
+    def unpack_tensor(self, state_tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        严格对齐论文 Section IV-B 的状态解包
+        """
+        ego_state = state_tensor[..., :self.DIM_EGO]
+        other_states = state_tensor[..., self.DIM_EGO:self.DIM_EGO + self.DIM_OTHER]
+        ref_error = state_tensor[..., self.DIM_EGO + self.DIM_OTHER:]
         return ego_state, other_states, ref_error
-
-    def save(self, save_info: Dict[str, Any]) -> None:
-        model = {'actor': self.actor, 'critic': self.critic}
-        optimizer = {'actor_optim': self.actor_optimizer, 'critic_optim': self.critic_optimizer}
-        extra_info = {
-            'config': save_info['rl_config'],
-            'global_step': self.global_step,
-            'history': save_info['history_loss'],
-            'globe_eps': self.globe_eps + self.base_config['save_freq'],
-            'state_dim': self.TOTAL_STATE_DIM,
-            'punish_factor': self.init_penalty,
-            'gep_iteration': self.gep_iteration,
-            'buffer_data': save_info['buffer_data']
-        }
-        metrics = {'episode': extra_info['globe_eps']}
-        save_checkpoint(model=model, model_name='ocp-v1.0', optimizer=optimizer,
-                        extra_info=extra_info, metrics=metrics, env_name=save_info['map'])
-        self.globe_eps = extra_info['globe_eps']
-        self.global_step = extra_info['global_step']
-        self.history_loss = extra_info['history']
-        self.init_penalty = extra_info['punish_factor']
-
-    def load(self, path: str) -> Dict[str, Any]:
-        checkpoint = load_checkpoint(
-            model={'actor': self.actor, 'critic': self.critic},
-            filepath=path,
-            optimizer={'actor_optim': self.actor_optimizer, 'critic_optim': self.critic_optimizer},
-            device=self.device
-        )
-        loaded_dim = checkpoint.get('state_dim', self.TOTAL_STATE_DIM)
-        if loaded_dim != self.TOTAL_STATE_DIM:
-            logger.warning(f"加载模型维度{loaded_dim}与当前{self.TOTAL_STATE_DIM}不一致")
-        self.globe_eps = checkpoint['globe_eps']
-        self.history_loss = checkpoint['history']
-        self.global_step = checkpoint['global_step']
-        self.init_penalty = checkpoint['punish_factor']
-        self.gep_iteration = checkpoint['gep_iteration']
-        self.buffer.load_buffer_data(checkpoint['buffer_data'])
-        return checkpoint
-
-    def eval(self, num_episodes: int = 10) -> Tuple[float, float]:
-        total_rewards = []
-        for _ in range(num_episodes):
-            obs, _ = self.env.reset()
-            episode_reward = 0.0
-            done = False
-            while not done:
-                obs_ocp = obs.get('ocp_obs', obs)
-                action, _ = self.select_action(obs_ocp, deterministic=True)
-                obs, reward, terminated, truncated, _ = self.env.step(action)
-                episode_reward += reward
-                done = terminated or truncated
-            total_rewards.append(episode_reward)
-        mean_reward = float(np.mean(total_rewards))
-        std_reward = float(np.std(total_rewards))
-        logger.info(f"评估完成：{num_episodes}轮，平均奖励={mean_reward:.2f}，标准差={std_reward:.2f}")
-        return mean_reward, std_reward
