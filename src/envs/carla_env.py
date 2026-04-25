@@ -23,9 +23,10 @@ from src.envs.env_model.sumo_integration import SumoIntegration
 from src.envs.env_model.debug_visualizer import DebugVisualizer
 from src.envs.env_model.reward_calculator import RewardCalculator
 from src.envs.env_model.termination_checker import TerminationChecker
+import traceback
+
 
 logger = get_logger(name='carla_env')
-
 class CarlaEnv(gym.Env):
     """
     CARLA 环境封装，兼容 Gymnasium 0.28+。
@@ -373,35 +374,17 @@ class CarlaEnv(gym.Env):
         info.update(reward)
         # 6. 调试可视化（可选）→ 委托 DebugVisualizer
         if self._ocp_debug:
-            self.debug_visualizer.debug_ocp(obs['ocp_obs'],obs['s_ref_raw'],obs['s_road_raw'],self.step_count,self.carla_cfg["fixed_delta_seconds"])
+            self.debug_visualizer.debug_ocp(obs['ocp_obs'],
+                                            obs['s_ref_raw'],
+                                            obs['s_road_raw'],
+                                            self.step_count,
+                                            self.carla_cfg["fixed_delta_seconds"],
+                                            self.agent.predict_traj)
+
             self.last_ref_idx ,self.prev_spectator_transform= self.debug_visualizer.update_spectator(self.ref_path_xy_raw,self.last_ref_idx,self.prev_spectator_transform)
-            
-            # 【新增】可视化 OCP 预测轨迹
-            if self.agent is not None:
-                try:
-                    # 构造输入张量 (CPU 即可，仅用于可视化)
-                    state_tensor = torch.from_numpy(obs['ocp_obs']).unsqueeze(0).to(torch.device('cpu'))
-                    ref_tensor = torch.from_numpy(self.ref_path_xy).unsqueeze(0).to(torch.device('cpu'))
-                    road_tensor = torch.from_numpy(obs['s_road']).unsqueeze(0).to(torch.device('cpu')) if obs.get('s_road') is not None else None
-                    
-                    # 获取预测轨迹 states_traj: [B, horizon, TOTAL_DIM]
-                    _, _, states_traj = self.agent._forward_horizon(state_tensor, ref_tensor, road_tensor)
-                    traj_xy = states_traj[0, :, :2].cpu().numpy()  # [horizon, 2] 自车坐标系 xy
-                    
-                    # 转换至世界坐标系
-                    ego_transform = self.vehicle_manager.ego_vehicle.get_transform()
-                    world_points = []
-                    for x, y in traj_xy:
-                        wx, wy = ego_to_world_coordinate(float(x), float(y), ego_transform)
-                        world_points.append(carla.Location(wx, wy, ego_transform.location.z))
-                    
-                    if len(world_points) > 1:
-                        draw_lines_between_points(self.world, world_points, display_time=self.carla_cfg["fixed_delta_seconds"], color=carla.Color(0, 255, 0), thickness=0.2)
-                except Exception as e:
-                    logger.debug(f"OCP 轨迹可视化失败: {e}")
                     
         # 仿真推进一步，解决debug闪烁问题
-        self.world.tick()
+        # self.world.tick()
         return obs, reward['total_reward'], terminated, truncated, info
 
     def pause_simulation(self):

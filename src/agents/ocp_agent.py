@@ -105,6 +105,9 @@ class OcpAgent(BaseAgent):
         # 参考速度固定为5m/s（18km/h）
         self.ref_vlon = self.env.ego_ref_speed
 
+        # 预测轨迹
+        self.predict_traj = None
+
     def _calc_ref_error_from_state(self, ego_state: torch.Tensor, ref_path_tensor: torch.Tensor) -> torch.Tensor:
         """
         严格对齐论文 Section IV-B1 的参考误差计算（统一使用自车坐标系）
@@ -347,6 +350,8 @@ class OcpAgent(BaseAgent):
             self.init_penalty = min(self.init_penalty * self.amplifier_c, self.max_penalty)
             self.gep_iteration += 1
             logger.info(f"[GEP] 惩罚因子更新: {old_penalty:.4f} → {self.init_penalty:.4f}")
+
+        self.predict_traj = states_traj.cpu().detach().numpy()
 
         return {
             "actor_loss": actor_loss.item(),

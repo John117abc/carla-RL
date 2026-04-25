@@ -123,7 +123,7 @@ def load_checkpoint(model, filepath, optimizer=None, device=None):
 
     # 设置设备映射
     map_location = device if device is not None else lambda storage, loc: storage
-    checkpoint = torch.load(filepath, map_location=map_location)
+    checkpoint = torch.load(filepath, map_location=map_location,weights_only=False)
 
     # 加载模型
     saved_model_state = checkpoint['model_state_dict']

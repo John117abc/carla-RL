@@ -1,7 +1,7 @@
 import numpy as np
 import carla
-
-from src.carla_utils import draw_points,draw_text_at_location, ego_to_world_coordinate, batch_world_to_ego
+import traceback
+from src.carla_utils import draw_points,draw_text_at_location, ego_to_world_coordinate, draw_predicted_trajectory
 from src.utils import get_logger, unpack_ocp_numpy
 
 logger = get_logger(name='debug_visualizer')
@@ -11,7 +11,7 @@ class DebugVisualizer:
         self.vehicle_manager = vehicle_manager
         self.config = config
 
-    def debug_ocp(self,ocp_obs, s_ref_raw, s_road,step_count,fixed_delta_seconds):
+    def debug_ocp(self,ocp_obs, s_ref_raw, s_road,step_count,fixed_delta_seconds,predict_traj):
         ocp_obs_np = np.array(ocp_obs, dtype=np.float32).flatten().reshape([1, 1, -1])
         ego_state, other_states, ref_error = unpack_ocp_numpy(ocp_obs_np, self.config['ocp']['num_points'],
                                                               self.config['ocp']['others'])
@@ -83,6 +83,29 @@ class DebugVisualizer:
             display_time=SYNC_STEP,
             color=carla.Color(0, 0, 255)
         )
+
+        # 绘制预测点
+        # 【新增】可视化 OCP 预测轨迹
+        if predict_traj is not None:
+            try:
+                traj_xy = predict_traj[0, :, :2]  # [horizon, 2] 自车坐标系 xy
+
+                # 转换至世界坐标系
+                ego_transform = self.vehicle_manager.ego_vehicle.get_transform()
+                world_points = []
+                for x, y in traj_xy:
+                    wx, wy = ego_to_world_coordinate(float(x), float(y), ego_transform)
+                    world_points.append(carla.Location(wx, wy, ego_transform.location.z))
+
+                if len(world_points) > 1:
+                    draw_predicted_trajectory(self.world,world_points,0.1,carla.Color(255, 255, 0),0.1)
+            except Exception as e:
+                logger.error(f"OCP 轨迹可视化失败: {e}")
+                traceback.print_exc()
+
+
+
+
 
     def update_spectator(self,ref_path,last_ref_idx,prev_spectator_transform):
         """
