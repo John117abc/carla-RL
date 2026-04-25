@@ -364,14 +364,21 @@ class CarlaEnv(gym.Env):
         # 3. 获取观测 → 委托 ObservationProcessor
         input_params = {'path_locations':self.path_locations,'ego_ref_speed':self.ego_ref_speed,'ref_offset':self.carla_cfg['world']['ref_offset']}
         obs = self.observation_processor.get_observation(self.is_eval,input_params)
+        
+        # 【加固】确保 ocp_obs 为连续一维数组，防止维度异常导致训练崩溃
+        if 'ocp_obs' in obs and obs['ocp_obs'] is not None:
+            obs['ocp_obs'] = np.asarray(obs['ocp_obs'], dtype=np.float32).flatten()
+            
         # 4. 计算奖励 → 委托 RewardCalculator
         lane_inv = self.sensor_manager.lane_invasion_sensor.get_count()
         collision = self.sensor_manager.collision_sensor.get_intensity()
         obstacle = self.sensor_manager.obstacle_sensor.is_obstacle_ahead(self.env_cfg["termination"]["obstacle_threshold"])
         reward = self.reward_calculator.compute_reward(lane_inv,collision,obstacle)
+        
         # 5. 检查终止 → 委托 TerminationChecker
         terminated, truncated, info = self.termination_checker.check_termination(collision,obstacle,self.step_count)
         info.update(reward)
+        
         # 6. 调试可视化（可选）→ 委托 DebugVisualizer
         if self._ocp_debug:
             self.debug_visualizer.debug_ocp(obs['ocp_obs'],
@@ -385,6 +392,13 @@ class CarlaEnv(gym.Env):
                     
         # 仿真推进一步，解决debug闪烁问题
         self.world.tick()
+        
+        # 【加固】防御性处理 road_state，避免 None 导致后续 buffer 写入报错
+        if 's_road' in obs and obs['s_road'] is not None:
+            info['road_state'] = np.asarray(obs['s_road'], dtype=np.float32).flatten()
+        else:
+            info['road_state'] = np.zeros(self._get_ocp_dim(), dtype=np.float32)
+            
         return obs, reward['total_reward'], terminated, truncated, info
 
     def pause_simulation(self):
@@ -423,6 +437,11 @@ class CarlaEnv(gym.Env):
         # 6. 获取初始观测 → 委托 ObservationProcessor
         input_params = {'path_locations':self.path_locations,'ego_ref_speed':self.ego_ref_speed,'ref_offset':self.carla_cfg['world']['ref_offset']}
         obs = self.observation_processor.get_observation(self._is_eval,input_params)
+        
+        # 【加固】确保初始 ocp_obs 维度正确
+        if 'ocp_obs' in obs and obs['ocp_obs'] is not None:
+            obs['ocp_obs'] = np.asarray(obs['ocp_obs'], dtype=np.float32).flatten()
+            
         # 【修复】传递原始 carla.Location 列表，供训练脚本在每个时间步动态转换到当前自车坐标系
         obs['ref_path_locations'] = self.path_locations
         self.step_count = 0
