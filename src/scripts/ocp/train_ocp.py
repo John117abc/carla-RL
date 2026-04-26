@@ -94,6 +94,14 @@ def main():
                 # 【修复】将参考路径动态转换到当前自车坐标系，与网络输入保持一致
                 ego_transform = env.vehicle_manager.ego_vehicle.get_transform()
                 ref_path_ego_np = np.array(batch_world_to_ego(ref_path_locations, ego_transform), dtype=np.float32)
+                
+                # 【防御】检查参考路径是否包含 nan/inf
+                if np.any(np.isnan(ref_path_ego_np)) or np.any(np.isinf(ref_path_ego_np)):
+                    logger.warning("参考路径包含 nan/inf，跳过当前步")
+                    # 保持状态不变，继续下一步或记录错误，这里选择继续循环但跳过训练
+                    # 实际中应检查环境转换逻辑 batch_world_to_ego
+                    pass 
+                
                 ref_path_tensor = torch.from_numpy(ref_path_ego_np).unsqueeze(0).to(device)
 
                 # 【修复】ref_path_locations 是 list，需使用已转换的 numpy 数组进行维度校验

@@ -211,12 +211,15 @@ class OcpAgent(BaseAgent):
             lat_err_t = next_ref_error[..., 0].squeeze(1)
             head_err_t = next_ref_error[..., 1].squeeze(1)
             speed_err_t = next_ref_error[..., 2].squeeze(1)
-            err_cost = self.q_lat * (lat_err_t ** 2) + self.q_head * (head_err_t ** 2) + self.q_speed * (
-                        speed_err_t ** 2)
+            # 【防御】限制误差范围，防止梯度爆炸
+            lat_err_t = torch.clamp(lat_err_t, -10.0, 10.0)
+            head_err_t = torch.clamp(head_err_t, -3.14, 3.14)
+            speed_err_t = torch.clamp(speed_err_t, -10.0, 10.0)
+            err_cost = self.q_lat * (lat_err_t ** 2) + self.q_head * (head_err_t ** 2) + self.q_speed * (speed_err_t ** 2)
 
             r_weights = torch.tensor([0.005, 0.1], device=self.device).float()
             control_cost = torch.sum((phy_action ** 2) * r_weights, dim=1)
-            step_l = err_cost + control_cost
+            step_l = torch.clamp(err_cost + control_cost, max=100.0)
 
             # 2. 补全约束违反量 step_phi (严格对齐论文 Eq.9: 惩罚项需平方)
             # 在自车坐标系中，ego_xy 恒为 [0,0]
@@ -227,19 +230,21 @@ class OcpAgent(BaseAgent):
             if self.DIM_OTHER > 0:
                 other_xy = next_other[..., :2]  # [B, 1, 8, 2]
                 dist_veh_sq = torch.sum((ego_xy.unsqueeze(2) - other_xy) ** 2, dim=-1)
-                veh_violation = torch.maximum(safe_veh_sq - dist_veh_sq, torch.zeros_like(dist_veh_sq))
-                phi_violation += (veh_violation ** 2).sum(dim=[1, 2])  # 【修复】必须平方
+                # 【防御】截断违反量，防止碰撞时惩罚项爆炸
+                veh_violation = torch.clamp(torch.maximum(safe_veh_sq - dist_veh_sq, torch.zeros_like(dist_veh_sq)), max=10.0)
+                phi_violation += (veh_violation ** 2).sum(dim=[1, 2])
 
             # 道路边缘安全距离约束 (road_left/right 已在自车坐标系)
             dist_left_sq = torch.sum((ego_xy.unsqueeze(2) - road_left) ** 2, dim=-1)
             dist_right_sq = torch.sum((ego_xy.unsqueeze(2) - road_right) ** 2, dim=-1)
             min_left_sq, _ = torch.min(dist_left_sq, dim=-1)
             min_right_sq, _ = torch.min(dist_right_sq, dim=-1)
-            left_violation = torch.maximum(safe_road_sq - min_left_sq, torch.zeros_like(min_left_sq)).squeeze(1)
-            right_violation = torch.maximum(safe_road_sq - min_right_sq, torch.zeros_like(min_right_sq)).squeeze(1)
-            phi_violation += (left_violation ** 2 + right_violation ** 2)  # 【修复】必须平方
+            left_violation = torch.clamp(torch.maximum(safe_road_sq - min_left_sq, torch.zeros_like(min_left_sq)), max=10.0).squeeze(1)
+            right_violation = torch.clamp(torch.maximum(safe_road_sq - min_right_sq, torch.zeros_like(min_right_sq)), max=10.0).squeeze(1)
+            phi_violation += (left_violation ** 2 + right_violation ** 2)
 
-            step_phi = phi_violation
+            # 【防御】截断总惩罚项
+            step_phi = torch.clamp(phi_violation, max=50.0)
             step_l_list.append(step_l)
             step_phi_list.append(step_phi)
 
@@ -264,6 +269,11 @@ class OcpAgent(BaseAgent):
                 obs_np = obs.flatten()
             else:
                 obs_np = np.array(obs, dtype=np.float32).flatten()
+
+            # 【防御】检查输入是否包含 nan/inf，防止污染网络
+            if np.any(np.isnan(obs_np)) or np.any(np.isinf(obs_np)):
+                logger.warning("输入观测包含 nan/inf，返回安全零动作")
+                return np.array([0.0, 0.0], dtype=np.float32), np.zeros(1, dtype=np.float32)
 
             # 【加固】严格校验维度，防止静默错位导致策略崩溃
             if obs_np.shape[0] != self.TOTAL_STATE_DIM:
@@ -315,6 +325,10 @@ class OcpAgent(BaseAgent):
         for item in batch_data:
             state, _, _, _, _, info = item
             state_np = np.array(state, dtype=np.float32).flatten()
+            # 【防御】检查状态是否包含 nan/inf
+            if np.any(np.isnan(state_np)) or np.any(np.isinf(state_np)):
+                logger.warning("Buffer 状态包含 nan/inf，跳过该样本")
+                continue
             # 【加固】严格校验维度
             if state_np.shape[0] != self.TOTAL_STATE_DIM:
                 raise ValueError(
@@ -322,7 +336,21 @@ class OcpAgent(BaseAgent):
                     f"请检查环境 ocp_obs 输出格式。"
                 )
             states_list.append(state_np)
-            road_list.append(info['road_state'])
+            
+            road_np = info['road_state']
+            if road_np is not None and (np.any(np.isnan(road_np)) or np.any(np.isinf(road_np))):
+                logger.warning("Buffer 道路状态包含 nan/inf，跳过该样本")
+                continue
+            road_list.append(road_np)
+
+        if len(states_list) == 0:
+            return {
+                "actor_loss": 0.0,
+                "critic_loss": 0.0,
+                "penalty": self.init_penalty,
+                "gep_iteration": self.gep_iteration,
+                "actor_updated": False
+            }
 
         state_tensor = torch.from_numpy(np.stack(states_list)).to(self.device).float()
         road_tensor = torch.from_numpy(np.stack(road_list)).to(self.device).float()
@@ -331,7 +359,8 @@ class OcpAgent(BaseAgent):
         with torch.no_grad():
             step_l, step_phi, states_traj = self._forward_horizon(state_tensor, ref_path_tensor, road_tensor)
             # 有限时域累计成本 (无折扣 γ=1，对齐论文 OCP)
-            targets = torch.flip(torch.cumsum(torch.flip(step_l, [1]), dim=1), [1])
+            # 【防御】截断目标值，防止梯度爆炸
+            targets = torch.clamp(torch.flip(torch.cumsum(torch.flip(step_l, [1]), dim=1), [1]), max=1000.0)
 
         all_states = torch.cat([state_tensor.unsqueeze(1), states_traj], dim=1)
         critic_inputs = all_states[:, :-1].reshape(-1, self.TOTAL_STATE_DIM)
@@ -394,8 +423,14 @@ class OcpAgent(BaseAgent):
             raise ValueError(f"输入张量必须为 [B,N,{self.TOTAL_STATE_DIM}]，当前={data.shape}")
         B, N = data.shape[0], data.shape[1]
         ego_state = data[:, :, 0:self.DIM_EGO]
-        other_raw = data[:, :, self.DIM_EGO:self.DIM_EGO + self.DIM_OTHER]
-        other_states = other_raw.view(B, N, self.env.env_cfg['ocp']['others'], 4)
+        
+        # 【修复】处理 others=0 时的维度对齐问题
+        if self.DIM_OTHER > 0:
+            other_raw = data[:, :, self.DIM_EGO:self.DIM_EGO + self.DIM_OTHER]
+            other_states = other_raw.view(B, N, self.env.env_cfg['ocp']['others'], 4)
+        else:
+            other_states = torch.empty(B, N, 0, 4, device=data.device)
+            
         ref_error = data[:, :, self.DIM_EGO + self.DIM_OTHER:self.DIM_EGO + self.DIM_OTHER + self.DIM_REF_ERROR]
         return ego_state, other_states, ref_error
 
