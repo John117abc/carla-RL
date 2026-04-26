@@ -8,11 +8,11 @@ rl:
   num_episodes: 5000    # 训练回合数
   total_timesteps: 1_000_000
   log_interval: 100               # 每多少步记录一次日志
-  save_freq: 5            # 每多少回合保存一次模型
+  save_freq: 15            # 每多少回合保存一次模型
   continue_a2c: False    # 是否继续训练，如果需要继续训练，则需要填写模型地址
   model_path_a2c: 'checkpoints/20260131/a2c-v1.0_Town06_Opt_020547_episode=4000.pth'
   continue_ocp: True    # 是否继续训练，如果需要继续训练，则需要填写模型地址
-  model_path_ocp: 'checkpoints/20260424/ocp-v1.0_Town06_Opt_214656_episode=85.pth'
+  model_path_ocp: 'checkpoints/20260426/ocp-v1.0_Town06_Opt_083255_episode=360.pth'
   num_eps_eval: 10    # 评估步数
 
   A2C:
@@ -43,5 +43,6 @@ rl:
     batch_size: 512  # 放大batch_size，提升训练稳定性
     horizon: 25  # 和论文完全一致，25步=2.5s
     dt: 0.1  # 和Carla仿真步长对齐
+    action_noise: 0.1
 
 

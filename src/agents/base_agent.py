@@ -7,7 +7,7 @@ import gymnasium as gym
 import torch
 
 
-class BaseAgent(ABC):
+class BaseAgent():
     """
     抽象基类，定义强化学习智能体的标准接口。
 

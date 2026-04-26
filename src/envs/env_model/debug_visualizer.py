@@ -98,7 +98,7 @@ class DebugVisualizer:
                     world_points.append(carla.Location(wx, wy, ego_transform.location.z))
 
                 if len(world_points) > 1:
-                    draw_predicted_trajectory(self.world,world_points,0.1,carla.Color(255, 255, 0),0.1)
+                    draw_predicted_trajectory(self.world,world_points,0.1,carla.Color(255, 255, 0),0.2)
             except Exception as e:
                 logger.error(f"OCP 轨迹可视化失败: {e}")
                 traceback.print_exc()
