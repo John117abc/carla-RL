@@ -108,6 +108,10 @@ class OcpAgent(BaseAgent):
         # 预测轨迹
         self.predict_traj = None
 
+        # 校验配置一致性
+        if self.DIM_OTHER < 0:
+            raise ValueError("env_cfg['ocp']['others'] 必须为非负整数，当前值导致 DIM_OTHER < 0")
+
     def _calc_ref_error_from_state(self, ego_state: torch.Tensor, ref_path_tensor: torch.Tensor) -> torch.Tensor:
         """
         严格对齐论文 Section IV-B1 的参考误差计算（统一使用自车坐标系）
@@ -220,10 +224,11 @@ class OcpAgent(BaseAgent):
             phi_violation = torch.zeros(B, device=self.device)
 
             # 周车安全距离约束 (other_states 已在自车坐标系)
-            other_xy = next_other[..., :2]  # [B, 1, 8, 2]
-            dist_veh_sq = torch.sum((ego_xy.unsqueeze(2) - other_xy) ** 2, dim=-1)
-            veh_violation = torch.maximum(safe_veh_sq - dist_veh_sq, torch.zeros_like(dist_veh_sq))
-            phi_violation += (veh_violation ** 2).sum(dim=[1, 2])  # 【修复】必须平方
+            if self.DIM_OTHER > 0:
+                other_xy = next_other[..., :2]  # [B, 1, 8, 2]
+                dist_veh_sq = torch.sum((ego_xy.unsqueeze(2) - other_xy) ** 2, dim=-1)
+                veh_violation = torch.maximum(safe_veh_sq - dist_veh_sq, torch.zeros_like(dist_veh_sq))
+                phi_violation += (veh_violation ** 2).sum(dim=[1, 2])  # 【修复】必须平方
 
             # 道路边缘安全距离约束 (road_left/right 已在自车坐标系)
             dist_left_sq = torch.sum((ego_xy.unsqueeze(2) - road_left) ** 2, dim=-1)
@@ -260,12 +265,12 @@ class OcpAgent(BaseAgent):
             else:
                 obs_np = np.array(obs, dtype=np.float32).flatten()
 
+            # 【加固】严格校验维度，防止静默错位导致策略崩溃
             if obs_np.shape[0] != self.TOTAL_STATE_DIM:
-                logger.warning(f"观测维度异常: {obs_np.shape[0]} (期望{self.TOTAL_STATE_DIM})，自动修正")
-                obs_121 = np.zeros(self.TOTAL_STATE_DIM, dtype=np.float32)
-                valid_len = min(len(obs_np), self.TOTAL_STATE_DIM)
-                obs_121[:valid_len] = obs_np[:valid_len]
-                obs_np = obs_121
+                raise ValueError(
+                    f"观测维度异常: {obs_np.shape[0]} (期望{self.TOTAL_STATE_DIM})。"
+                    f"请检查环境 ocp_obs 是否严格遵循论文格式：[ego(6) + others*4 + ref_err(3)] 且为自车相对坐标。"
+                )
 
             if deterministic:
                 obs_tensor = torch.from_numpy(obs_np).to(self.device).float()
@@ -310,11 +315,12 @@ class OcpAgent(BaseAgent):
         for item in batch_data:
             state, _, _, _, _, info = item
             state_np = np.array(state, dtype=np.float32).flatten()
+            # 【加固】严格校验维度
             if state_np.shape[0] != self.TOTAL_STATE_DIM:
-                state_121 = np.zeros(self.TOTAL_STATE_DIM, dtype=np.float32)
-                valid_len = min(len(state_np), self.TOTAL_STATE_DIM)
-                state_121[:valid_len] = state_np[:valid_len]
-                state_np = state_121
+                raise ValueError(
+                    f"Buffer 状态维度异常: {state_np.shape[0]} (期望{self.TOTAL_STATE_DIM})。"
+                    f"请检查环境 ocp_obs 输出格式。"
+                )
             states_list.append(state_np)
             road_list.append(info['road_state'])
 
@@ -369,9 +375,15 @@ class OcpAgent(BaseAgent):
         """
         注：论文 Table II 指出 ω_pred^j 应随车辆类型与相对路口位置查表变化。
         当前实现为恒速模型，如需严格对齐可替换为查表逻辑。
+        输入格式必须为 [B, 1, N_others, 4]，其中 4 维为 [x_rel, y_rel, vx_rel, vy_rel] (自车坐标系)
         """
         if other_states.dim() != 4 or other_states.shape[3] != 4:
-            raise ValueError(f"周车状态维度必须为 [B,1,8,4]，当前={other_states.shape}")
+            raise ValueError(f"周车状态维度必须为 [B,1,N_others,4]，当前={other_states.shape}")
+        
+        # 防御性处理：若配置 others=0，直接返回全零张量保持形状一致
+        if other_states.shape[2] == 0:
+            return torch.zeros_like(other_states)
+
         x, y, vx, vy = other_states[..., 0], other_states[..., 1], other_states[..., 2], other_states[..., 3]
         x_next = x + dt * vx
         y_next = y + dt * vy

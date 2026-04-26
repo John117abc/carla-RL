@@ -96,6 +96,10 @@ def main():
                 ref_path_ego_np = np.array(batch_world_to_ego(ref_path_locations, ego_transform), dtype=np.float32)
                 ref_path_tensor = torch.from_numpy(ref_path_ego_np).unsqueeze(0).to(device)
 
+                # 【加固】校验参考路径维度，防止广播错误
+                if ref_path_tensor.shape != (1, ref_path_locations.shape[0], 2):
+                    raise ValueError(f"参考路径维度异常: {ref_path_tensor.shape} (期望 [1, N, 2])")
+
                 action, _ = agent.select_action(state,train_config['continue_ocp'])
                 next_obs, reward, _, _, info = env.step(action)
                 next_state = next_obs['ocp_obs']
@@ -103,6 +107,10 @@ def main():
                 road_state_np = obs['s_road']
                 road_state_tensor = torch.from_numpy(road_state_np).unsqueeze(0).to(
                     device) if road_state_np is not None else None
+
+                # 【加固】校验道路状态维度
+                if road_state_tensor is not None and road_state_tensor.shape[1] != agent.DIM_ROAD:
+                    raise ValueError(f"道路状态维度异常: {road_state_tensor.shape[1]} (期望{agent.DIM_ROAD})")
 
                 done = info['TimeLimit.truncated']
                 info['road_state'] = road_state_np
