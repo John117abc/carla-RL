@@ -96,8 +96,8 @@ def main():
                 ref_path_ego_np = np.array(batch_world_to_ego(ref_path_locations, ego_transform), dtype=np.float32)
                 ref_path_tensor = torch.from_numpy(ref_path_ego_np).unsqueeze(0).to(device)
 
-                # 【加固】校验参考路径维度，防止广播错误
-                if ref_path_tensor.shape != (1, ref_path_locations.shape[0], 2):
+                # 【修复】ref_path_locations 是 list，需使用已转换的 numpy 数组进行维度校验
+                if ref_path_tensor.shape != (1, ref_path_ego_np.shape[0], 2):
                     raise ValueError(f"参考路径维度异常: {ref_path_tensor.shape} (期望 [1, N, 2])")
 
                 action, _ = agent.select_action(state,train_config['continue_ocp'])
