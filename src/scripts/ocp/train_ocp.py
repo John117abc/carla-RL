@@ -152,14 +152,12 @@ def main():
                                 )
                         except Exception as diag_e:
                             logger.warning(f"ref_error诊断失败: {diag_e}")
-                        # ========== 新增实际转向对比日志 ==========
+                        # ========== 新增实际转向对比日志（仅对比 action 与 control.steer） ==========
                         try:
                             ego_vehicle = env.vehicle_manager.ego_vehicle
                             control = ego_vehicle.get_control()
-                            avg_wheel_angle = ego_vehicle.get_wheel_steer_angle()
                             logger.info(
-                                f"    物理动作转向: {action[1]:.4f}, 实际施加控制转向: {control.steer:.4f}, "
-                                f"实际车轮转角(平均): {avg_wheel_angle:.4f}"
+                                f"    物理动作转向: {action[1]:.4f}, 实际施加控制转向: {control.steer:.4f}"
                             )
                         except Exception as steer_e:
                             logger.warning(f"实际转向读取失败: {steer_e}")
