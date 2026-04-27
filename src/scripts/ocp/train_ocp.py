@@ -136,6 +136,24 @@ def main():
                 if agent.global_step % train_config["log_interval"] == 0:
                     if 'speed' in info:
                         logger.info(f"    速度: {info['speed']:.2f} km/h,动作：{action}")
+                        # ========== 新增诊断日志 ==========
+                        try:
+                            d_e = agent.DIM_EGO          # 自车维度
+                            d_o = agent.DIM_OTHER        # 周车维度
+                            d_r = agent.DIM_REF_ERROR    # 误差维度
+                            # 确保状态足够长
+                            if state.shape[0] >= d_e + d_o + d_r:
+                                delta_p = float(state[d_e + d_o])
+                                delta_phi = float(state[d_e + d_o + 1])
+                                delta_v = float(state[d_e + d_o + 2])
+                                steer_dir = "右" if action[1] > 0 else ("左" if action[1] < 0 else "0")
+                                logger.info(
+                                    f"    ref_error: δ_p={delta_p:.3f} m, δ_φ={delta_phi:.3f} rad, "
+                                    f"δ_v={delta_v:.3f} m/s, 转向:{steer_dir}({action[1]:.3f} rad)"
+                                )
+                        except Exception as diag_e:
+                            logger.warning(f"ref_error诊断失败: {diag_e}")
+                        # ========== 诊断日志结束 ==========
 
                     if loss is not None:
                         logger.info(
