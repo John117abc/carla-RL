@@ -143,7 +143,7 @@ class OcpAgent(BaseAgent):
         # 在自车坐标系中，ref_xy 即为相对位移
         dx = ref_xy[..., 0]
         dy = ref_xy[..., 1]
-        cross = dx * torch.sin(ref_phi) - dy * torch.cos(ref_phi)
+        cross = dy * torch.cos(ref_phi) - dx * torch.sin(ref_phi)
         delta_p = min_dist * torch.sign(cross)
 
         # 航向误差δ_φ（归一化到[-π, π]）

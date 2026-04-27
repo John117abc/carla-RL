@@ -418,8 +418,8 @@ def calc_ref_error(ego_state: np.ndarray, ref_state: np.ndarray) -> np.ndarray:
     delta_p = math.hypot(dx, dy)
 
     # 计算方向符号：自车在参考路径左侧为正，右侧为负
-    # 叉积判断：dx*sin(φ_ref) - dy*cos(φ_ref)
-    cross = dx * math.sin(ref_state[4]) - dy * math.cos(ref_state[4])
+    # 叉积判断：dy*cos(φ_ref) - dx*sin(φ_ref)
+    cross = dy * math.cos(ref_state[4]) - dx * math.sin(ref_state[4])
     delta_p = delta_p * math.copysign(1.0, cross)
 
     # 2. 计算航向角误差 δ_φ
