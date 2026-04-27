@@ -82,7 +82,6 @@ def main():
             logger.info(f"\n开始第 {episode + 1} 轮测试...")
             # logger.info(f"初始观测类型: {type(state)}, 形状/结构: {get_obs_shape(state)}")
             # 在reset之后，获取规划好的参考路径，转换为tensor
-            # 在reset之后添加这段代码
             obs = env.reset()
             state = obs['ocp_obs']
             # 提取参考路径，转为tensor [1, N, 2]
@@ -153,7 +152,18 @@ def main():
                                 )
                         except Exception as diag_e:
                             logger.warning(f"ref_error诊断失败: {diag_e}")
-                        # ========== 诊断日志结束 ==========
+                        # ========== 新增实际转向对比日志 ==========
+                        try:
+                            ego_vehicle = env.vehicle_manager.ego_vehicle
+                            control = ego_vehicle.get_control()
+                            avg_wheel_angle = ego_vehicle.get_wheel_steer_angle()
+                            logger.info(
+                                f"    物理动作转向: {action[1]:.4f}, 实际施加控制转向: {control.steer:.4f}, "
+                                f"实际车轮转角(平均): {avg_wheel_angle:.4f}"
+                            )
+                        except Exception as steer_e:
+                            logger.warning(f"实际转向读取失败: {steer_e}")
+                        # ========== 实际转向对比日志结束 ==========
 
                     if loss is not None:
                         logger.info(
