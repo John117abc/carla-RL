@@ -161,6 +161,15 @@ def main():
                             )
                         except Exception as steer_e:
                             logger.warning(f"实际转向读取失败: {steer_e}")
+                        # ========== 新增加速度诊断日志 ==========
+                        try:
+                            ego_vehicle = env.vehicle_manager.ego_vehicle
+                            acc = ego_vehicle.get_acceleration()
+                            logger.info(
+                                f"    请求加速度: {action[0]:.4f}, 实际加速度 Vector3D: ({acc.x:.4f}, {acc.y:.4f}, {acc.z:.4f})"
+                            )
+                        except Exception as acc_e:
+                            logger.warning(f"实际加速度读取失败: {acc_e}")
                         # ========== 实际转向对比日志结束 ==========
 
                     if loss is not None:
