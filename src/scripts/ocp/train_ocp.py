@@ -120,7 +120,7 @@ def main():
                 if road_state_tensor is not None and road_state_tensor.shape[1] != agent.DIM_ROAD:
                     raise ValueError(f"道路状态维度异常: {road_state_tensor.shape[1]} (期望{agent.DIM_ROAD})")
 
-                done = info['TimeLimit.truncated']
+                done = info['TimeLimit.truncated'] or info['collision']
                 info['road_state'] = road_state_np
                 # 加入buffer时，同时存储road_state
                 agent.buffer.handle_new_experience((state, action, reward, road_state_np, done, info))
