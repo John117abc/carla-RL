@@ -108,7 +108,7 @@ def get_ocp_observation_ego_frame(
         ref_offset: int,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
-    获取OCP观测信息并转换为自车坐标系（修复了角度未转换的Bug）
+    获取OCP观测信息并转换为自车坐标系（修复了ref_error未转换的Bug）
     """
     # 1. 调用原函数获取世界坐标系下的观测数据
     network_state, s_road, s_ref_raw, s_ref_error = get_ocp_observation(
@@ -151,13 +151,6 @@ def get_ocp_observation_ego_frame(
             delta_yaw = s_other_ego[i, 2] - ego_yaw_rad
             s_other_ego[i, 2] = math.atan2(math.sin(delta_yaw), math.cos(delta_yaw))
 
-    # 重新组合network_state
-    network_state_ego = np.concatenate([
-        s_ego_ego,
-        s_other_ego.flatten(),
-        s_ref_error_original
-    ], axis=0)
-
     # --------------------------
     # 转换s_road中的道路边缘点 (仅位置，无角度，原逻辑基本正确)
     # --------------------------
@@ -195,7 +188,17 @@ def get_ocp_observation_ego_frame(
         ref_delta_yaw = s_ref_ego[4] - ego_yaw_rad
         s_ref_ego[4] = math.atan2(math.sin(ref_delta_yaw), math.cos(ref_delta_yaw))
 
-    return network_state_ego, s_road_ego, s_ref_ego, s_ref_error, s_road, s_ref_raw
+    # 【关键修复】在自车坐标系下重新计算跟踪误差，确保符号与网络内部计算一致
+    s_ref_error_ego = calc_ref_error(s_ego_ego, s_ref_ego)
+
+    # 重新组合network_state（使用自车坐标系下的ref_error）
+    network_state_ego = np.concatenate([
+        s_ego_ego,
+        s_other_ego.flatten(),
+        s_ref_error_ego
+    ], axis=0)
+
+    return network_state_ego, s_road_ego, s_ref_ego, s_ref_error_ego, s_road, s_ref_raw
 
 def get_ocp_observation(
         ego_vehicle: carla.Vehicle,
