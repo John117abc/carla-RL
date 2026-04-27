@@ -78,8 +78,10 @@ class OcpAgent(BaseAgent):
         # 论文核心权重（严格对齐原文 Table III & Eq. 1）
         self.q_lat = 0.04  # 横向误差权重
         self.q_head = 0.1  # 航向误差权重
-        self.q_speed = 0.01  # 速度误差权重
-        self.R_matrix = np.diag([0.005, 0.1])  # 控制权重 [加速度, 转向角]
+        # 降低速度误差权重，避免高速时对策略造成过大压迫
+        self.q_speed = 0.005  # 速度误差权重（原 0.01）
+        # 提高转向控制权重，抑制大幅转向
+        self.R_matrix = np.diag([0.005, 0.4])  # 控制权重 [加速度, 转向角] (转向由0.1提高到0.4)
 
         # GEP算法超参数（严格对齐论文收敛逻辑）
         self.init_penalty = self.ocp_config['init_penalty']
@@ -217,7 +219,7 @@ class OcpAgent(BaseAgent):
             speed_err_t = torch.clamp(speed_err_t, -10.0, 10.0)
             err_cost = self.q_lat * (lat_err_t ** 2) + self.q_head * (head_err_t ** 2) + self.q_speed * (speed_err_t ** 2)
 
-            r_weights = torch.tensor([0.005, 0.1], device=self.device).float()
+            r_weights = torch.tensor(self.R_matrix.diagonal().copy(), device=self.device).float()
             control_cost = torch.sum((phy_action ** 2) * r_weights, dim=1)
             step_l = torch.clamp(err_cost + control_cost, max=100.0)
 
