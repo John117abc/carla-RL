@@ -166,6 +166,12 @@ class VehicleManager:
             # 强制禁止倒车，论文场景不需要
             reverse_flag = False
 
+            # 诊断日志（debug 级别，默认不输出，可通过设置 logger 级别开启）
+            logger.debug(
+                f"动作映射 - 输入 [a={a_phy:.4f}, δ={delta_phy:.4f}] -> "
+                f"油门={throttle_val:.4f}, 刹车={brake_val:.4f}, steer={steer_val:.4f}"
+            )
+
         else:
             throttle_val = 0.0
             brake_val = 0.0
@@ -260,4 +266,4 @@ class VehicleManager:
         #                 del synchronization._carla2sumo[carla_actor_id]
         #
         # except Exception as e:
-        #     logger.warning(f"清理 SUMO 车辆时发生异常: {e}")
+        #     logger.warning(f"清理 SUMO 车辆时发生异常: {e}")```
