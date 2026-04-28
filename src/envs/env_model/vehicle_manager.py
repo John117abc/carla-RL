@@ -18,6 +18,40 @@ class VehicleManager:
         self.ego_vehicle = None
         self.npc_vehicles = []
 
+    def _try_spawn_with_offset(self, vehicle_bp, base_transform, background_vehicles, occupancy_radius=2.5, max_offset=10.0):
+        """
+        在 base_transform 附近沿道路前进方向偏移尝试生成车辆。
+        返回 (vehicle, transform_used) 或 (None, None)。
+        """
+        offsets = [0.0]
+        d = 2.0
+        while d <= max_offset:
+            offsets.append(d)
+            offsets.append(-d)
+            d += 2.0
+
+        forward = base_transform.get_forward_vector()
+        for off in offsets:
+            loc_off = base_transform.location + forward * off
+            # 如果该位置不在道路上，尝试投影到道路，但不强制
+            transform_off = carla.Transform(loc_off, base_transform.rotation)
+
+            # 占用检查：只需要检查附近是否存在任何背景车辆（role_name != 'hero'）
+            occupied = False
+            for v in background_vehicles:
+                if v.get_location().distance(loc_off) < occupancy_radius:
+                    occupied = True
+                    break
+            if occupied:
+                continue
+
+            # 尝试生成
+            vehicle = self.world.try_spawn_actor(vehicle_bp, transform_off)
+            if vehicle is not None:
+                return vehicle, transform_off
+
+        return None, None
+
     def spawn_ego_vehicle(
             self,
             spawn_point_index: Optional[Union[int, List[carla.Location], Dict[str, float]]] = None,
@@ -84,22 +118,62 @@ class VehicleManager:
         else:
             raise TypeError(f"不支持的 spawn_point_index 类型: {type(spawn_point_index)}")
 
-        # 尝试生成车辆（最多重试20次）
+        # 提前获取背景车辆（排除 hero），以便高效地进行占用检查
+        all_actors = self.world.get_actors().filter('vehicle.*')
+        background_vehicles = [v for v in all_actors if v.attributes.get('role_name') != 'hero']
+
         max_attempts = 20
+        desired_transform = None  # 记录最近一次尝试的候选点，用于兜底传送
+
         for attempt in range(max_attempts):
             spawn_point = random.choice(candidate_points)
-            self.ego_vehicle = self.world.try_spawn_actor(vehicle_bp, spawn_point)
-            if self.ego_vehicle is not None:
-                break
-            time.sleep(5.0)
-            logger.info(f"出生点被占用，重试第 {attempt + 1} 次...")
+            desired_transform = spawn_point
 
-        if self.ego_vehicle is None:
-            msg = f"无法初始化自车，最后尝试位置：x={spawn_point.location.x:.2f}, y={spawn_point.location.y:.2f}"
+            # 【核心改进】在一个候选点周围沿道路方向偏移尝试生成
+            vehicle, used_transform = self._try_spawn_with_offset(
+                vehicle_bp, spawn_point, background_vehicles,
+                occupancy_radius=2.5, max_offset=10.0
+            )
+
+            if vehicle is not None:
+                self.ego_vehicle = vehicle
+                logger.info(
+                    f"主车已在偏移位置生成，偏移={used_transform.location.distance(spawn_point.location):.2f}m，"
+                    f"位置：x={used_transform.location.x:.2f}, y={used_transform.location.y:.2f}"
+                )
+                return self.ego_vehicle
+            else:
+                logger.info(f"出生点 {spawn_point.location} 及其周围偏移位置均被占用，尝试第 {attempt+1} 次")
+
+        # 所有重试均失败，启动兜底传送
+        logger.warning("所有出生点尝试均失败，将尝试从任意空闲点生成，并通过 teleport 传送到期望位置")
+        fallback_vehicle = None
+        fallback_spawn = None
+
+        # 寻找一个未被占用的空闲出生点
+        for sp in spawn_points:
+            occupied = any(v.get_location().distance(sp.location) < 2.5 for v in background_vehicles)
+            if not occupied:
+                fallback_vehicle = self.world.try_spawn_actor(vehicle_bp, sp)
+                if fallback_vehicle is not None:
+                    fallback_spawn = sp
+                    break
+
+        if fallback_vehicle is None:
+            msg = "无法在任何空闲出生点生成主车，背景车辆可能过于密集"
             logger.error(msg)
             raise RuntimeError(msg)
 
-        logger.info(f"主车已生成，位置：x={spawn_point.location.x:.2f}, y={spawn_point.location.y:.2f}")
+        # 选定目标传送位置
+        if desired_transform is None:
+            # 极端情况：如果连尝试都没执行，则把第一个候选点作为目标（一般不会）
+            desired_transform = candidate_points[0]
+        fallback_vehicle.set_transform(desired_transform, teleport=True)
+        self.ego_vehicle = fallback_vehicle
+
+        logger.info(
+            f"兜底传送成功，ego 从 {fallback_spawn.location} 传送到 {desired_transform.location}"
+        )
         return self.ego_vehicle
 
     def spawn_npcs(self,tm_port,sync_mode):
