@@ -111,7 +111,7 @@ class OcpAgent(BaseAgent):
         self.predict_traj = None
 
         # 惩罚因子放大阈值（仅当约束违反量超过该值时才放大）
-        self.penalty_growth_threshold = 0.01
+        self.penalty_growth_threshold = 0.001
 
         # 校验配置一致性
         if self.DIM_OTHER < 0:
