@@ -1,4 +1,5 @@
 import logging
+import time
 
 import carla
 import random
@@ -90,6 +91,7 @@ class VehicleManager:
             self.ego_vehicle = self.world.try_spawn_actor(vehicle_bp, spawn_point)
             if self.ego_vehicle is not None:
                 break
+            time.sleep(5.0)
             logger.info(f"出生点被占用，重试第 {attempt + 1} 次...")
 
         if self.ego_vehicle is None:
