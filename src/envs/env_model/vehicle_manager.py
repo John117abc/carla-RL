@@ -1,3 +1,5 @@
+import logging
+
 import carla
 import random
 import numpy as np
@@ -6,7 +8,7 @@ import gymnasium as gym
 from src.utils import get_logger
 from typing import Dict, Any, Tuple, Optional, Union, List
 
-logger = get_logger('vehicle_manager')
+logger = get_logger('vehicle_manager',level=logging.INFO)
 class VehicleManager:
     def __init__(self, world, client, config):
         self.world = world

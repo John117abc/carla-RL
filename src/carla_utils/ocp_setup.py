@@ -287,7 +287,7 @@ def get_other_observation(
         ego_vehicle: carla.Vehicle,
         other_vehicles: List[carla.Vehicle],
         max_num_vehicles: int = 8,
-        distance_threshold: float = 50.0
+        distance_threshold: float = 20.0
 ) -> np.ndarray:
     """
     获取论文定义的周车状态 (8×4维)
