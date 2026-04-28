@@ -12,7 +12,7 @@ rl:
   continue_a2c: False    # 是否继续训练，如果需要继续训练，则需要填写模型地址
   model_path_a2c: 'checkpoints/20260131/a2c-v1.0_Town06_Opt_020547_episode=4000.pth'
   continue_ocp: True    # 是否继续训练，如果需要继续训练，则需要填写模型地址
-  model_path_ocp: 'checkpoints/20260428/ocp-v1.0_Town06_Opt_100706_episode=15.pth'
+  model_path_ocp: 'checkpoints/20260428/ocp-v1.0_Town06_Opt_224655_episode=390.pth'
   num_eps_eval: 10    # 评估步数
 
   A2C:
@@ -36,7 +36,7 @@ rl:
     init_penalty: 1.0  # 初始惩罚因子调小，先学跟踪再学安全约束
     max_penalty: 100.0  # 放大最大惩罚因子，保证约束最终生效
     hidden_dim: 256
-    other_car_min_distance: 3.0
+    other_car_min_distance: 10.0
     road_min_distance: 1.0
     min_start_train: 1024  # 先收集10000步随机样本，再开始训练
     total_capacity: 500000  # 还原论文的5e5缓冲区大小
