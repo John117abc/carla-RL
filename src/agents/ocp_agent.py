@@ -234,7 +234,14 @@ class OcpAgent(BaseAgent):
             # 周车安全距离约束 (other_states 已在自车坐标系)
             if self.DIM_OTHER > 0:
                 other_xy = next_other[..., :2]  # [B, 1, 8, 2]
-                dist_veh_sq = torch.sum((ego_xy.unsqueeze(2) - other_xy) ** 2, dim=-1)
+                dist_veh_sq = torch.sum((ego_xy.unsqueeze(2) - other_xy) ** 2, dim=-1)  # [B, 1, 8]
+
+                # 【新增】过滤掉全零占位车辆（没有周车的 slot），避免产生虚假的安全违反
+                other_norm = torch.norm(other_xy, dim=-1)  # [B, 1, 8]
+                invalid_mask = other_norm < 1e-3  # 范数极小表示该 slot 为空
+                # 将无效车辆的平方距离设为极大值，使 safe_veh_sq - dist_veh_sq 为负，违规为 0
+                dist_veh_sq = torch.where(invalid_mask, torch.full_like(dist_veh_sq, 1e9), dist_veh_sq)
+
                 # 【防御】截断违反量，防止碰撞时惩罚项爆炸
                 veh_violation = torch.clamp(torch.maximum(safe_veh_sq - dist_veh_sq, torch.zeros_like(dist_veh_sq)), max=10.0)
                 phi_violation += (veh_violation ** 2).sum(dim=[1, 2])
