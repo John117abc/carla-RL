@@ -117,6 +117,10 @@ class OcpAgent(BaseAgent):
         if self.DIM_OTHER < 0:
             raise ValueError("env_cfg['ocp']['others'] 必须为非负整数，当前值导致 DIM_OTHER < 0")
 
+        # 安全关键经验缓冲区，用于提升周车约束样本的比例
+        self.safety_buffer = []          # 存储格式与原buffer一致
+        self.safety_buffer_maxlen = 5000 # 防止占用过多内存
+
     def _calc_ref_error_from_state(self, ego_state: torch.Tensor, ref_path_tensor: torch.Tensor) -> torch.Tensor:
         """
         严格对齐论文 Section IV-B1 的参考误差计算（统一使用自车坐标系）
@@ -321,8 +325,24 @@ class OcpAgent(BaseAgent):
                road_state_tensor: torch.Tensor = None):
         """
         严格对齐论文 Algorithm 2 (GEP) 训练逻辑
+        现在会从安全关键缓冲区中采样一部分样本，提高周车约束的出现频率
         """
-        batch_data = self.buffer.sample_batch(self.batch_size)
+        # ---------- 混合采样 ----------
+        safety_count = min(self.batch_size // 2, len(self.safety_buffer))
+        normal_count = self.batch_size - safety_count
+
+        # 从主缓冲区采样
+        batch_data_normal = self.buffer.sample_batch(normal_count) if normal_count > 0 else []
+
+        # 从安全关键缓冲区采样（碰撞或紧邻车辆的经验）
+        safety_samples = []
+        if safety_count > 0:
+            indices = np.random.choice(len(self.safety_buffer), size=safety_count, replace=False)
+            for idx in indices:
+                safety_samples.append(self.safety_buffer[idx])
+
+        batch_data = safety_samples + batch_data_normal
+
         if len(batch_data) == 0 or ref_path_tensor is None:
             return {
                 "actor_loss": 0.0,
@@ -450,6 +470,14 @@ class OcpAgent(BaseAgent):
             
         ref_error = data[:, :, self.DIM_EGO + self.DIM_OTHER:self.DIM_EGO + self.DIM_OTHER + self.DIM_REF_ERROR]
         return ego_state, other_states, ref_error
+
+    def add_safety_transitions(self, transitions: list):
+        """将发生过碰撞或紧邻的 episode 轨迹存入安全关键缓冲区"""
+        for t in transitions:
+            self.safety_buffer.append(t)
+        # 维持缓冲区大小上限
+        if len(self.safety_buffer) > self.safety_buffer_maxlen:
+            self.safety_buffer = self.safety_buffer[-self.safety_buffer_maxlen:]
 
     def save(self, save_info: Dict[str, Any]) -> None:
         model = {'actor': self.actor, 'critic': self.critic}

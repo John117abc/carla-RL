@@ -89,6 +89,8 @@ def main():
             
             total_reward = 0.0
             done = False
+            # 记录本回合的轨迹，用于碰撞后存入安全关键缓冲区
+            episode_transitions = []
             while not done:
                 # 【修复】将参考路径动态转换到当前自车坐标系，与网络输入保持一致
                 ego_transform = env.vehicle_manager.ego_vehicle.get_transform()
@@ -121,6 +123,12 @@ def main():
 
                 done = info['TimeLimit.truncated'] or info['collision']
                 info['road_state'] = road_state_np
+
+                # 保存过渡（包括道路信息）到回合轨迹列表
+                episode_transitions.append(
+                    (state, action, reward, road_state_np, done, info)
+                )
+
                 # 加入buffer时，同时存储road_state
                 agent.buffer.handle_new_experience((state, action, reward, road_state_np, done, info))
 
@@ -182,6 +190,10 @@ def main():
 
                 if done:
                     logger.info(f"  Episode 结束")
+                    # 如果本回合发生了碰撞，将轨迹存入安全关键缓冲区
+                    if info.get('collision', False) and episode_transitions:
+                        agent.add_safety_transitions(episode_transitions)
+                        logger.debug(f"已存入 {len(episode_transitions)} 条安全关键经验")
                     break
                 agent.global_step += 1
 
