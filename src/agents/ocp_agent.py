@@ -78,10 +78,10 @@ class OcpAgent(BaseAgent):
         # 论文核心权重（严格对齐原文 Table III & Eq. 1）
         self.q_lat = 0.04  # 横向误差权重
         self.q_head = 0.1  # 航向误差权重
-        # 降低速度误差权重，避免高速时对策略造成过大压迫
-        self.q_speed = 0.005  # 速度误差权重（原 0.01）
-        # 提高转向控制权重，抑制大幅转向
-        self.R_matrix = np.diag([0.005, 0.4])  # 控制权重 [加速度, 转向角] (转向由0.1提高到0.4)
+        # 适度提高速度误差权重，给予速度跟踪更强激励
+        self.q_speed = 0.008  # 速度误差权重（0.005→0.008）
+        # 转向控制权重降回论文的0.1，允许更大幅度转向以修正横向偏移
+        self.R_matrix = np.diag([0.005, 0.1])  # 控制权重 [加速度, 转向角]
 
         # GEP算法超参数（严格对齐论文收敛逻辑）
         self.init_penalty = self.ocp_config['init_penalty']
@@ -109,6 +109,9 @@ class OcpAgent(BaseAgent):
 
         # 预测轨迹
         self.predict_traj = None
+
+        # 惩罚因子放大阈值（仅当约束违反量超过该值时才放大）
+        self.penalty_growth_threshold = 0.01
 
         # 校验配置一致性
         if self.DIM_OTHER < 0:
@@ -387,10 +390,15 @@ class OcpAgent(BaseAgent):
         self.gep_iteration += 1  # 记录策略改进次数
 
         # 3. GEP惩罚因子放大 (每 m 次策略改进后执行，严格对齐 Algorithm 2)
+        # 加入门槛：只在约束违反量显著时才放大惩罚因子
         if self.gep_iteration % self.amplifier_m == 0:
-            old_penalty = self.init_penalty
-            self.init_penalty = min(self.init_penalty * self.amplifier_c, self.max_penalty)
-            logger.info(f"[GEP] 惩罚因子更新: {old_penalty:.4f} → {self.init_penalty:.4f}")
+            avg_phi = step_phi_actor.mean().item()
+            if avg_phi > self.penalty_growth_threshold:
+                old_penalty = self.init_penalty
+                self.init_penalty = min(self.init_penalty * self.amplifier_c, self.max_penalty)
+                logger.info(f"[GEP] 惩罚因子更新: {old_penalty:.4f} → {self.init_penalty:.4f}，当前违反量 {avg_phi:.6f}")
+            else:
+                logger.debug(f"[GEP] 惩罚因子未放大，当前违反量 {avg_phi:.6f}")
 
         self.predict_traj = states_traj.cpu().detach().numpy()
 
