@@ -68,9 +68,6 @@ def main():
         if train_config['continue_ocp']:
             logger.info("开始读取智能体参数...")
             checkpoint = agent.load(train_config["model_path_ocp"])
-            # if not env.is_eval:
-            #     # 读取归一化参数
-            #     env.ocp_normalizer.load_state_dict(checkpoint['ocp_normalizer'])
 
         logger.info("环境创建成功！")
         logger.info(f"观测空间: {env.observation_space}")
@@ -80,8 +77,6 @@ def main():
         episode = 0
         while episode < num_episodes:
             logger.info(f"\n开始第 {episode + 1} 轮测试...")
-            # logger.info(f"初始观测类型: {type(state)}, 形状/结构: {get_obs_shape(state)}")
-            # 在reset之后，获取规划好的参考路径，转换为tensor
             obs = env.reset()
             state = obs['ocp_obs']
             # 提取参考路径，转为tensor [1, N, 2]
@@ -92,20 +87,16 @@ def main():
             # 记录本回合的轨迹，用于碰撞后存入安全关键缓冲区
             episode_transitions = []
             while not done:
-                # 【修复】将参考路径动态转换到当前自车坐标系，与网络输入保持一致
                 ego_transform = env.vehicle_manager.ego_vehicle.get_transform()
                 ref_path_ego_np = np.array(batch_world_to_ego(ref_path_locations, ego_transform), dtype=np.float32)
                 
                 # 【防御】检查参考路径是否包含 nan/inf
                 if np.any(np.isnan(ref_path_ego_np)) or np.any(np.isinf(ref_path_ego_np)):
                     logger.warning("参考路径包含 nan/inf，跳过当前步")
-                    # 保持状态不变，继续下一步或记录错误，这里选择继续循环但跳过训练
-                    # 实际中应检查环境转换逻辑 batch_world_to_ego
                     pass 
                 
                 ref_path_tensor = torch.from_numpy(ref_path_ego_np).unsqueeze(0).to(device)
 
-                # 【修复】ref_path_locations 是 list，需使用已转换的 numpy 数组进行维度校验
                 if ref_path_tensor.shape != (1, ref_path_ego_np.shape[0], 2):
                     raise ValueError(f"参考路径维度异常: {ref_path_tensor.shape} (期望 [1, N, 2])")
 
@@ -143,12 +134,10 @@ def main():
                 if agent.global_step % train_config["log_interval"] == 0:
                     if 'speed' in info:
                         logger.info(f"    速度: {info['speed']:.2f} km/h,动作：{action}")
-                        # ========== 新增诊断日志 ==========
                         try:
                             d_e = agent.DIM_EGO          # 自车维度
                             d_o = agent.DIM_OTHER        # 周车维度
                             d_r = agent.DIM_REF_ERROR    # 误差维度
-                            # 确保状态足够长
                             if state.shape[0] >= d_e + d_o + d_r:
                                 delta_p = float(state[d_e + d_o])
                                 delta_phi = float(state[d_e + d_o + 1])
@@ -160,7 +149,6 @@ def main():
                                 )
                         except Exception as diag_e:
                             logger.warning(f"ref_error诊断失败: {diag_e}")
-                        # ========== 新增实际转向对比日志（仅对比 action 与 control.steer） ==========
                         try:
                             ego_vehicle = env.vehicle_manager.ego_vehicle
                             control = ego_vehicle.get_control()
@@ -169,7 +157,6 @@ def main():
                             )
                         except Exception as steer_e:
                             logger.warning(f"实际转向读取失败: {steer_e}")
-                        # ========== 新增加速度诊断日志 ==========
                         try:
                             ego_vehicle = env.vehicle_manager.ego_vehicle
                             acc = ego_vehicle.get_acceleration()
@@ -178,7 +165,6 @@ def main():
                             )
                         except Exception as acc_e:
                             logger.warning(f"实际加速度读取失败: {acc_e}")
-                        # ========== 实际转向对比日志结束 ==========
 
                     if loss is not None:
                         logger.info(
@@ -192,7 +178,7 @@ def main():
                     logger.info(f"  Episode 结束")
                     # 如果本回合发生了碰撞，将轨迹存入安全关键缓冲区
                     if info.get('collision', False) and episode_transitions:
-                        agent.add_safety_transitions(episode_transitions)
+                        agent.buffer.add_safety_trajectory(episode_transitions)
                         logger.debug(f"已存入 {len(episode_transitions)} 条安全关键经验")
                     break
                 agent.global_step += 1
@@ -219,7 +205,7 @@ def main():
     finally:
         logger.info("\n正在关闭环境...")
         env.close()
-        logger.info("测试结束。")
+        logger.info("测试结束.")
 
 
 def get_obs_shape(obs):

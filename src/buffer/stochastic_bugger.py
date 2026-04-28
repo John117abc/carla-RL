@@ -484,6 +484,18 @@ class StochasticBuffer:
         if not added:
             self._handle_buffer_full(buffer_idx, experience, priority)
 
+    def add_safety_trajectory(self, transitions):
+        """
+        将一整条轨迹（通常为碰撞或附近有车辆的 episode）强制存入安全关键缓冲区，
+        避免安全关键样本被淹没。
+        """
+        for experience in transitions:
+            # 强制归入 SafetyCriticalBuffer（buffer_idx=0），使用极高优先级
+            priority = max(9.5, self._calculate_gep_priority(experience, 0))
+            added = self.buffers[0].add(experience, priority)
+            if not added:
+                self._handle_buffer_full(0, experience, priority)
+
     def clear(self):
         """
         清空所有子缓冲区的内容、统计历史和状态。
@@ -651,16 +663,15 @@ class StochasticBuffer:
         return total_used < self.total_capacity * 1.2  # 允许临时超过总容量20%
 
     def sample_batch(self, batch_size):
-        """从所有缓冲区采样批次"""
-        # 按比例从各缓冲区采样
+        """从所有缓冲区采样批次，安全关键样本占更高比例"""
         buffer_sizes = [len(buf) for buf in self.buffers]
         total_size = sum(buffer_sizes)
 
         if total_size == 0:
             return []
 
-        # todo 由于缺少其它样本的判断，先取部分
-        weights = [0.25, 0.25, 0.25, 0.25]  # Safety, Performance, Diversity, Curriculum
+        # 提高安全关键样本比重 (Safety=0.45, Performance=0.2, Diversity=0.15, Curriculum=0.2)
+        weights = [0.45, 0.2, 0.15, 0.2]
         samples = []
 
         # 确保每个缓冲区有足够样本
