@@ -83,8 +83,8 @@ class OcpAgent(BaseAgent):
         # 适度提高速度误差权重，给予速度跟踪更强激励
         self.q_speed = 0.008  # 速度误差权重（0.005→0.008）
         # 【修复】转向控制权重降至0.01，允许更大幅度转向以修正横向偏移
-        self.R_matrix = np.diag([0.005,
-                                 0.01])  # 控制权重 [加速度, 转向角]
+        self.R_matrix = np.diag([0.1,
+                                 0.005])  # 控制权重 [加速度, 转向角]
 
         # GEP算法超参数（严格对齐论文收敛逻辑）
         self.init_penalty = self.ocp_config['init_penalty']
@@ -169,7 +169,7 @@ class OcpAgent(BaseAgent):
             _cross = cross[0, 0].item()
             _sign = 1 if _cross >= 0 else -1
             _dp = delta_p[0, 0].item()
-            logger.info(
+            logger.debug(
                 f"[REF_ERROR] ego_xy=({_ego[0]:.3f},{_ego[1]:.3f}), ref_xy=({_ref[0]:.3f},{_ref[1]:.3f}), "
                 f"ref_phi={_phi:.4f}rad, cross={_cross:.4f}, sign={_sign}, delta_p={_dp:.4f}m"
             )
@@ -347,7 +347,7 @@ class OcpAgent(BaseAgent):
             delta_phy = norm_steer * 0.4   # [-1,1] → [-0.4,0.4] rad
 
             # ---- 调试日志 ----
-            logger.info(
+            logger.debug(
                 f"[ACTION] norm_steer={norm_steer:.4f} -> delta_phy={delta_phy:.4f} rad "
                 f"(正=右转? norm_steer>0 => 右转; norm_steer<0 => 左转)"
             )

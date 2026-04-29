@@ -242,7 +242,7 @@ class VehicleManager:
             steer_val = float(np.clip(steer_val, -1.0, 1.0))
 
             # ---------- 调试日志 ----------
-            logger.info(
+            logger.debug(
                 f"[VEHICLE_CTRL] 接收物理转角 delta_phy={delta_phy:.4f} rad, "
                 f"映射为 CARLA steer={steer_val:.4f} "
                 f"(CARLA 正 steer → 右转)"
