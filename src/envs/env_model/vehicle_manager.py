@@ -1,15 +1,17 @@
 import logging
 import time
-
 import carla
 import random
 import numpy as np
 import gymnasium as gym
-
-from src.utils import get_logger
 from typing import Dict, Any, Tuple, Optional, Union, List
 
-logger = get_logger('vehicle_manager',level=logging.INFO)
+from src.utils import get_logger
+from src.carla_utils.vehicle_control import PIDLongitudinalController, world_to_vehicle_frame
+
+logger = get_logger('vehicle_manager', level=logging.INFO)
+
+
 class VehicleManager:
     def __init__(self, world, client, config):
         self.world = world
@@ -17,6 +19,13 @@ class VehicleManager:
         self.config = config
         self.ego_vehicle = None
         self.npc_vehicles = []
+
+        # 纵向 PID 控制器（跟踪目标加速度）
+        # dt 与环境固定步长匹配（一般为 0.1s）
+        self.pid_lon = PIDLongitudinalController(K_P=1.0, K_I=0.05, K_D=0.1, dt=0.1)
+
+        # 转向平滑用状态（用于低通滤波）
+        self.steer_smooth = None
 
     def _try_spawn_with_offset(self, vehicle_bp, base_transform, background_vehicles, occupancy_radius=2.5, max_offset=10.0):
         """
@@ -176,7 +185,7 @@ class VehicleManager:
         )
         return self.ego_vehicle
 
-    def spawn_npcs(self,tm_port,sync_mode):
+    def spawn_npcs(self, tm_port, sync_mode):
         """
         生成背景交通车辆
         """
@@ -213,50 +222,52 @@ class VehicleManager:
 
         return actors
 
-    def apply_control(self, action,action_space):
+    def apply_control(self, action, action_space):
         if self.ego_vehicle is None:
             raise RuntimeError("环境没有重置. 请先 reset()。")
 
         if not isinstance(action_space, gym.spaces.Discrete):
             # 接收论文物理动作：[a (m/s²), δ (rad)]
-            a_phy = float(np.clip(action[0], -3.0, 1.5))  # 物理加速度
-            delta_phy = float(np.clip(action[1], -0.4, 0.4))  # 物理前轮转角
+            a_phy = float(np.clip(action[0], -3.0, 1.5))       # 物理加速度
+            delta_phy = float(np.clip(action[1], -0.4, 0.4))   # 物理前轮转角
 
-            # 1. 物理加速度 → Carla油门/刹车
-            if a_phy > 0.1:
-                # 正加速：[0.1, 1.5] → 油门[0.1, 1.0]
-                throttle_val = np.interp(a_phy, [0.1, 1.5], [0.1, 1.0])
+            # ---------- 1. 纵向控制：PID 跟踪目标加速度 ----------
+            # 获取实际纵向加速度（车辆坐标系）
+            ego_transform = self.ego_vehicle.get_transform()
+            acc_vector = self.ego_vehicle.get_acceleration()
+            # 将世界加速度转换到车辆纵向
+            actual_lon_acc, _ = world_to_vehicle_frame(acc_vector, ego_transform)
+
+            # PID 控制器输出范围（-1..1），正值表示油门需求，负值表示刹车需求
+            pid_output = self.pid_lon.run_step(a_phy, actual_lon_acc)
+
+            # 将 PID 输出映射到油门/刹车
+            if pid_output >= 0:
+                throttle_val = float(np.clip(pid_output, 0.0, 1.0))
                 brake_val = 0.0
-            elif a_phy < -0.1:
-                # 刹车：[-3.0, -0.1] → 刹车[0.1, 1.0]
-                throttle_val = 0.0
-                brake_val = np.interp(abs(a_phy), [0.1, 3.0], [0.1, 1.0])
             else:
-                # 滑行
                 throttle_val = 0.0
-                brake_val = 0.0
+                brake_val = float(np.clip(-pid_output, 0.0, 1.0))
 
-            # 2. 物理前轮转角 → Carla转向
-            # Carla steer [-1,1] 对应最大转角约0.6rad，我们用0.4rad对应0.67的steer
+            # ---------- 2. 物理前轮转角 → CARLA转向 ----------
             steer_val = np.interp(delta_phy, [-0.4, 0.4], [-0.67, 0.67])
             steer_val = float(np.clip(steer_val, -1.0, 1.0))
 
-            # ---------- 调试日志 ----------
-            logger.debug(
-                f"[VEHICLE_CTRL] 接收物理转角 delta_phy={delta_phy:.4f} rad, "
-                f"映射为 CARLA steer={steer_val:.4f} "
-                f"(CARLA 正 steer → 右转)"
-            )
+            # ---------- 转向低通滤波 (平滑) ----------
+            if self.steer_smooth is None:
+                self.steer_smooth = steer_val
+            else:
+                self.steer_smooth = 0.8 * self.steer_smooth + 0.2 * steer_val
+            steer_val = float(np.clip(self.steer_smooth, -1.0, 1.0))
 
-            # 强制禁止倒车，论文场景不需要
+            # 强制禁止倒车
             reverse_flag = False
 
-            # 诊断日志（debug 级别，默认不输出，可通过设置 logger 级别开启）
             logger.debug(
-                f"动作映射 - 输入 [a={a_phy:.4f}, δ={delta_phy:.4f}] -> "
-                f"油门={throttle_val:.4f}, 刹车={brake_val:.4f}, steer={steer_val:.4f}"
+                f"[VEHICLE_CTRL] 目标a={a_phy:.3f}，实际lon_a={actual_lon_acc:.3f}，"
+                f"PID输出={pid_output:.3f}，油门={throttle_val:.3f}，刹车={brake_val:.3f}，"
+                f"steer_raw={delta_phy:.3f}，steer_filtered={steer_val:.3f}"
             )
-
         else:
             throttle_val = 0.0
             brake_val = 0.0
@@ -322,5 +333,5 @@ class VehicleManager:
 
         self.npc_vehicles = surrounding
 
-    def cleanup_finished_vehicles(self,sumo_simulation,synchronization):
+    def cleanup_finished_vehicles(self, sumo_simulation, synchronization):
         pass

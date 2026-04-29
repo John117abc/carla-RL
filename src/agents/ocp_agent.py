@@ -80,11 +80,10 @@ class OcpAgent(BaseAgent):
         # 论文核心权重（严格对齐原文 Table III & Eq. 1）
         self.q_lat = 0.04  # 横向误差权重
         self.q_head = 0.1  # 航向误差权重
-        # 适度提高速度误差权重，给予速度跟踪更强激励
-        self.q_speed = 0.008  # 速度误差权重（0.005→0.008）
-        # 【修复】转向控制权重降至0.01，允许更大幅度转向以修正横向偏移
-        self.R_matrix = np.diag([0.1,
-                                 0.005])  # 控制权重 [加速度, 转向角]
+        # 加速纵向跟踪激励
+        self.q_speed = 0.01  # 速度误差权重（提高至0.01，强化纵向跟踪）
+        # 控制权重：加速度 0.1，转向角 0.02（适度提高转向代价，抑制画龙）
+        self.R_matrix = np.diag([0.1, 0.02])
 
         # GEP算法超参数（严格对齐论文收敛逻辑）
         self.init_penalty = self.ocp_config['init_penalty']
@@ -107,14 +106,14 @@ class OcpAgent(BaseAgent):
         self.history_loss = []
         self.globe_eps = 0
 
-        # 参考速度固定为5m/s（18km/h）
+        # 参考速度固定为5m/s（18km/h），但环境实际参考速度由env.ego_ref_speed提供
         self.ref_vlon = self.env.ego_ref_speed
 
         # 预测轨迹
         self.predict_traj = None
 
-        # 惩罚因子放大阈值（仅当约束违反量超过该值时才放大）
-        self.penalty_growth_threshold = 0.001
+        # 惩罚因子放大阈值（设为0，让惩罚因子尽早启动，增加阻尼）
+        self.penalty_growth_threshold = 0.0
 
         # 校验配置一致性
         if self.DIM_OTHER < 0:
@@ -252,7 +251,12 @@ class OcpAgent(BaseAgent):
 
             r_weights = torch.tensor(self.R_matrix.diagonal().copy(), device=self.device).float()
             control_cost = torch.sum((phy_action ** 2) * r_weights, dim=1)
-            step_l = torch.clamp(err_cost + control_cost, max=100.0)
+
+            # 新增：横摆角速度稳定性惩罚
+            omega = next_ego[..., 5].squeeze(1)  # [B]
+            omega_penalty = 0.01 * (omega ** 2)
+
+            step_l = torch.clamp(err_cost + control_cost + omega_penalty, max=100.0)
 
             # 2. 补全约束违反量 step_phi (严格对齐论文 Eq.9: 惩罚项需平方)
             # 【修复】使用推演后的自车位置，而非强制原点
@@ -436,7 +440,7 @@ class OcpAgent(BaseAgent):
         self.gep_iteration += 1  # 记录策略改进次数
 
         # 3. GEP惩罚因子放大 (每 m 次策略改进后执行，严格对齐 Algorithm 2)
-        # 加入门槛：只在约束违反量显著时才放大惩罚因子
+        # 门槛设为0，确保ρ尽早放大，引入阻尼
         if self.gep_iteration % self.amplifier_m == 0:
             avg_phi = step_phi_actor.mean().item()
             if avg_phi > self.penalty_growth_threshold:
