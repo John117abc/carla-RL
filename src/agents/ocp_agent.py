@@ -83,7 +83,7 @@ class OcpAgent(BaseAgent):
         # 加速纵向跟踪激励
         self.q_speed = 0.01  # 速度误差权重（提高至0.01，强化纵向跟踪）
         # 控制权重：加速度 0.1，转向角 0.02（适度提高转向代价，抑制画龙）
-        self.R_matrix = np.diag([0.1, 0.02])
+        self.R_matrix = np.diag([0.1, 0.9])
 
         # GEP算法超参数（严格对齐论文收敛逻辑）
         self.init_penalty = self.ocp_config['init_penalty']
