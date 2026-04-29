@@ -38,12 +38,14 @@ class OcpAgent(BaseAgent):
 
         # 严格对齐论文的状态维度定义
         self.DIM_EGO = 6  # 自车 [x,y,v_lon,v_lat,phi,omega]
-        self.DIM_OTHER = self.env.env_cfg['ocp']['others'] * 4  # 8车×4维
+        self.DIM_OTHER = self.env.env_cfg['ocp'][
+                             'others'] * 4  # 8车×4维
         self.DIM_REF_ERROR = 3  # 跟踪误差 [δ_p, δ_φ, δ_v]
         self.TOTAL_STATE_DIM = self.DIM_EGO + self.DIM_OTHER + self.DIM_REF_ERROR
 
         # 道路维度
-        self.DIM_ROAD = self.env.env_cfg['ocp']['num_points'] * 4  # 道路80维
+        self.DIM_ROAD = self.env.env_cfg['ocp'][
+                            'num_points'] * 4  # 道路80维
 
         self.road_state_buffer = None  # 用于存储当前的道路边缘信息
 
@@ -80,8 +82,9 @@ class OcpAgent(BaseAgent):
         self.q_head = 0.1  # 航向误差权重
         # 适度提高速度误差权重，给予速度跟踪更强激励
         self.q_speed = 0.008  # 速度误差权重（0.005→0.008）
-        # 转向控制权重降回论文的0.1，允许更大幅度转向以修正横向偏移
-        self.R_matrix = np.diag([0.005, 0.1])  # 控制权重 [加速度, 转向角]
+        # 【修复】转向控制权重降至0.01，允许更大幅度转向以修正横向偏移
+        self.R_matrix = np.diag([0.005,
+                                 0.01])  # 控制权重 [加速度, 转向角]
 
         # GEP算法超参数（严格对齐论文收敛逻辑）
         self.init_penalty = self.ocp_config['init_penalty']
@@ -120,7 +123,7 @@ class OcpAgent(BaseAgent):
     def _calc_ref_error_from_state(self, ego_state: torch.Tensor, ref_path_tensor: torch.Tensor) -> torch.Tensor:
         """
         严格对齐论文 Section IV-B1 的参考误差计算（统一使用自车坐标系）
-        :param ego_state: [B, 1, 6] 自车状态 (自车坐标系, x=0, y=0, phi=0)
+        :param ego_state: [B, 1, 6] 自车状态 (自车坐标系，经过推演后可能偏离原点)
         :param ref_path_tensor: [1, N, 2] 参考路径xy (自车坐标系)
         :return: [B, 1, 3] 跟踪误差 [δ_p, δ_φ, δ_v]
         """
@@ -128,27 +131,33 @@ class OcpAgent(BaseAgent):
         if ref_path_tensor.shape[0] == 1 and B > 1:
             ref_path_tensor = ref_path_tensor.repeat(B, 1, 1)
 
-        # 自车坐标系下，自车位置恒为原点，航向恒为0
-        ego_xy = torch.zeros(B, 1, 2, device=self.device)
-        ego_phi = torch.zeros(B, 1, device=self.device)
-        ego_vlon = ego_state[..., 2]  # [B, 1]
+            # 【修复】使用推演后的真实位置和航向，而非强制置零
+        ego_xy = ego_state[
+            ..., :2]  # [B, 1, 2] 真实相对位置
+        ego_phi = ego_state[
+            ..., 4]  # [B, 1] 真实航向
+        ego_vlon = ego_state[
+            ..., 2]  # [B, 1] 纵向速度
 
         # 找最近参考点
-        dist = torch.norm(ego_xy.unsqueeze(2) - ref_path_tensor.unsqueeze(1), dim=-1)  # [B, 1, N]
-        min_dist, closest_idx = torch.min(dist, dim=-1)  # [B, 1]
+        dist = torch.norm(ego_xy.unsqueeze(2) - ref_path_tensor.unsqueeze(1),
+                          dim=-1)  # [B, 1, N]
+        min_dist, closest_idx = torch.min(dist,
+                                          dim=-1)  # [B, 1]
         ref_idx = torch.clamp(closest_idx, max=ref_path_tensor.shape[1] - 1)
 
-        ref_xy = torch.gather(ref_path_tensor, 1, ref_idx.unsqueeze(-1).repeat(1, 1, 2))  # [B, 1, 2]
+        ref_xy = torch.gather(ref_path_tensor, 1, ref_idx.unsqueeze(-1).repeat(1, 1,
+                                                                               2))  # [B, 1, 2]
         next_ref_idx = torch.clamp(ref_idx + 1, max=ref_path_tensor.shape[1] - 1)
         next_ref_xy = torch.gather(ref_path_tensor, 1, next_ref_idx.unsqueeze(-1).repeat(1, 1, 2))
         delta_xy = next_ref_xy - ref_xy
         ref_phi = torch.atan2(delta_xy[..., 1], delta_xy[..., 0])
 
         # 计算带符号横向误差δ_p (论文定义：左侧为正)
-        # 在自车坐标系中，ref_xy 即为相对位移
-        dx = ref_xy[..., 0]
-        dy = ref_xy[..., 1]
-        cross = dy * torch.cos(ref_phi) - dx * torch.sin(ref_phi)
+        # 使用真实相对位置计算，而非假定原点
+        dx = ref_xy[..., 0] - ego_xy[..., 0]
+        dy = ref_xy[..., 1] - ego_xy[..., 1]
+        cross = dx * torch.sin(ref_phi) - dy * torch.cos(ref_phi)
         delta_p = min_dist * torch.sign(cross)
 
         # 航向误差δ_φ（归一化到[-π, π]）
@@ -181,7 +190,7 @@ class OcpAgent(BaseAgent):
             road_left = torch.zeros(B, 1, 20, 2, device=self.device)
             road_right = torch.zeros(B, 1, 20, 2, device=self.device)
 
-        # 安全距离平方
+            # 安全距离平方
         safe_veh_sq = self.other_car_min_distance ** 2
         safe_road_sq = self.road_min_distance ** 2
 
@@ -196,9 +205,12 @@ class OcpAgent(BaseAgent):
                 current_ref_error.view(-1, self.DIM_REF_ERROR)
             ], dim=1)
 
-            norm_action = self.actor(current_state)  # [B, 2]
-            a_phy = norm_action[:, 0:1] * 2.25 - 0.75  # [-1,1] → [-3, 1.5] m/s²
-            delta_phy = norm_action[:, 1:2] * 0.4  # [-1,1] → [-0.4, 0.4] rad
+            norm_action = self.actor(
+                current_state)  # [B, 2]
+            a_phy = norm_action[
+                        :, 0:1] * 2.25 - 0.75  # [-1,1] → [-3, 1.5] m/s²
+            delta_phy = norm_action[
+                            :, 1:2] * 0.4  # [-1,1] → [-0.4, 0.4] rad
             phy_action = torch.cat([a_phy, delta_phy], dim=1)
 
             next_ego = self.dynamics_model(current_ego, phy_action)
@@ -220,39 +232,47 @@ class OcpAgent(BaseAgent):
             lat_err_t = torch.clamp(lat_err_t, -10.0, 10.0)
             head_err_t = torch.clamp(head_err_t, -3.14, 3.14)
             speed_err_t = torch.clamp(speed_err_t, -10.0, 10.0)
-            err_cost = self.q_lat * (lat_err_t ** 2) + self.q_head * (head_err_t ** 2) + self.q_speed * (speed_err_t ** 2)
+            err_cost = self.q_lat * (lat_err_t ** 2) + self.q_head * (head_err_t ** 2) + self.q_speed * (
+                        speed_err_t ** 2)
 
             r_weights = torch.tensor(self.R_matrix.diagonal().copy(), device=self.device).float()
             control_cost = torch.sum((phy_action ** 2) * r_weights, dim=1)
             step_l = torch.clamp(err_cost + control_cost, max=100.0)
 
             # 2. 补全约束违反量 step_phi (严格对齐论文 Eq.9: 惩罚项需平方)
-            # 在自车坐标系中，ego_xy 恒为 [0,0]
-            ego_xy = torch.zeros(B, 1, 2, device=self.device)
+            # 【修复】使用推演后的自车位置，而非强制原点
+            ego_xy = next_ego[
+                ..., :2]  # [B, 1, 2] 真实相对位置
             phi_violation = torch.zeros(B, device=self.device)
 
             # 周车安全距离约束 (other_states 已在自车坐标系)
             if self.DIM_OTHER > 0:
-                other_xy = next_other[..., :2]  # [B, 1, 8, 2]
-                dist_veh_sq = torch.sum((ego_xy.unsqueeze(2) - other_xy) ** 2, dim=-1)  # [B, 1, 8]
+                other_xy = next_other[
+                    ..., :2]  # [B, 1, 8, 2]
+                dist_veh_sq = torch.sum((ego_xy.unsqueeze(2) - other_xy) ** 2,
+                                        dim=-1)  # [B, 1, 8]
 
                 # 【新增】过滤掉全零占位车辆（没有周车的 slot），避免产生虚假的安全违反
-                other_norm = torch.norm(other_xy, dim=-1)  # [B, 1, 8]
+                other_norm = torch.norm(other_xy,
+                                        dim=-1)  # [B, 1, 8]
                 invalid_mask = other_norm < 1e-3  # 范数极小表示该 slot 为空
                 # 将无效车辆的平方距离设为极大值，使 safe_veh_sq - dist_veh_sq 为负，违规为 0
                 dist_veh_sq = torch.where(invalid_mask, torch.full_like(dist_veh_sq, 1e9), dist_veh_sq)
 
                 # 【防御】截断违反量，防止碰撞时惩罚项爆炸
-                veh_violation = torch.clamp(torch.maximum(safe_veh_sq - dist_veh_sq, torch.zeros_like(dist_veh_sq)), max=10.0)
+                veh_violation = torch.clamp(torch.maximum(safe_veh_sq - dist_veh_sq, torch.zeros_like(dist_veh_sq)),
+                                            max=10.0)
                 phi_violation += (veh_violation ** 2).sum(dim=[1, 2])
 
-            # 道路边缘安全距离约束 (road_left/right 已在自车坐标系)
+                # 道路边缘安全距离约束 (road_left/right 已在自车坐标系)
             dist_left_sq = torch.sum((ego_xy.unsqueeze(2) - road_left) ** 2, dim=-1)
             dist_right_sq = torch.sum((ego_xy.unsqueeze(2) - road_right) ** 2, dim=-1)
             min_left_sq, _ = torch.min(dist_left_sq, dim=-1)
             min_right_sq, _ = torch.min(dist_right_sq, dim=-1)
-            left_violation = torch.clamp(torch.maximum(safe_road_sq - min_left_sq, torch.zeros_like(min_left_sq)), max=10.0).squeeze(1)
-            right_violation = torch.clamp(torch.maximum(safe_road_sq - min_right_sq, torch.zeros_like(min_right_sq)), max=10.0).squeeze(1)
+            left_violation = torch.clamp(torch.maximum(safe_road_sq - min_left_sq, torch.zeros_like(min_left_sq)),
+                                         max=10.0).squeeze(1)
+            right_violation = torch.clamp(torch.maximum(safe_road_sq - min_right_sq, torch.zeros_like(min_right_sq)),
+                                          max=10.0).squeeze(1)
             phi_violation += (left_violation ** 2 + right_violation ** 2)
 
             # 【防御】截断总惩罚项
@@ -282,12 +302,12 @@ class OcpAgent(BaseAgent):
             else:
                 obs_np = np.array(obs, dtype=np.float32).flatten()
 
-            # 【防御】检查输入是否包含 nan/inf，防止污染网络
+                # 【防御】检查输入是否包含 nan/inf，防止污染网络
             if np.any(np.isnan(obs_np)) or np.any(np.isinf(obs_np)):
                 logger.warning("输入观测包含 nan/inf，返回安全零动作")
                 return np.array([0.0, 0.0], dtype=np.float32), np.zeros(1, dtype=np.float32)
 
-            # 【加固】严格校验维度，防止静默错位导致策略崩溃
+                # 【加固】严格校验维度，防止静默错位导致策略崩溃
             if obs_np.shape[0] != self.TOTAL_STATE_DIM:
                 raise ValueError(
                     f"观测维度异常: {obs_np.shape[0]} (期望{self.TOTAL_STATE_DIM})。"
@@ -336,14 +356,14 @@ class OcpAgent(BaseAgent):
             if np.any(np.isnan(state_np)) or np.any(np.isinf(state_np)):
                 logger.warning("Buffer 状态包含 nan/inf，跳过该样本")
                 continue
-            # 【加固】严格校验维度
+                # 【加固】严格校验维度
             if state_np.shape[0] != self.TOTAL_STATE_DIM:
                 raise ValueError(
                     f"Buffer 状态维度异常: {state_np.shape[0]} (期望{self.TOTAL_STATE_DIM})。"
                     f"请检查环境 ocp_obs 输出格式。"
                 )
             states_list.append(state_np)
-            
+
             road_np = info['road_state']
             if road_np is not None and (np.any(np.isnan(road_np)) or np.any(np.isinf(road_np))):
                 logger.warning("Buffer 道路状态包含 nan/inf，跳过该样本")
@@ -420,8 +440,8 @@ class OcpAgent(BaseAgent):
         """
         if other_states.dim() != 4 or other_states.shape[3] != 4:
             raise ValueError(f"周车状态维度必须为 [B,1,N_others,4]，当前={other_states.shape}")
-        
-        # 防御性处理：若配置 others=0，直接返回全零张量保持形状一致
+
+            # 防御性处理：若配置 others=0，直接返回全零张量保持形状一致
         if other_states.shape[2] == 0:
             return torch.zeros_like(other_states)
 
@@ -435,14 +455,14 @@ class OcpAgent(BaseAgent):
             raise ValueError(f"输入张量必须为 [B,N,{self.TOTAL_STATE_DIM}]，当前={data.shape}")
         B, N = data.shape[0], data.shape[1]
         ego_state = data[:, :, 0:self.DIM_EGO]
-        
+
         # 【修复】处理 others=0 时的维度对齐问题
         if self.DIM_OTHER > 0:
             other_raw = data[:, :, self.DIM_EGO:self.DIM_EGO + self.DIM_OTHER]
             other_states = other_raw.view(B, N, self.env.env_cfg['ocp']['others'], 4)
         else:
             other_states = torch.empty(B, N, 0, 4, device=data.device)
-            
+
         ref_error = data[:, :, self.DIM_EGO + self.DIM_OTHER:self.DIM_EGO + self.DIM_OTHER + self.DIM_REF_ERROR]
         return ego_state, other_states, ref_error
 
