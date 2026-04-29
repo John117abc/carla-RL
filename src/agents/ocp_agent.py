@@ -83,7 +83,7 @@ class OcpAgent(BaseAgent):
         # 加速纵向跟踪激励
         self.q_speed = 0.01  # 速度误差权重（提高至0.01，强化纵向跟踪）
         # 控制权重：加速度 0.1，转向角 0.02（适度提高转向代价，抑制画龙）
-        self.R_matrix = np.diag([0.1, 0.9])
+        self.R_matrix = np.diag([0.005, 0.1])
 
         # GEP算法超参数（严格对齐论文收敛逻辑）
         self.init_penalty = self.ocp_config['init_penalty']
@@ -143,7 +143,7 @@ class OcpAgent(BaseAgent):
                           dim=-1)  # [B, 1, N]
         min_dist, closest_idx = torch.min(dist,
                                           dim=-1)  # [B, 1]
-        ref_idx = torch.clamp(closest_idx, max=ref_path_tensor.shape[1] - 1)
+        ref_idx = torch.clamp(closest_idx + self.env.carla_cfg['world']['ref_offset'], max=ref_path_tensor.shape[1] - 1)
 
         ref_xy = torch.gather(ref_path_tensor, 1, ref_idx.unsqueeze(-1).repeat(1, 1,
                                                                                2))  # [B, 1, 2]
@@ -243,20 +243,16 @@ class OcpAgent(BaseAgent):
             head_err_t = next_ref_error[..., 1].squeeze(1)
             speed_err_t = next_ref_error[..., 2].squeeze(1)
             # 【防御】限制误差范围，防止梯度爆炸
-            lat_err_t = torch.clamp(lat_err_t, -10.0, 10.0)
-            head_err_t = torch.clamp(head_err_t, -3.14, 3.14)
-            speed_err_t = torch.clamp(speed_err_t, -10.0, 10.0)
+            # lat_err_t = torch.clamp(lat_err_t, -10.0, 10.0)
+            # head_err_t = torch.clamp(head_err_t, -3.14, 3.14)
+            # speed_err_t = torch.clamp(speed_err_t, -10.0, 10.0)
             err_cost = self.q_lat * (lat_err_t ** 2) + self.q_head * (head_err_t ** 2) + self.q_speed * (
                         speed_err_t ** 2)
 
             r_weights = torch.tensor(self.R_matrix.diagonal().copy(), device=self.device).float()
             control_cost = torch.sum((phy_action ** 2) * r_weights, dim=1)
 
-            # 新增：横摆角速度稳定性惩罚
-            omega = next_ego[..., 5].squeeze(1)  # [B]
-            omega_penalty = 0.01 * (omega ** 2)
-
-            step_l = torch.clamp(err_cost + control_cost + omega_penalty, max=100.0)
+            step_l = torch.clamp(err_cost + control_cost , max=100.0)
 
             # 2. 补全约束违反量 step_phi (严格对齐论文 Eq.9: 惩罚项需平方)
             # 【修复】使用推演后的自车位置，而非强制原点
