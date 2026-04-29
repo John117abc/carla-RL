@@ -20,8 +20,7 @@ class VehicleManager:
         self.ego_vehicle = None
         self.npc_vehicles = []
 
-        # 纵向 PID 控制器（跟踪目标加速度）
-        # dt 与环境固定步长匹配（一般为 0.1s）
+        # 纵向 PID 控制器（暂不使用，保留用于未来可选扩展）
         self.pid_lon = PIDLongitudinalController(K_P=1.0, K_I=0.05, K_D=0.1, dt=0.1)
 
         # 转向平滑用状态（用于低通滤波）
@@ -231,42 +230,35 @@ class VehicleManager:
             a_phy = float(np.clip(action[0], -3.0, 1.5))       # 物理加速度
             delta_phy = float(np.clip(action[1], -0.4, 0.4))   # 物理前轮转角
 
-            # ---------- 1. 纵向控制：PID 跟踪目标加速度 ----------
-            # 获取实际纵向加速度（车辆坐标系）
-            ego_transform = self.ego_vehicle.get_transform()
-            acc_vector = self.ego_vehicle.get_acceleration()
-            # 将世界加速度转换到车辆纵向
-            actual_lon_acc, _ = world_to_vehicle_frame(acc_vector, ego_transform)
-
-            # PID 控制器输出范围（-1..1），正值表示油门需求，负值表示刹车需求
-            pid_output = self.pid_lon.run_step(a_phy, actual_lon_acc)
-
-            # 将 PID 输出映射到油门/刹车
-            if pid_output >= 0:
-                throttle_val = float(np.clip(pid_output, 0.0, 1.0))
+            # ---------- 纵向控制：简单线性映射（恢复之前可工作的方案）----------
+            if a_phy > 0.1:
+                # 正加速：[0.1, 1.5] → 油门[0.1, 1.0]
+                throttle_val = np.interp(a_phy, [0.1, 1.5], [0.1, 1.0])
                 brake_val = 0.0
-            else:
+            elif a_phy < -0.1:
+                # 刹车：[-3.0, -0.1] → 刹车[0.1, 1.0]
                 throttle_val = 0.0
-                brake_val = float(np.clip(-pid_output, 0.0, 1.0))
-
-            # ---------- 2. 物理前轮转角 → CARLA转向 ----------
-            steer_val = np.interp(delta_phy, [-0.4, 0.4], [-0.67, 0.67])
-            steer_val = float(np.clip(steer_val, -1.0, 1.0))
-
-            # ---------- 转向低通滤波 (平滑) ----------
-            if self.steer_smooth is None:
-                self.steer_smooth = steer_val
+                brake_val = np.interp(abs(a_phy), [0.1, 3.0], [0.1, 1.0])
             else:
-                self.steer_smooth = 0.8 * self.steer_smooth + 0.2 * steer_val
+                # 滑行
+                throttle_val = 0.0
+                brake_val = 0.0
+
+            # ---------- 转向映射与平滑 ----------
+            steer_val_raw = np.interp(delta_phy, [-0.4, 0.4], [-0.67, 0.67])
+            steer_val_raw = float(np.clip(steer_val_raw, -1.0, 1.0))
+
+            if self.steer_smooth is None:
+                self.steer_smooth = steer_val_raw
+            else:
+                self.steer_smooth = 0.8 * self.steer_smooth + 0.2 * steer_val_raw
             steer_val = float(np.clip(self.steer_smooth, -1.0, 1.0))
 
-            # 强制禁止倒车
             reverse_flag = False
 
             logger.debug(
-                f"[VEHICLE_CTRL] 目标a={a_phy:.3f}，实际lon_a={actual_lon_acc:.3f}，"
-                f"PID输出={pid_output:.3f}，油门={throttle_val:.3f}，刹车={brake_val:.3f}，"
-                f"steer_raw={delta_phy:.3f}，steer_filtered={steer_val:.3f}"
+                f"[VEHICLE_CTRL] a_phy={a_phy:.3f}, delta_phy={delta_phy:.3f}, "
+                f"油门={throttle_val:.3f}, 刹车={brake_val:.3f}, steer_filtered={steer_val:.3f}"
             )
         else:
             throttle_val = 0.0
