@@ -209,8 +209,9 @@ class OcpAgent(BaseAgent):
                 current_state)  # [B, 2]
             a_phy = norm_action[
                         :, 0:1] * 2.25 - 0.75  # [-1,1] → [-3, 1.5] m/s²
-            delta_phy = norm_action[
-                            :, 1:2] * 0.4  # [-1,1] → [-0.4, 0.4] rad
+            # 转向符号修正：actor 输出正值应映射为左转（负前轮转角），以纠正实际系统中“总是右转”的问题
+            delta_phy = -norm_action[
+                            :, 1:2] * 0.4  # [-1,1] → [0.4,-0.4] rad，即正值→左转
             phy_action = torch.cat([a_phy, delta_phy], dim=1)
 
             next_ego = self.dynamics_model(current_ego, phy_action)
@@ -327,7 +328,8 @@ class OcpAgent(BaseAgent):
                 norm_action = np.clip(norm_action + noise, -1.0, 1.0)
 
             a_phy = np.interp(norm_action[0], [-1, 1], [-3.0, 1.5])
-            delta_phy = np.interp(norm_action[1], [-1, 1], [-0.4, 0.4])
+            # 转向符号修正：actor 输出正值应映射为左转（负前轮转角）
+            delta_phy = -np.interp(norm_action[1], [-1, 1], [-0.4, 0.4])
             phy_action = np.array([a_phy, delta_phy], dtype=np.float32)
 
             return phy_action, np.zeros(1, dtype=np.float32)
