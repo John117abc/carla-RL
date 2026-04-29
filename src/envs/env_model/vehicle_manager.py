@@ -241,6 +241,13 @@ class VehicleManager:
             steer_val = np.interp(delta_phy, [-0.4, 0.4], [-0.67, 0.67])
             steer_val = float(np.clip(steer_val, -1.0, 1.0))
 
+            # ---------- 调试日志 ----------
+            logger.info(
+                f"[VEHICLE_CTRL] 接收物理转角 delta_phy={delta_phy:.4f} rad, "
+                f"映射为 CARLA steer={steer_val:.4f} "
+                f"(CARLA 正 steer → 右转)"
+            )
+
             # 强制禁止倒车，论文场景不需要
             reverse_flag = False
 
@@ -317,31 +324,3 @@ class VehicleManager:
 
     def cleanup_finished_vehicles(self,sumo_simulation,synchronization):
         pass
-        """清理 SUMO 中已销毁（到达终点或离开路网）的车辆"""
-        # try:
-        #     # 获取当前真正在 SUMO 中存活的车辆 ID 列表
-        #     active_sumo_vehicles = set(sumo_simulation.traci.vehicle.getIDList())
-        #     sumo2carla = synchronization._sumo2carla
-        #
-        #     # 必须用 list() 包裹，因为我们要在遍历时修改字典本身
-        #     for sumo_veh_id in list(sumo2carla.keys()):
-        #         if sumo_veh_id not in active_sumo_vehicles:
-        #             # 说明该车辆已经到达终点，被 SUMO 移除了
-        #             carla_actor_id = sumo2carla[sumo_veh_id]
-        #             carla_actor = self.world.get_actor(carla_actor_id)
-        #
-        #             # 1. 销毁 CARLA 中的物理残留车辆
-        #             if carla_actor is not None and carla_actor.is_alive:
-        #                 carla_actor.destroy()
-        #                 logger.debug(f"销毁已到达终点的残留 CARLA 车辆：{carla_actor_id}")
-        #
-        #             # 2. 【核心修复】从同步字典中彻底移除，防止 bridge_helper 接着同步它报错
-        #             del sumo2carla[sumo_veh_id]
-        #
-        #             # 顺手把 _carla2sumo 映射也清了（双向安全）
-        #             if hasattr(synchronization,
-        #                        '_carla2sumo') and carla_actor_id in synchronization._carla2sumo:
-        #                 del synchronization._carla2sumo[carla_actor_id]
-        #
-        # except Exception as e:
-        #     logger.warning(f"清理 SUMO 车辆时发生异常: {e}")```

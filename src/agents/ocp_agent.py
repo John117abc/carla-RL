@@ -160,6 +160,19 @@ class OcpAgent(BaseAgent):
         cross = dx * torch.sin(ref_phi) - dy * torch.cos(ref_phi)
         delta_p = min_dist * torch.sign(cross)
 
+        # ---------- 调试日志：打印第一个样本的横向误差计算细节 ----------
+        if B > 0:
+            _ego = ego_xy[0, 0].detach().cpu().numpy()
+            _ref = ref_xy[0, 0].detach().cpu().numpy()
+            _phi = ref_phi[0, 0].item()
+            _cross = cross[0, 0].item()
+            _sign = 1 if _cross >= 0 else -1
+            _dp = delta_p[0, 0].item()
+            logger.info(
+                f"[REF_ERROR] ego_xy=({_ego[0]:.3f},{_ego[1]:.3f}), ref_xy=({_ref[0]:.3f},{_ref[1]:.3f}), "
+                f"ref_phi={_phi:.4f}rad, cross={_cross:.4f}, sign={_sign}, delta_p={_dp:.4f}m"
+            )
+
         # 航向误差δ_φ（归一化到[-π, π]）
         delta_phi = ego_phi - ref_phi
         delta_phi = torch.atan2(torch.sin(delta_phi), torch.cos(delta_phi))
@@ -329,7 +342,15 @@ class OcpAgent(BaseAgent):
 
             a_phy = np.interp(norm_action[0], [-1, 1], [-3.0, 1.5])
             # 转向符号修正：actor 输出正值应映射为左转（负前轮转角）
-            delta_phy = -np.interp(norm_action[1], [-1, 1], [-0.4, 0.4])
+            norm_steer = norm_action[1]
+            delta_phy = -np.interp(norm_steer, [-1, 1], [-0.4, 0.4])
+
+            # ---- 调试日志 ----
+            logger.info(
+                f"[ACTION] norm_steer={norm_steer:.4f} -> delta_phy={delta_phy:.4f} rad "
+                f"(正=右转? 实际映射: if norm_steer>0 => delta_phy<0 -> 左转)"
+            )
+
             phy_action = np.array([a_phy, delta_phy], dtype=np.float32)
 
             return phy_action, np.zeros(1, dtype=np.float32)
