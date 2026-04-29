@@ -222,9 +222,9 @@ class OcpAgent(BaseAgent):
                 current_state)  # [B, 2]
             a_phy = norm_action[
                         :, 0:1] * 2.25 - 0.75  # [-1,1] → [-3, 1.5] m/s²
-            # 转向符号修正：actor 输出正值应映射为左转（负前轮转角），以纠正实际系统中“总是右转”的问题
-            delta_phy = -norm_action[
-                            :, 1:2] * 0.4  # [-1,1] → [0.4,-0.4] rad，即正值→左转
+            # 转向映射：正值→右转，负值→左转，直接乘以0.4
+            delta_phy = norm_action[
+                            :, 1:2] * 0.4  # [-1,1] → [-0.4,0.4] rad
             phy_action = torch.cat([a_phy, delta_phy], dim=1)
 
             next_ego = self.dynamics_model(current_ego, phy_action)
@@ -341,14 +341,14 @@ class OcpAgent(BaseAgent):
                 norm_action = np.clip(norm_action + noise, -1.0, 1.0)
 
             a_phy = np.interp(norm_action[0], [-1, 1], [-3.0, 1.5])
-            # 转向符号修正：actor 输出正值应映射为左转（负前轮转角）
+            # 转向映射：正值→右转，负值→左转，直接乘以0.4
             norm_steer = norm_action[1]
-            delta_phy = -np.interp(norm_steer, [-1, 1], [-0.4, 0.4])
+            delta_phy = norm_steer * 0.4   # [-1,1] → [-0.4,0.4] rad
 
             # ---- 调试日志 ----
             logger.info(
                 f"[ACTION] norm_steer={norm_steer:.4f} -> delta_phy={delta_phy:.4f} rad "
-                f"(正=右转? 实际映射: if norm_steer>0 => delta_phy<0 -> 左转)"
+                f"(正=右转? norm_steer>0 => 右转; norm_steer<0 => 左转)"
             )
 
             phy_action = np.array([a_phy, delta_phy], dtype=np.float32)
