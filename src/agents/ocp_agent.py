@@ -157,7 +157,8 @@ class OcpAgent(BaseAgent):
         # 使用真实相对位置计算，而非假定原点
         dx = ref_xy[..., 0] - ego_xy[..., 0]
         dy = ref_xy[..., 1] - ego_xy[..., 1]
-        cross = dx * torch.sin(ref_phi) - dy * torch.cos(ref_phi)
+        # 【关键修复】使符号计算与环境 calc_ref_error 保持一致（dy*cos - dx*sin）
+        cross = dy * torch.cos(ref_phi) - dx * torch.sin(ref_phi)
         delta_p = min_dist * torch.sign(cross)
 
         # ---------- 调试日志：打印第一个样本的横向误差计算细节 ----------
