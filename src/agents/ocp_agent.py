@@ -149,7 +149,7 @@ class OcpAgent(BaseAgent):
 
         # 计算带符号横向误差δ_p (论文定义：左侧为正)
         # 使用真实相对位置计算，而非假定原点
-        dx = ref_xy[..., 0] - ego_xy[..., 0]
+        dx = ref_xy[..., 0] - ego_xy[..., 0 ]
         dy = ref_xy[..., 1] - ego_xy[..., 1]
         # 【关键修复】使符号计算与环境 calc_ref_error 保持一致（dy*cos - dx*sin）
         cross = dy * torch.cos(ref_phi) - dx * torch.sin(ref_phi)
