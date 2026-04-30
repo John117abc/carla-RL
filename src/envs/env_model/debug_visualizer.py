@@ -19,8 +19,7 @@ class DebugVisualizer:
         # 显示当前步数和最大步数
         step_num_text = f'now step:{step_count},\n max limit step:{self.config["termination"]["max_episode_steps"]}'
         # 显示ego文字
-        world_ego_x, world_ego_y = ego_to_world_coordinate(ego_state[0][0][0], ego_state[0][0][1],
-                                                           self.vehicle_manager.ego_vehicle.get_transform())
+        world_ego_x, world_ego_y = ego_state[0][0][0],ego_state[0][0][1]
 
         # CARLA+SUMO固定步长0.05s，显示时间统一适配，杜绝闪烁
         SYNC_STEP = fixed_delta_seconds/5  # 必须和fixed_delta_seconds一致
@@ -84,27 +83,15 @@ class DebugVisualizer:
             color=carla.Color(0, 0, 255)
         )
 
-        # 绘制预测点
-        # 【新增】可视化 OCP 预测轨迹
-        if predict_traj is not None:
-            try:
-                traj_xy = predict_traj[0, :, :2]  # [horizon, 2] 自车坐标系 xy
-
-                # 转换至世界坐标系
-                ego_transform = self.vehicle_manager.ego_vehicle.get_transform()
-                world_points = []
-                for x, y in traj_xy:
-                    wx, wy = ego_to_world_coordinate(float(x), float(y), ego_transform)
-                    world_points.append(carla.Location(wx, wy, ego_transform.location.z))
-
-                if len(world_points) > 1:
-                    draw_predicted_trajectory(self.world,world_points,0.1,carla.Color(255, 255, 0),0.2)
-            except Exception as e:
-                logger.error(f"OCP 轨迹可视化失败: {e}")
-                traceback.print_exc()
-
-
-
+        # # 绘制预测点
+        # # 【新增】可视化 OCP 预测轨迹
+        # if predict_traj is not None:
+        #     try:
+        #         traj_xy = predict_traj[0, :, :2]
+        #         draw_predicted_trajectory(self.world,traj_xy,0.1,carla.Color(255, 255, 0),0.2)
+        #     except Exception as e:
+        #         logger.error(f"OCP 轨迹可视化失败: {e}")
+        #         traceback.print_exc()
 
 
     def update_spectator(self,ref_path,last_ref_idx,prev_spectator_transform):

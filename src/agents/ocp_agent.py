@@ -250,12 +250,11 @@ class OcpAgent(BaseAgent):
             step_l = torch.clamp(err_cost + control_cost , max=100.0)
 
             # 2. 补全约束违反量 step_phi (严格对齐论文 Eq.9: 惩罚项需平方)
-            # 【修复】使用推演后的自车位置，而非强制原点
             ego_xy = next_ego[
                 ..., :2]  # [B, 1, 2] 真实相对位置
             phi_violation = torch.zeros(B, device=self.device)
 
-            # 周车安全距离约束 (other_states 已在自车坐标系)
+            # 周车安全距离约束
             if self.DIM_OTHER > 0:
                 other_xy = next_other[
                     ..., :2]  # [B, 1, 8, 2]

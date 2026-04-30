@@ -1,7 +1,7 @@
 import numpy as np
 import math
 import carla
-from src.carla_utils import get_compass, world_to_vehicle_frame, get_ocp_observation_ego_frame,batch_world_to_ego
+from src.carla_utils import get_compass, world_to_vehicle_frame, get_ocp_observation
 
 class ObservationProcessor:
     def __init__(self, vehicle_manager, sensor_manager,world, config, normalizer):
@@ -66,7 +66,7 @@ class ObservationProcessor:
             # 获取ocp观察信息
             # 观察周车
             self.vehicle_manager.get_surrounding_vehicles()
-            network_state, s_road_ego, s_ref_ego, s_ref_error, s_road, s_ref_raw = get_ocp_observation_ego_frame(
+            network_state, s_road, s_ref_raw, s_ref_error = get_ocp_observation(
                 self.vehicle_manager.ego_vehicle,
                 self.sensor_manager.imu_sensor,
                 self.vehicle_manager.npc_vehicles,
@@ -76,15 +76,11 @@ class ObservationProcessor:
             )
 
             obs["ocp_obs"] = network_state
-            obs["s_road"] = s_road_ego
             obs["s_road_raw"] = s_road
             obs["s_ref_raw"] = s_ref_raw
             obs["s_ref_error"] = s_ref_error
             
-            # 【关键修复】转换 input_params['path_locations'] 到自车坐标系
-            #    get_ocp_observation_ego_frame 只转换了 1 个参考点，但我们需要所有路径点
-            ego_transform = self.vehicle_manager.ego_vehicle.get_transform()
-            obs["ref_path_locations"] = batch_world_to_ego(input_params['path_locations'], ego_transform)
+            obs["ref_path_locations"] = np.array([[p.x, p.y] for p in input_params['path_locations']], dtype=np.float32)
         if len(obs) == 1:
             return list(obs.values())[0]
         return obs

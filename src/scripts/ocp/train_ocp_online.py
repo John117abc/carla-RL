@@ -11,7 +11,6 @@ import torch
 from src.utils import (load_config, get_logger, setup_code_environment)
 from src.agents import OcpAgentOnline
 from src.envs.carla_env import CarlaEnv
-from src.carla_utils.ocp_setup import batch_world_to_ego
 
 logger = get_logger('train_ocp_online')
 

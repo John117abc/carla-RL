@@ -5,7 +5,7 @@ import numpy as np
 import carla
 import torch
 from typing import Dict, Any, Optional
-from src.carla_utils import RoutePlanner, batch_world_to_ego, remove_only_visible_traffic_signs
+from src.carla_utils import RoutePlanner, remove_only_visible_traffic_signs
 from src.carla_utils.draw_info import draw_lines_between_points
 from src.carla_utils.ocp_setup import ego_to_world_coordinate
 
@@ -93,7 +93,6 @@ class CarlaEnv(gym.Env):
         # 路径规划相关变量
         self.route_planner = None
         self.path_locations = None
-        self.ref_path_xy = None
         self.ref_path_xy_raw = None
         self.current_path_id = 0
         self.static_road_xy = None
@@ -348,7 +347,6 @@ class CarlaEnv(gym.Env):
 
         self.path_locations = self.route_planner.route_plane(BIRTH_POINT[self.env_cfg["world"]["map"]][0],
                                                              END_POINT[self.env_cfg["world"]["map"]],240)
-        self.ref_path_xy = batch_world_to_ego(self.path_locations, ego_vehicle.get_transform())
         self.ref_path_xy_raw = np.array([[item.x, item.y] for item in self.path_locations],dtype=np.float32)
         logger.info(f"路径规划成功！已规划{len(self.path_locations)}个坐标点")
 
@@ -443,7 +441,6 @@ class CarlaEnv(gym.Env):
             obs['ocp_obs'] = np.asarray(obs['ocp_obs'], dtype=np.float32).flatten()
             
         # 【修复】传递原始 carla.Location 列表，供训练脚本在每个时间步动态转换到当前自车坐标系
-        obs['ref_path_locations'] = self.path_locations
         self.step_count = 0
         return obs
 

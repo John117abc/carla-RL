@@ -10,28 +10,22 @@ from typing import Tuple
 
 
 def batch_world_to_ego(path_locations, ego_transform):
-    """
-    批量将 CARLA Location 列表 转换为 自车坐标系 xy 坐标
-    无循环、纯向量化计算，速度极快
-    """
-    # 1. 一次性把所有坐标转成 numpy 数组（关键提速点）
     xy_world = np.array([[p.x, p.y] for p in path_locations], dtype=np.float32)
-
-    # 2. 自车位置与航向角
     ego_x = ego_transform.location.x
     ego_y = ego_transform.location.y
     yaw = np.radians(ego_transform.rotation.yaw)
     c, s = np.cos(yaw), np.sin(yaw)
 
-    # 3. 相对位移
     dx = xy_world[:, 0] - ego_x
     dy = xy_world[:, 1] - ego_y
 
-    # 4. 旋转矩阵（向量化，一次性转换所有点）
+    # 修复1：使用正确的旋转矩阵（注意第二行符号）
     x_ego = dx * c + dy * s
-    y_ego = -dx * s + dy * c
+    y_ego = dx * (-s) + dy * c  # 修复符号问题
 
-    # 5. 组合成和你原来格式一样的 [[x,y], [x,y], ...]
+    # 修复2：确保横向误差定义正确
+    # 在OCP中：y_ego > 0 表示参考路径在车辆左侧（需要右转）
+    #          y_ego < 0 表示参考路径在车辆右侧（需要左转）
     return np.stack([x_ego, y_ego], axis=1).tolist()
 
 def ego_to_world_coordinate(

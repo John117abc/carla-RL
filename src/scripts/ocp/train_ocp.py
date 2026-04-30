@@ -18,7 +18,6 @@ from src.buffer import Trajectory
 
 import gymnasium as gym
 from src.envs.carla_env import CarlaEnv
-from src.carla_utils.ocp_setup import batch_world_to_ego
 
 logger = get_logger('train_ocp')
 
@@ -87,24 +86,21 @@ def main():
             # 记录本回合的轨迹，用于碰撞后存入安全关键缓冲区
             episode_transitions = []
             while not done:
-                ego_transform = env.vehicle_manager.ego_vehicle.get_transform()
-                ref_path_ego_np = np.array(batch_world_to_ego(ref_path_locations, ego_transform), dtype=np.float32)
-                
                 # 【防御】检查参考路径是否包含 nan/inf
-                if np.any(np.isnan(ref_path_ego_np)) or np.any(np.isinf(ref_path_ego_np)):
+                if np.any(np.isnan(ref_path_locations)) or np.any(np.isinf(ref_path_locations)):
                     logger.warning("参考路径包含 nan/inf，跳过当前步")
                     pass 
                 
-                ref_path_tensor = torch.from_numpy(ref_path_ego_np).unsqueeze(0).to(device)
+                ref_path_tensor = torch.from_numpy(ref_path_locations).unsqueeze(0).to(device)
 
-                if ref_path_tensor.shape != (1, ref_path_ego_np.shape[0], 2):
+                if ref_path_tensor.shape != (1, ref_path_locations.shape[0], 2):
                     raise ValueError(f"参考路径维度异常: {ref_path_tensor.shape} (期望 [1, N, 2])")
 
                 action, _ = agent.select_action(state,train_config['continue_ocp'])
                 next_obs, reward, _, _, info = env.step(action)
                 next_state = next_obs['ocp_obs']
                 # 【修改】获取道路信息，转为tensor
-                road_state_np = obs['s_road']
+                road_state_np = obs['s_road_raw']
                 road_state_tensor = torch.from_numpy(road_state_np).unsqueeze(0).to(
                     device) if road_state_np is not None else None
 
@@ -132,6 +128,7 @@ def main():
 
                 # 打印关键信息
                 if agent.global_step % train_config["log_interval"] == 0:
+                    logger.info(f"车辆偏右时: ref_path_ego[0] = {ref_path_locations[0]} (X,Y)")
                     if 'speed' in info:
                         logger.info(f"    速度: {info['speed']:.2f} km/h,动作：{action}")
                         try:
