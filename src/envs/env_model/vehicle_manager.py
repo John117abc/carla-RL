@@ -244,15 +244,10 @@ class VehicleManager:
                 throttle_val = 0.0
                 brake_val = 0.0
 
-            # ---------- 转向映射与平滑 ----------
-            steer_val_raw = np.interp(delta_phy, [-0.4, 0.4], [-0.67, 0.67])
-            steer_val_raw = float(np.clip(steer_val_raw, -1.0, 1.0))
-
-            if self.steer_smooth is None:
-                self.steer_smooth = steer_val_raw
-            else:
-                self.steer_smooth = 0.8 * self.steer_smooth + 0.2 * steer_val_raw
-            steer_val = float(np.clip(self.steer_smooth, -1.0, 1.0))
+            # 修改映射关系，去掉放大
+            steer_val_raw = np.clip(action[1], -1.0, 1.0)  # 直接使用网络输出
+            # 去掉滤波逻辑，直接赋值
+            steer_val = steer_val_raw
 
             reverse_flag = False
 

@@ -78,8 +78,8 @@ class OcpAgent(BaseAgent):
         )
 
         # 论文核心权重（严格对齐原文 Table III & Eq. 1）
-        self.q_lat = 0.04  # 横向误差权重
-        self.q_head = 0.1  # 航向误差权重
+        self.q_lat = 0.1  # 提高位置权重
+        self.q_head = 0.05  # 降低航向权重
         # 加速纵向跟踪激励
         self.q_speed = 0.01  # 速度误差权重（提高至0.01，强化纵向跟踪）
         # 控制权重：加速度 0.1，转向角 0.02（适度提高转向代价，抑制画龙）
