@@ -3,7 +3,7 @@ import os
 import gymnasium as gym
 import numpy as np
 import torch
-import math
+import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 from typing import Dict, Any, Tuple, List, Union
@@ -78,12 +78,12 @@ class OcpAgent(BaseAgent):
         )
 
         # 论文核心权重（严格对齐原文 Table III & Eq. 1）
-        self.q_lat = 10  # 横向误差权重
-        self.q_head = 5.0  # 航向误差权重
+        self.q_lat = 0.04  # 横向误差权重
+        self.q_head = 0.1  # 航向误差权重
         # 加速纵向跟踪激励
-        self.q_speed = 2.0  # 速度误差权重（提高至0.01，强化纵向跟踪）
-
-        self.R_matrix = np.diag([0.05, 0.5])
+        self.q_speed = 0.01  # 速度误差权重（提高至0.01，强化纵向跟踪）
+        # 控制权重：加速度 0.1，转向角 0.02（适度提高转向代价，抑制画龙）
+        self.R_matrix = np.diag([0.005, 0.1])
 
         # GEP算法超参数（严格对齐论文收敛逻辑）
         self.init_penalty = self.ocp_config['init_penalty']
@@ -175,9 +175,6 @@ class OcpAgent(BaseAgent):
         # 速度误差δ_v
         delta_v = ego_vlon - self.ref_vlon
 
-        delta_p = torch.clamp(delta_p, -5.0, 5.0)
-        delta_phi = torch.clamp(delta_phi, -math.pi, math.pi)
-        delta_v = torch.clamp(delta_v, -5.0, 5.0)
         return torch.stack([delta_p, delta_phi, delta_v], dim=-1)
 
     def _forward_horizon(self,
@@ -241,23 +238,16 @@ class OcpAgent(BaseAgent):
             head_err_t = next_ref_error[..., 1].squeeze(1)
             speed_err_t = next_ref_error[..., 2].squeeze(1)
             # 【防御】限制误差范围，防止梯度爆炸
-            # 在计算 err_cost 之前
-            lat_err_t = torch.clamp(lat_err_t, -3.0, 3.0)
-            head_err_t = torch.clamp(head_err_t, -math.pi, math.pi)
-            speed_err_t = torch.clamp(speed_err_t, -3.0, 3.0)
-
+            # lat_err_t = torch.clamp(lat_err_t, -10.0, 10.0)
+            # head_err_t = torch.clamp(head_err_t, -3.14, 3.14)
+            # speed_err_t = torch.clamp(speed_err_t, -10.0, 10.0)
             err_cost = self.q_lat * (lat_err_t ** 2) + self.q_head * (head_err_t ** 2) + self.q_speed * (
                         speed_err_t ** 2)
 
             r_weights = torch.tensor(self.R_matrix.diagonal().copy(), device=self.device).float()
             control_cost = torch.sum((phy_action ** 2) * r_weights, dim=1)
 
-            # 控制成本同样截断
-            control_cost = torch.sum((phy_action ** 2) * r_weights, dim=1)
-            control_cost = torch.clamp(control_cost, 0.0, 2.0)
-
-            step_l = err_cost + control_cost
-            step_l = torch.clamp(step_l, 0.0, 20.0)  # 单步成本上限20
+            step_l = torch.clamp(err_cost + control_cost , max=100.0)
 
             # 2. 补全约束违反量 step_phi (严格对齐论文 Eq.9: 惩罚项需平方)
             # 【修复】使用推演后的自车位置，而非强制原点
@@ -416,15 +406,7 @@ class OcpAgent(BaseAgent):
             step_l, step_phi, states_traj = self._forward_horizon(state_tensor, ref_path_tensor, road_tensor)
             # 有限时域累计成本 (无折扣 γ=1，对齐论文 OCP)
             # 【防御】截断目标值，防止梯度爆炸
-            # 在 update 函数中，替换 targets 计算部分
-            gamma = 0.95
-            # 计算每个时间步的累计折扣回报
-            targets = torch.zeros_like(step_l)  # [B, horizon]
-            running = torch.zeros(step_l.shape[0], device=self.device)
-            for t in reversed(range(self.horizon)):
-                running = step_l[:, t] + gamma * running
-                targets[:, t] = running
-            targets = torch.clamp(targets, -50.0, 50.0)
+            targets = torch.clamp(torch.flip(torch.cumsum(torch.flip(step_l, [1]), dim=1), [1]), max=1000.0)
 
         all_states = torch.cat([state_tensor.unsqueeze(1), states_traj], dim=1)
         critic_inputs = all_states[:, :-1].reshape(-1, self.TOTAL_STATE_DIM)
