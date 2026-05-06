@@ -13,6 +13,8 @@ from src.models.bicycle import BicycleModel
 from src.utils import save_checkpoint, load_checkpoint
 from src.buffer import StochasticBuffer
 from src.utils import get_logger
+from src.carla_utils import rect_min_dist_sq
+
 
 logger = get_logger('ocp_agent')
 
@@ -83,6 +85,10 @@ class OcpAgent(BaseAgent):
         # 加速纵向跟踪激励
         self.q_speed = 0.01  # 速度误差权重（提高至0.01，强化纵向跟踪）
         self.R_matrix = np.diag([0.005, 0.1])
+
+        # 车辆信息
+        self.HALF_L = 2.25  # 车长的一半
+        self.HALF_W = 1.0  # 车宽的一半
 
         # GEP算法超参数（严格对齐论文收敛逻辑）
         self.init_penalty = self.ocp_config['init_penalty']
@@ -196,7 +202,7 @@ class OcpAgent(BaseAgent):
             road_left = torch.zeros(B, 1, 20, 2, device=self.device)
             road_right = torch.zeros(B, 1, 20, 2, device=self.device)
 
-            # 安全距离平方
+        # 安全距离平方
         safe_veh_sq = self.other_car_min_distance ** 2
         safe_road_sq = self.road_min_distance ** 2
 
@@ -253,22 +259,34 @@ class OcpAgent(BaseAgent):
             phi_violation = torch.zeros(B, device=self.device)
 
             # 周车安全距离约束
+            # 周车安全距离约束（矩形包络）
             if self.DIM_OTHER > 0:
-                other_xy = next_other[
-                    ..., :2]  # [B, 1, 8, 2]
-                dist_veh_sq = torch.sum((ego_xy.unsqueeze(2) - other_xy) ** 2,
-                                        dim=-1)  # [B, 1, 8]
+                # 取 xy 和 航向
+                other_xy = next_other[..., :2]  # [B, 1, N, 2]
+                other_phi = next_other[..., 2]  # [B, 1, N]  真实航向，不再估算
 
-                # 【新增】过滤掉全零占位车辆（没有周车的 slot），避免产生虚假的安全违反
-                other_norm = torch.norm(other_xy,
-                                        dim=-1)  # [B, 1, 8]
-                invalid_mask = other_norm < 1e-3  # 范数极小表示该 slot 为空
-                # 将无效车辆的平方距离设为极大值，使 safe_veh_sq - dist_veh_sq 为负，违规为 0
-                dist_veh_sq = torch.where(invalid_mask, torch.full_like(dist_veh_sq, 1e9), dist_veh_sq)
+                # 扁平化并计算矩形最小距离平方
+                B = next_ego.shape[0]
+                N_other = other_xy.shape[2]
+                ego_xy_ = next_ego[..., :2].squeeze(1)  # [B, 2]
+                ego_phi_ = next_ego[..., 4].squeeze(1)  # [B]
+                other_xy_flat = other_xy.reshape(-1, 2)
+                other_phi_flat = other_phi.reshape(-1)
+                ego_xy_exp = ego_xy_.repeat_interleave(N_other, dim=0)
+                ego_phi_exp = ego_phi_.repeat_interleave(N_other, dim=0)
 
-                # 【防御】截断违反量，防止碰撞时惩罚项爆炸
-                veh_violation = torch.clamp(torch.maximum(safe_veh_sq - dist_veh_sq, torch.zeros_like(dist_veh_sq)),
-                                            max=10.0)
+                # rect_min_dist_sq
+                dist_sq = rect_min_dist_sq(ego_xy_exp, ego_phi_exp,
+                                           other_xy_flat, other_phi_flat,
+                                           self.HALF_L, self.HALF_W).view(B, 1, N_other)
+
+                # 过滤无效占位车辆（xy 接近 0 的视为空）
+                other_norm = torch.norm(other_xy.squeeze(1), dim=-1)  # [B, N]
+                invalid_mask = other_norm < 1e-3
+                dist_sq = torch.where(invalid_mask.unsqueeze(1),
+                                      torch.full_like(dist_sq, 1e9), dist_sq)
+
+                veh_violation = torch.clamp(safe_veh_sq - dist_sq, min=0).clamp(max=10.0)
                 phi_violation += (veh_violation ** 2).sum(dim=[1, 2])
 
                 # 道路边缘安全距离约束 (road_left/right 已在自车坐标系)
@@ -450,21 +468,19 @@ class OcpAgent(BaseAgent):
 
     def predict_other_next_batch(self, other_states: torch.Tensor, dt: float) -> torch.Tensor:
         """
-        注：论文 Table II 指出 ω_pred^j 应随车辆类型与相对路口位置查表变化。
-        当前实现为恒速模型，如需严格对齐可替换为查表逻辑。
-        输入格式必须为 [B, 1, N_others, 4]，其中 4 维为 [x_rel, y_rel, vx_rel, vy_rel] (自车坐标系)
+        周车状态: [B, 1, N, 4]  → 4 = [x, y, phi(rad), v_lon]
         """
         if other_states.dim() != 4 or other_states.shape[3] != 4:
-            raise ValueError(f"周车状态维度必须为 [B,1,N_others,4]，当前={other_states.shape}")
-
-            # 防御性处理：若配置 others=0，直接返回全零张量保持形状一致
+            raise ValueError(f"周车状态维度必须为 [B,1,N,4]，当前={other_states.shape}")
         if other_states.shape[2] == 0:
             return torch.zeros_like(other_states)
 
-        x, y, vx, vy = other_states[..., 0], other_states[..., 1], other_states[..., 2], other_states[..., 3]
-        x_next = x + dt * vx
-        y_next = y + dt * vy
-        return torch.stack([x_next, y_next, vx, vy], dim=-1)
+        x, y, phi, v = (other_states[..., 0], other_states[..., 1],
+                        other_states[..., 2], other_states[..., 3])
+        x_next = x + dt * v * torch.cos(phi)
+        y_next = y + dt * v * torch.sin(phi)
+        # phi 和 v 保持不变（恒速恒向）
+        return torch.stack([x_next, y_next, phi, v], dim=-1)
 
     def unpack_tensor(self, data: torch.Tensor) -> Tuple[torch.Tensor, ...]:
         if data.dim() != 3 or data.shape[2] != self.TOTAL_STATE_DIM:

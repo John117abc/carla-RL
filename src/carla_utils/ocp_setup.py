@@ -6,6 +6,7 @@ from src.carla_utils.vehicle_control import world_to_vehicle_frame
 
 import carla
 import math
+import torch
 from typing import Tuple
 
 
@@ -654,3 +655,116 @@ def get_current_lane_forward_edges(
         accumulated_dist += resolution
 
     return left_edges, right_edges
+
+
+
+def rect_min_dist_sq(ego_xy: torch.Tensor,        # [B, 2]
+                     ego_phi: torch.Tensor,        # [B]
+                     other_xy: torch.Tensor,       # [B, 2]
+                     other_phi: torch.Tensor,      # [B]
+                     half_l: float, half_w: float) -> torch.Tensor:   # [B]
+    """
+    返回自车与周车矩形之间的最小距离平方（无碰撞时 >0，碰撞时为0）
+    ego_phi, other_phi 是世界系下的航向角
+    """
+    B = ego_xy.shape[0]
+    device = ego_xy.device
+
+    # ----- 四个顶点相对中心坐标（局部坐标系） -----
+    corners_local = torch.tensor([
+        [ half_l,  half_w],
+        [ half_l, -half_w],
+        [-half_l, -half_w],
+        [-half_l,  half_w]
+    ], device=device, dtype=ego_xy.dtype)  # [4, 2]
+
+    # ----- 构建旋转矩阵 -----
+    def rot_matrix(phi):  # [B]
+        c = torch.cos(phi)
+        s = torch.sin(phi)
+        R = torch.stack([c, -s, s, c], dim=-1).view(-1, 2, 2)  # [B, 2, 2]
+        return R
+
+    R_ego = rot_matrix(ego_phi)    # [B, 2, 2]
+    R_oth = rot_matrix(other_phi)
+
+    # ----- 全局坐标下的四个角点 -----
+    ego_corners = (corners_local.unsqueeze(0) @ R_ego.transpose(1, 2)) + ego_xy.unsqueeze(1)   # [B, 4, 2]
+    oth_corners = (corners_local.unsqueeze(0) @ R_oth.transpose(1, 2)) + other_xy.unsqueeze(1) # [B, 4, 2]
+
+    # ----- 分离轴候选：两个矩形的两条边法向 -----
+    def get_axes(corners):  # [B, 4, 2] -> [B, 2, 2] (两个正交轴)
+        # 边向量
+        edges = corners[:, 1:] - corners[:, :-1]              # [B, 3, 2]
+        # 取其中两条正交边（任意相邻边都可以）
+        axis1 = edges[:, 0]                                   # [B, 2]
+        axis2 = edges[:, 1]                                   # [B, 2]
+        # 法向量（单位化）
+        axis1 = axis1 / torch.norm(axis1, dim=1, keepdim=True).clamp(min=1e-8)
+        axis2 = axis2 / torch.norm(axis2, dim=1, keepdim=True).clamp(min=1e-8)
+        return torch.stack([axis1, axis2], dim=1)             # [B, 2, 2]
+
+    axes_ego = get_axes(ego_corners)   # [B, 2, 2]
+    axes_oth = get_axes(oth_corners)   # [B, 2, 2]
+    all_axes = torch.cat([axes_ego, axes_oth], dim=1)  # [B, 4, 2]
+
+    # ----- 投影并检测重叠 -----
+    def project(corners, axis):       # corners: [B,4,2], axis: [B,4,2] -> [B,4,2] (点乘)
+        return (corners.unsqueeze(2) * axis.unsqueeze(1)).sum(dim=-1)  # [B, 4, 4]
+
+    proj_ego = project(ego_corners, all_axes)  # [B, 4, 4]
+    proj_oth = project(oth_corners, all_axes)  # [B, 4, 4]
+
+    ego_min, _ = proj_ego.min(dim=1)   # [B, 4]
+    ego_max, _ = proj_ego.max(dim=1)
+    oth_min, _ = proj_oth.min(dim=1)
+    oth_max, _ = proj_oth.max(dim=1)
+
+    # 任意轴上投影不重叠 → 未碰撞
+    overlap = torch.min(ego_max, oth_max) - torch.max(ego_min, oth_min)  # [B, 4]
+    separated = (overlap < 0).any(dim=1)  # [B]  bool
+
+    # ----- 计算最短距离（仅对未碰撞的样本） -----
+    dist_sq = torch.zeros(B, device=device, dtype=ego_xy.dtype)
+
+    if separated.any():
+        sep_idx = separated.nonzero(as_tuple=True)[0]
+        # 方法：取顶点到对边距离 + 边到边距离
+        # 简化：计算所有顶点到对方所有边的最短距离
+        def point_to_segment_dist_sq(p, a, b):  # p:[N,2], a:[N,2], b:[N,2]
+            ab = b - a
+            ap = p - a
+            t = ((ap * ab).sum(dim=-1) / (ab.norm(dim=-1)**2 + 1e-8)).clamp(0, 1)
+            projection = a + t.unsqueeze(-1) * ab
+            return ((p - projection)**2).sum(dim=-1)
+
+        # 对 separated 样本计算
+        ego_c = ego_corners[sep_idx]  # [S, 4, 2]
+        oth_c = oth_corners[sep_idx]  # [S, 4, 2]
+        S = ego_c.shape[0]
+
+        # 周车每条边
+        oth_edges = [[0,1],[1,2],[2,3],[3,0]]
+        ego_edges = [[0,1],[1,2],[2,3],[3,0]]
+
+        min_d_sq = torch.full((S,), 1e9, device=device)
+
+        # 1) 自车顶点到周车各边
+        for i in range(4):  # ego corner
+            for j0, j1 in oth_edges:
+                d = point_to_segment_dist_sq(ego_c[:, i, :], oth_c[:, j0, :], oth_c[:, j1, :])
+                min_d_sq = torch.min(min_d_sq, d)
+
+        # 2) 周车顶点到自车各边
+        for i in range(4):
+            for j0, j1 in ego_edges:
+                d = point_to_segment_dist_sq(oth_c[:, i, :], ego_c[:, j0, :], ego_c[:, j1, :])
+                min_d_sq = torch.min(min_d_sq, d)
+
+        # 3) 平行边的最短距离（边对边）已在上述覆盖，但为保证完全，再加一次边-边垂直距离
+        # 这部分通常被顶点-边覆盖，可省略
+
+        dist_sq[sep_idx] = min_d_sq
+
+    # 若已碰撞，dist_sq 保持 0
+    return dist_sq
