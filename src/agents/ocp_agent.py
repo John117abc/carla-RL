@@ -82,8 +82,7 @@ class OcpAgent(BaseAgent):
         self.q_head = 0.05  # 降低航向权重
         # 加速纵向跟踪激励
         self.q_speed = 0.01  # 速度误差权重（提高至0.01，强化纵向跟踪）
-        # 控制权重：加速度 0.1，转向角 0.02（适度提高转向代价，抑制画龙）
-        self.R_matrix = np.diag([0.005, 0.1])
+        self.R_matrix = np.diag([0.001, 1.0])
 
         # GEP算法超参数（严格对齐论文收敛逻辑）
         self.init_penalty = self.ocp_config['init_penalty']
@@ -151,9 +150,8 @@ class OcpAgent(BaseAgent):
         # 使用真实相对位置计算，而非假定原点
         dx = ref_xy[..., 0] - ego_xy[..., 0 ]
         dy = ref_xy[..., 1] - ego_xy[..., 1]
-        # 【关键修复】使符号计算与环境 calc_ref_error 保持一致（dy*cos - dx*sin）
         cross = dy * torch.cos(ref_phi) - dx * torch.sin(ref_phi)
-        delta_p = min_dist * torch.sign(cross)
+        delta_p = cross
 
         # ---------- 调试日志：打印第一个样本的横向误差计算细节 ----------
         if B > 0:

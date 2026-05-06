@@ -369,8 +369,8 @@ def get_ref_observation(
             min_distance = distance
             closest_idx = idx
 
-    # 2. 参考点偏移+4 (舒适性设计，论文未禁止)
-    ref_index = min(closest_idx + ref_offset, len(path_locations) - 1)
+    # 2. 参考点偏移+4
+    ref_index = min(closest_idx, len(path_locations) - 1)
     ref_location = path_locations[ref_index]
 
     # 3. 计算参考点航向角 (弧度) - 基于前后路径点差分

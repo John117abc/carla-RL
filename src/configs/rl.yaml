@@ -12,7 +12,7 @@ rl:
   continue_a2c: False    # 是否继续训练，如果需要继续训练，则需要填写模型地址
   model_path_a2c: 'checkpoints/20260131/a2c-v1.0_Town06_Opt_020547_episode=4000.pth'
   continue_ocp: False    # 是否继续训练，如果需要继续训练，则需要填写模型地址
-  model_path_ocp: 'checkpoints/20260428/ocp-v1.0_Town06_Opt_232003_episode=435.pth'
+  model_path_ocp: 'checkpoints/20260430/ocp-v1.0_Town06_Opt_121253_episode=15.pth'
   num_eps_eval: 10    # 评估步数
 
   A2C:
@@ -41,7 +41,7 @@ rl:
     min_start_train: 1024  # 先收集10000步随机样本，再开始训练
     total_capacity: 500000  # 还原论文的5e5缓冲区大小
     batch_size: 512  # 放大batch_size，提升训练稳定性
-    horizon: 25  # 和论文完全一致，25步=2.5s
+    horizon: 20  # 和论文完全一致，25步=2.5s
     dt: 0.1  # 和Carla仿真步长对齐
     action_noise: 0.1
 
