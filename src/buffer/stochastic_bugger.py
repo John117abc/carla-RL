@@ -671,7 +671,7 @@ class StochasticBuffer:
             return []
 
         # 提高安全关键样本比重 (Safety=0.45, Performance=0.2, Diversity=0.15, Curriculum=0.2)
-        weights = [0.45, 0.2, 0.15, 0.2]
+        weights = [0.7, 0.1, 0.1, 0.1]
         samples = []
 
         # 确保每个缓冲区有足够样本

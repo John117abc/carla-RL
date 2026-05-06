@@ -201,7 +201,8 @@ def get_ocp_observation(
         path_locations: List[carla.Location],
         ego_ref_speed: float,
         ref_offset: int,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        other_car_min_distance:float,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     获取完全对齐论文的OCP控制所需全量观测信息
     :param ref_offset: 参考偏移
@@ -222,7 +223,7 @@ def get_ocp_observation(
     s_ego = get_ego_observation(ego_vehicle, ego_imu)
 
     # 2. 获取周车状态
-    s_other = get_other_observation(ego_vehicle, other_vehicles)
+    s_other = get_other_observation(ego_vehicle, other_vehicles,distance_threshold = other_car_min_distance)
 
     # 3. 获取多帧道路边缘状态
     s_road = get_road_observation_multi_frame(ego_vehicle, ego_vehicle.get_world())
@@ -241,7 +242,7 @@ def get_ocp_observation(
     ], axis=0)
 
     # 单独返回道路信息，仅用于约束计算
-    return network_state, s_road, s_ref_raw, s_ref_error
+    return network_state, s_road, s_ref_raw, s_ref_error,s_other
 
 
 def get_ego_observation(
@@ -369,12 +370,11 @@ def get_ref_observation(
             min_distance = distance
             closest_idx = idx
 
-    # 2. 参考点偏移+4
+    # 2. 参考点偏移
     ref_index = min(closest_idx, len(path_locations) - 1)
     ref_location = path_locations[ref_index]
 
     # 3. 计算参考点航向角 (弧度) - 基于前后路径点差分
-    ref_yaw_rad = 0.0
     if len(path_locations) >= 2:
         next_idx = min(ref_index + 1, len(path_locations) - 1)
         delta_x = path_locations[next_idx].x - path_locations[ref_index].x

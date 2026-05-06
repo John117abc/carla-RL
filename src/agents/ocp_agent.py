@@ -78,11 +78,11 @@ class OcpAgent(BaseAgent):
         )
 
         # 论文核心权重（严格对齐原文 Table III & Eq. 1）
-        self.q_lat = 0.1  # 提高位置权重
-        self.q_head = 0.05  # 降低航向权重
+        self.q_lat = 0.04  # 提高位置权重
+        self.q_head = 0.1  # 降低航向权重
         # 加速纵向跟踪激励
         self.q_speed = 0.01  # 速度误差权重（提高至0.01，强化纵向跟踪）
-        self.R_matrix = np.diag([0.001, 1.0])
+        self.R_matrix = np.diag([0.005, 0.1])
 
         # GEP算法超参数（严格对齐论文收敛逻辑）
         self.init_penalty = self.ocp_config['init_penalty']
@@ -180,7 +180,7 @@ class OcpAgent(BaseAgent):
                          ref_path_tensor: torch.Tensor,
                          road_state: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        严格对齐论文 OCP 公式与 GEP 算法，统一使用自车坐标系
+        严格对齐论文 OCP 公式与 GEP 算法，
         """
         B = state_tensor.shape[0]
         ego_state, other_states, ref_error = self.unpack_tensor(state_tensor.unsqueeze(1))

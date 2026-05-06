@@ -66,20 +66,21 @@ class ObservationProcessor:
             # 获取ocp观察信息
             # 观察周车
             self.vehicle_manager.get_surrounding_vehicles()
-            network_state, s_road, s_ref_raw, s_ref_error = get_ocp_observation(
+            network_state, s_road, s_ref_raw, s_ref_error, s_others = get_ocp_observation(
                 self.vehicle_manager.ego_vehicle,
                 self.sensor_manager.imu_sensor,
                 self.vehicle_manager.npc_vehicles,
                 input_params['path_locations'],
                 input_params['ego_ref_speed'],
-                input_params["ref_offset"]
+                input_params['ref_offset'],
+                input_params['other_car_min_distance']
             )
 
             obs["ocp_obs"] = network_state
             obs["s_road_raw"] = s_road
             obs["s_ref_raw"] = s_ref_raw
             obs["s_ref_error"] = s_ref_error
-            
+            obs["s_others"] = s_others
             obs["ref_path_locations"] = np.array([[p.x, p.y] for p in input_params['path_locations']], dtype=np.float32)
         if len(obs) == 1:
             return list(obs.values())[0]

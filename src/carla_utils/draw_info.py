@@ -2,10 +2,7 @@ import carla
 import numpy as np
 
 # ====================== 画线函数（终极修复） ======================
-def draw_lines_between_points(world, points, display_time=5.0, color=None, thickness=0.15):
-    if color is None:
-        color = carla.Color(255, 0, 0)
-
+def draw_lines_between_points(world, points, display_time=5.0, color=carla.Color(255, 0, 0), thickness=0.15):
     debug = world.debug
 
     for i in range(len(points) - 1):
@@ -47,7 +44,7 @@ def draw_points(world, points, display_time=5.0, color=None, size=0.2):
     for p in points:
         # 安全转换坐标
         if not isinstance(p, carla.Location):
-            p = carla.Location(float(p[0]), float(p[1]), float(p[2]) if len(p) >= 3 else 0.0)
+            p = carla.Location(float(p[0]), float(p[1]), float(p[2]) if len(p) >= 3 else 5.0)
 
         # 绘制点（无连线，纯点）
         # draw_point 参数：位置，大小，颜色，显示时间

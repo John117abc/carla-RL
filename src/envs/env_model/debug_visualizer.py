@@ -1,17 +1,19 @@
+import math
 import numpy as np
 import carla
 import traceback
-from src.carla_utils import draw_points,draw_text_at_location, ego_to_world_coordinate, draw_predicted_trajectory
+from src.carla_utils import draw_points,draw_text_at_location, draw_lines_between_points
 from src.utils import get_logger, unpack_ocp_numpy
 
 logger = get_logger(name='debug_visualizer')
 class DebugVisualizer:
-    def __init__(self, world, vehicle_manager, config):
+    def __init__(self, world, vehicle_manager, config,other_car_min_distance):
         self.world = world
         self.vehicle_manager = vehicle_manager
         self.config = config
+        self.other_car_min_distance = other_car_min_distance
 
-    def debug_ocp(self,ocp_obs, s_ref_raw, s_road,step_count,fixed_delta_seconds,predict_traj):
+    def debug_ocp(self,ocp_obs, s_ref_raw, s_road, s_others,step_count,fixed_delta_seconds,predict_traj):
         ocp_obs_np = np.array(ocp_obs, dtype=np.float32).flatten().reshape([1, 1, -1])
         ego_state, other_states, ref_error = unpack_ocp_numpy(ocp_obs_np, self.config['ocp']['num_points'],
                                                               self.config['ocp']['others'])
@@ -82,6 +84,30 @@ class DebugVisualizer:
             display_time=SYNC_STEP,
             color=carla.Color(0, 0, 255)
         )
+
+        # 周车位置
+        other_pos = np.column_stack((s_others[...,0], s_others[...,1]))
+        draw_points(
+            world=self.world,
+            points=other_pos,
+            display_time=SYNC_STEP * 20,
+            color=carla.Color(255, 255, 0),
+            size=0.05
+        )
+
+        # 周车约束
+        distances = np.linalg.norm(other_pos - [world_ego_x, world_ego_y], axis=1)
+        mask = distances <= self.other_car_min_distance
+        # 获取满足条件的坐标
+        for other in other_pos[mask]:
+            result_others = np.stack((other, [world_ego_x, world_ego_y]), axis=0)
+            draw_lines_between_points(
+                self.world,
+                result_others,
+                display_time=SYNC_STEP * 10,
+                color=carla.Color(255, 255, 255),
+                thickness=0.25
+            )
 
         # # 绘制预测点
         # # 【新增】可视化 OCP 预测轨迹

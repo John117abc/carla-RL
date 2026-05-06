@@ -56,6 +56,7 @@ def main():
     env = CarlaEnv(
         render_mode=None,
         carla_config=carla_config,
+        train_config=rl_config,
         sumo_config=sumo_config,
         env_config=env_config
     )

@@ -39,13 +39,14 @@ class CarlaEnv(gym.Env):
             self,
             carla_config: Dict[str, Any],
             env_config: Dict[str, Any],
+            train_config: Dict[str, Any],
             sumo_config: Dict[str, Any] = None,
             render_mode: Optional[str] = None,
             is_eval: bool = False
     ):
         super().__init__()
         # 1. 基础参数初始化（最核心的配置/模式变量）
-        self._init_basic_params(carla_config, env_config, sumo_config, render_mode, is_eval)
+        self._init_basic_params(carla_config, env_config, train_config,sumo_config, render_mode, is_eval)
         # 2. CARLA客户端&世界初始化
         self._init_carla_client()
         # 6. 归一化器初始化
@@ -68,6 +69,7 @@ class CarlaEnv(gym.Env):
             self,
             carla_config: Dict[str, Any],
             env_config: Dict[str, Any],
+            train_config: Dict[str, Any],
             sumo_config: Dict[str, Any] = None,
             render_mode: Optional[str] = None,
             is_eval: bool = False
@@ -77,6 +79,7 @@ class CarlaEnv(gym.Env):
         self.carla_cfg = carla_config
         self.env_cfg = env_config
         self.sumo_cfg = sumo_config
+        self.train_cfg = train_config['rl']['OCP']
         # 渲染/评估模式
         self.render_mode = render_mode
         self._is_eval = is_eval
@@ -322,7 +325,7 @@ class CarlaEnv(gym.Env):
                                                           config=self.env_cfg,
                                                           normalizer=self.meas_normalizer)
         # debug模块初始化
-        self.debug_visualizer = DebugVisualizer(world=self.world,vehicle_manager=self.vehicle_manager,config=self.env_cfg)
+        self.debug_visualizer = DebugVisualizer(world=self.world,vehicle_manager=self.vehicle_manager,config=self.env_cfg,other_car_min_distance=self.train_cfg['other_car_min_distance'])
         # 奖励计算模块初始化
         self.reward_calculator = RewardCalculator(vehicle_manager=self.vehicle_manager,config=self.env_cfg)
         # 终止模块初始化
@@ -360,7 +363,11 @@ class CarlaEnv(gym.Env):
 
         self.step_count += 1
         # 3. 获取观测 → 委托 ObservationProcessor
-        input_params = {'path_locations':self.path_locations,'ego_ref_speed':self.ego_ref_speed,'ref_offset':self.carla_cfg['world']['ref_offset']}
+        input_params = {'path_locations':self.path_locations,
+                        'ego_ref_speed':self.ego_ref_speed,
+                        'ref_offset':self.carla_cfg['world']['ref_offset'],
+                        'other_car_min_distance':self.train_cfg['other_car_min_distance']}
+
         obs = self.observation_processor.get_observation(self.is_eval,input_params)
         
         # 【加固】确保 ocp_obs 为连续一维数组，防止维度异常导致训练崩溃
@@ -382,6 +389,7 @@ class CarlaEnv(gym.Env):
             self.debug_visualizer.debug_ocp(obs['ocp_obs'],
                                             obs['s_ref_raw'],
                                             obs['s_road_raw'],
+                                            obs['s_others'],
                                             self.step_count,
                                             self.carla_cfg["fixed_delta_seconds"],
                                             self.agent.predict_traj)
@@ -433,7 +441,10 @@ class CarlaEnv(gym.Env):
         # 5. 初始化路径规划
         self._init_episode_state()
         # 6. 获取初始观测 → 委托 ObservationProcessor
-        input_params = {'path_locations':self.path_locations,'ego_ref_speed':self.ego_ref_speed,'ref_offset':self.carla_cfg['world']['ref_offset']}
+        input_params = {'path_locations':self.path_locations,
+                        'ego_ref_speed':self.ego_ref_speed,
+                        'ref_offset':self.carla_cfg['world']['ref_offset'],
+                        'other_car_min_distance':self.train_cfg['other_car_min_distance']}
         obs = self.observation_processor.get_observation(self._is_eval,input_params)
         
         # 【加固】确保初始 ocp_obs 维度正确
