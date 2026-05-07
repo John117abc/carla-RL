@@ -2,7 +2,7 @@ import math
 import numpy as np
 import carla
 import traceback
-from src.carla_utils import draw_points,draw_text_at_location, draw_lines_between_points
+from src.carla_utils import draw_points,draw_text_at_location, draw_all_vehicles_ellipses,draw_lines_between_points
 from src.utils import get_logger, unpack_ocp_numpy
 
 logger = get_logger(name='debug_visualizer')
@@ -13,7 +13,17 @@ class DebugVisualizer:
         self.config = config
         self.other_car_min_distance = other_car_min_distance
 
-    def debug_ocp(self,ocp_obs, s_ref_raw, s_road, s_others,step_count,fixed_delta_seconds,predict_traj):
+    def debug_ocp(self,
+                  ocp_obs,
+                  s_ref_raw,
+                  s_road,
+                  s_others,
+                  step_count,
+                  fixed_delta_seconds,
+                  predict_traj,
+                  other_vehicles,
+                  ego_vehicle):
+
         ocp_obs_np = np.array(ocp_obs, dtype=np.float32).flatten().reshape([1, 1, -1])
         ego_state, other_states, ref_error = unpack_ocp_numpy(ocp_obs_np, self.config['ocp']['num_points'],
                                                               self.config['ocp']['others'])
@@ -94,6 +104,9 @@ class DebugVisualizer:
             color=carla.Color(255, 255, 0),
             size=0.05
         )
+
+        # 椭圆周车约束
+        # draw_all_vehicles_ellipses(self.world,ego_vehicle,other_vehicles)
 
         # 周车约束
         distances = np.linalg.norm(other_pos - [world_ego_x, world_ego_y], axis=1)

@@ -1,4 +1,5 @@
 import carla
+import math
 import numpy as np
 
 # ====================== 画线函数（终极修复） ======================
@@ -99,3 +100,70 @@ def draw_predicted_trajectory(world, points, display_time=5.0, color=None, thick
     if color is None:
         color = carla.Color(0, 255, 0)  # 默认绿色轨迹
     draw_lines_between_points(world, points, display_time, color, thickness)
+
+
+
+def draw_all_vehicles_ellipses(world, ego_vehicle, other_vehicles, a=3.2, b=1.5, life_time=0.1):
+    """绘制自车和所有周车的椭圆"""
+    # 自车（红色）
+    draw_vehicle_ellipse(world, ego_vehicle.get_transform(), a, b,
+                         color=carla.Color(255, 0, 0), life_time=life_time)
+
+    # 周车（绿色）
+    for v in other_vehicles:
+        if v is not None and v.is_alive:
+            draw_vehicle_ellipse(world, v.get_transform(), a, b,
+                                 color=carla.Color(0, 255, 0), life_time=life_time)
+
+def draw_vehicle_ellipse(
+    world: carla.World,
+    transform: carla.Transform,
+    a: float = 2.25,          # 半长轴 (车长一半)
+    b: float = 1.0,           # 半短轴 (车宽一半)
+    color: carla.Color = carla.Color(255, 0, 255),
+    life_time: float = 0.1,   # 每帧绘制持续时间
+    num_points: int = 36      # 分段数，越大越圆滑
+):
+    """
+    在 CARLA 世界中绘制一辆车的椭圆包络。
+    :param world: CARLA world 对象
+    :param transform: 车辆中心的世界位姿 (位置+航向)
+    :param a: 半长轴 (m)
+    :param b: 半短轴 (m)
+    :param color: 颜色
+    :param life_time: 线条持续时间 (秒)，用于循环调用时自动消失
+    :param num_points: 椭圆离散点数
+    """
+    if world is None:
+        return
+
+    # 1. 在车辆局部坐标系生成椭圆轮廓点 (顺时针)
+    theta = np.linspace(0, 2 * math.pi, num_points, endpoint=False)
+    local_x = a * np.cos(theta)
+    local_y = b * np.sin(theta)
+    local_pts = np.stack([local_x, local_y], axis=1)  # (N, 2)
+
+    # 2. 获取车辆航向的旋转矩阵
+    yaw_rad = math.radians(transform.rotation.yaw)
+    cos_y = math.cos(yaw_rad)
+    sin_y = math.sin(yaw_rad)
+
+    # 3. 世界坐标系: p_world = R * p_local + translation
+    world_pts = []
+    for lx, ly in local_pts:
+        wx = transform.location.x + cos_y * lx - sin_y * ly
+        wy = transform.location.y + sin_y * lx + cos_y * ly
+        world_pts.append(carla.Location(x=wx, y=wy, z=transform.location.z + 5.0))  # 略微抬高避免穿地
+
+    # 4. 绘制线段连接相邻点
+    debug = world.debug
+    for i in range(len(world_pts)):
+        p1 = world_pts[i]
+        p2 = world_pts[(i + 1) % len(world_pts)]
+        debug.draw_line(p1, p2, thickness=0.1, color=color, life_time=life_time)
+
+    # 也可以画一个方向箭头表示车头
+    # head_x = transform.location.x + cos_y * a
+    # head_y = transform.location.y + sin_y * a
+    # debug.draw_point(carla.Location(x=head_x, y=head_y, z=transform.location.z + 0.5),
+    #                  size=0.1, color=carla.Color(255, 0, 0), life_time=life_time)

@@ -386,13 +386,16 @@ class CarlaEnv(gym.Env):
         
         # 6. 调试可视化（可选）→ 委托 DebugVisualizer
         if self._ocp_debug:
+            self.vehicle_manager.get_surrounding_vehicles()
             self.debug_visualizer.debug_ocp(obs['ocp_obs'],
                                             obs['s_ref_raw'],
                                             obs['s_road_raw'],
                                             obs['s_others'],
                                             self.step_count,
                                             self.carla_cfg["fixed_delta_seconds"],
-                                            self.agent.predict_traj)
+                                            self.agent.predict_traj,
+                                            self.vehicle_manager.npc_vehicles,
+                                            self.vehicle_manager.ego_vehicle)
 
             self.last_ref_idx ,self.prev_spectator_transform= self.debug_visualizer.update_spectator(self.ref_path_xy_raw,self.last_ref_idx,self.prev_spectator_transform)
                     

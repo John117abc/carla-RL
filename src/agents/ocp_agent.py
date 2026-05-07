@@ -79,12 +79,15 @@ class OcpAgent(BaseAgent):
             betas=(0.9, 0.999)
         )
 
-        # 论文核心权重（严格对齐原文 Table III & Eq. 1）
-        self.q_lat = 0.04  # 提高位置权重
-        self.q_head = 0.1  # 降低航向权重
-        # 加速纵向跟踪激励
-        self.q_speed = 0.01  # 速度误差权重（提高至0.01，强化纵向跟踪）
-        self.R_matrix = np.diag([0.005, 0.1])
+        # __init__ 中，修改成本函数权重
+        # 极大地提高横向追踪权重，让网络不惜代价也要回到中心线
+        self.q_lat = 0.30  # 从 0.04 提高 7.5 倍
+        self.q_head = 0.02  # 从 0.1 降低，让位置控制主导方向
+        self.q_speed = 0.01  # 保持不变
+
+        # 放宽转向惩罚，让纠偏过程不被控制成本过分压抑
+        # 但保留一个最低限度的代价，避免完全无成本的暴力转向
+        self.R_matrix = np.diag([0.005, 0.02])  # 从 0.005, 0.08 修改
 
         # 车辆信息
         self.HALF_L = 2.25  # 车长的一半
@@ -125,61 +128,54 @@ class OcpAgent(BaseAgent):
             raise ValueError("env_cfg['ocp']['others'] 必须为非负整数，当前值导致 DIM_OTHER < 0")
 
     def _calc_ref_error_from_state(self, ego_state: torch.Tensor, ref_path_tensor: torch.Tensor) -> torch.Tensor:
-        """
-        严格对齐论文 Section IV-B1 的参考误差计算（统一使用自车坐标系）
-        :param ego_state: [B, 1, 6] 自车状态 (自车坐标系，经过推演后可能偏离原点)
-        :param ref_path_tensor: [1, N, 2] 参考路径xy (自车坐标系)
-        :return: [B, 1, 3] 跟踪误差 [δ_p, δ_φ, δ_v]
-        """
         B = ego_state.shape[0]
         if ref_path_tensor.shape[0] == 1 and B > 1:
             ref_path_tensor = ref_path_tensor.repeat(B, 1, 1)
 
-        # 【修复】使用推演后的真实位置和航向，而非强制置零
-        ego_xy = ego_state[..., :2]  # [B, 1, 2] 真实相对位置
-        ego_phi = ego_state[..., 4]  # [B, 1] 真实航向
-        ego_vlon = ego_state[..., 2]  # [B, 1] 纵向速度
+        ego_xy = ego_state[..., :2]  # [B,1,2]
+        ego_phi = ego_state[..., 4]  # [B,1]
+        ego_vlon = ego_state[..., 2]  # [B,1]
 
-        # 找最近参考点
-        dist = torch.norm(ego_xy.unsqueeze(2) - ref_path_tensor.unsqueeze(1),dim=-1)  # [B, 1, N]
-        min_dist, closest_idx = torch.min(dist,dim=-1)  # [B, 1]
-        ref_idx = torch.clamp(closest_idx + self.env.carla_cfg['world']['ref_offset'], max=ref_path_tensor.shape[1] - 1)
+        # 最近点
+        dist = torch.norm(ego_xy.unsqueeze(2) - ref_path_tensor.unsqueeze(1), dim=-1)  # [B,1,N]
+        min_dist, closest_idx = torch.min(dist, dim=-1)  # [B,1]
+        closest_idx = closest_idx.squeeze(1)  # [B]
 
-        ref_xy = torch.gather(ref_path_tensor, 1, ref_idx.unsqueeze(-1).repeat(1, 1,
-                                                                               2))  # [B, 1, 2]
-        next_ref_idx = torch.clamp(ref_idx + 1, max=ref_path_tensor.shape[1] - 1)
-        next_ref_xy = torch.gather(ref_path_tensor, 1, next_ref_idx.unsqueeze(-1).repeat(1, 1, 2))
-        delta_xy = next_ref_xy - ref_xy
-        ref_phi = torch.atan2(delta_xy[..., 1], delta_xy[..., 0])
+        # 前视距离
+        v_lon = ego_vlon.squeeze(1)  # [B]
+        L_min = 2.0
+        k = 0.5
+        L_look = torch.clamp(L_min + k * v_lon, min=L_min, max=20.0)
 
-        # 计算带符号横向误差δ_p (论文定义：左侧为正)
-        # 使用真实相对位置计算，而非假定原点
-        dx = ref_xy[..., 0] - ego_xy[..., 0 ]
-        dy = ref_xy[..., 1] - ego_xy[..., 1]
-        cross = dy * torch.cos(ref_phi) - dx * torch.sin(ref_phi)
+        # 获取前视点
+        look_xy, look_phi, look_idx = self._advance_along_path(
+            ref_path_tensor, closest_idx, L_look
+        )  # [B,2], [B], [B]
+
+        # 横向误差
+        ego_xy_sq = ego_xy.squeeze(1)  # [B,2]
+        dx = look_xy[:, 0] - ego_xy_sq[:, 0]
+        dy = look_xy[:, 1] - ego_xy_sq[:, 1]
+        cross = dy * torch.cos(look_phi) - dx * torch.sin(look_phi)
         delta_p = cross
 
-        # ---------- 调试日志：打印第一个样本的横向误差计算细节 ----------
-        if B > 0:
-            _ego = ego_xy[0, 0].detach().cpu().numpy()
-            _ref = ref_xy[0, 0].detach().cpu().numpy()
-            _phi = ref_phi[0, 0].item()
-            _cross = cross[0, 0].item()
-            _sign = 1 if _cross >= 0 else -1
-            _dp = delta_p[0, 0].item()
-            logger.debug(
-                f"[REF_ERROR] ego_xy=({_ego[0]:.3f},{_ego[1]:.3f}), ref_xy=({_ref[0]:.3f},{_ref[1]:.3f}), "
-                f"ref_phi={_phi:.4f}rad, cross={_cross:.4f}, sign={_sign}, delta_p={_dp:.4f}m"
-            )
-
-        # 航向误差δ_φ（归一化到[-π, π]）
-        delta_phi = ego_phi - ref_phi
+        # 航向误差
+        delta_phi = ego_phi.squeeze(1) - look_phi
         delta_phi = torch.atan2(torch.sin(delta_phi), torch.cos(delta_phi))
 
-        # 速度误差δ_v
-        delta_v = ego_vlon - self.ref_vlon
+        # 速度误差
+        delta_v = v_lon - self.ref_vlon
 
-        return torch.stack([delta_p, delta_phi, delta_v], dim=-1)
+        error = torch.stack([delta_p, delta_phi, delta_v], dim=-1).unsqueeze(1)
+        # 保留日志
+        if B > 0:
+            _ego = ego_xy_sq[0].detach().cpu().numpy()
+            _look = look_xy[0].detach().cpu().numpy()
+            logger.debug(
+                f"[LOOKAHEAD] v_lon={v_lon[0].item():.2f}, L={L_look[0].item():.2f}m, "
+                f"look=({_look[0]:.3f},{_look[1]:.3f}), phi={look_phi[0].item():.4f}, dp={delta_p[0].item():.4f}"
+            )
+        return error
 
     def _forward_horizon(self,
                          state_tensor: torch.Tensor,
@@ -253,41 +249,35 @@ class OcpAgent(BaseAgent):
 
             step_l = torch.clamp(err_cost + control_cost , max=100.0)
 
-            # 2. 补全约束违反量 step_phi (严格对齐论文 Eq.9: 惩罚项需平方)
-            ego_xy = next_ego[
-                ..., :2]  # [B, 1, 2] 真实相对位置
+            # 2. 补全约束违反量 step_phi 并计算周车原始违反量 (用于平滑惩罚)
+            ego_xy = next_ego[..., :2]  # [B,1,2]
             phi_violation = torch.zeros(B, device=self.device)
+            penalty_npc_raw = torch.zeros(B, device=self.device)  # 新增：用于条件判断
 
             # 周车安全距离约束
-            # 周车安全距离约束（矩形包络）
             if self.DIM_OTHER > 0:
-                # 取 xy 和 航向
-                other_xy = next_other[..., :2]  # [B, 1, N, 2]
-                other_phi = next_other[..., 2]  # [B, 1, N]  真实航向，不再估算
+                other_xy = next_other[..., :2]  # [B,1,8,2]
 
-                # 扁平化并计算矩形最小距离平方
-                B = next_ego.shape[0]
-                N_other = other_xy.shape[2]
-                ego_xy_ = next_ego[..., :2].squeeze(1)  # [B, 2]
-                ego_phi_ = next_ego[..., 4].squeeze(1)  # [B]
-                other_xy_flat = other_xy.reshape(-1, 2)
-                other_phi_flat = other_phi.reshape(-1)
-                ego_xy_exp = ego_xy_.repeat_interleave(N_other, dim=0)
-                ego_phi_exp = ego_phi_.repeat_interleave(N_other, dim=0)
-
-                # rect_min_dist_sq
-                dist_sq = rect_min_dist_sq(ego_xy_exp, ego_phi_exp,
-                                           other_xy_flat, other_phi_flat,
-                                           self.HALF_L, self.HALF_W).view(B, 1, N_other)
-
-                # 过滤无效占位车辆（xy 接近 0 的视为空）
-                other_norm = torch.norm(other_xy.squeeze(1), dim=-1)  # [B, N]
+                # 计算欧氏距离
+                dist_veh = torch.norm(ego_xy.unsqueeze(2) - other_xy, dim=-1)  # [B,1,8]
+                # 过滤全零占位车辆 (将距离设为极大值以避免误报)
+                other_norm = torch.norm(other_xy, dim=-1)
                 invalid_mask = other_norm < 1e-3
-                dist_sq = torch.where(invalid_mask.unsqueeze(1),
-                                      torch.full_like(dist_sq, 1e9), dist_sq)
+                dist_veh = torch.where(invalid_mask, torch.full_like(dist_veh, 1e9), dist_veh)
 
-                veh_violation = torch.clamp(safe_veh_sq - dist_sq, min=0).clamp(max=10.0)
-                phi_violation += (veh_violation ** 2).sum(dim=[1, 2])
+                # 平方距离用于后续平方违反量 (与原代码一致)
+                dist_veh_sq = dist_veh ** 2
+                veh_violation_sq = torch.clamp(
+                    torch.maximum(safe_veh_sq - dist_veh_sq, torch.zeros_like(dist_veh_sq)),
+                    max=10.0
+                )
+                phi_violation += (veh_violation_sq ** 2).sum(dim=[1, 2])
+
+                # 计算未平方的周车约束违反量 (距离形式)，用于条件平滑
+                veh_violation_raw = torch.clamp(
+                    self.other_car_min_distance - dist_veh, min=0.0
+                )  # [B,1,8]
+                penalty_npc_raw = veh_violation_raw.sum(dim=[1, 2])  # [B]
 
                 # 道路边缘安全距离约束 (road_left/right 已在自车坐标系)
             dist_left_sq = torch.sum((ego_xy.unsqueeze(2) - road_left) ** 2, dim=-1)
@@ -302,6 +292,15 @@ class OcpAgent(BaseAgent):
 
             # 【防御】截断总惩罚项
             step_phi = torch.clamp(phi_violation, max=50.0)
+            # ─── 移植自 loss.py 的平滑惩罚 ───
+            # 获取当前时刻的转向角 delta_phy (已在前面计算)
+            delta_phy = phy_action[:, 1]  # [B]
+
+            # 条件：周车约束满足 (penalty_npc_raw < 0.05) 且转向角有小幅动作 (|delta| > 0.01 rad)
+            condition = (penalty_npc_raw < 0.05) & (torch.abs(delta_phy) > 0.01)
+            extra_steer_penalty = torch.where(condition, torch.abs(delta_phy) * 2.0, torch.zeros_like(delta_phy))
+            # ──────────────────────────────
+            step_l = torch.clamp(err_cost + control_cost + extra_steer_penalty, max=100.0)
             step_l_list.append(step_l)
             step_phi_list.append(step_phi)
 
@@ -481,6 +480,78 @@ class OcpAgent(BaseAgent):
         y_next = y + dt * v * torch.sin(phi)
         # phi 和 v 保持不变（恒速恒向）
         return torch.stack([x_next, y_next, phi, v], dim=-1)
+
+    def _advance_along_path(
+            self,
+            path_xy: torch.Tensor,  # [N,2] or [B,N,2]
+            start_idx: torch.Tensor,  # [B] or [B,1]
+            dist_forward: torch.Tensor  # [B] or [B,1]
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        安全沿路径前进，返回前视点坐标、航向和索引（均在[0,N-1]内）。
+        """
+        # 统一形状：path -> [B,N,2]
+        if path_xy.dim() == 2:
+            path_xy = path_xy.unsqueeze(0)  # [1,N,2]
+        B, N, _ = path_xy.shape
+        # 如果传入的 B 与 start_idx 的 B 不一致，则扩展 path
+        if B == 1 and start_idx.shape[0] > 1:
+            path_xy = path_xy.repeat(start_idx.shape[0], 1, 1)
+            B = start_idx.shape[0]
+
+        start_idx = start_idx.view(B).clamp(0, N - 1).long()  # [B]
+        dist_forward = dist_forward.view(B).clamp(min=1e-6)  # [B]
+
+        # 路径段向量和长度
+        segs = path_xy[:, 1:] - path_xy[:, :-1]  # [B, N-1, 2]
+        seg_len = torch.norm(segs, dim=-1)  # [B, N-1]
+        seg_len = seg_len.clamp(min=1e-6)
+
+        # 从路径起点开始的累积距离 (每段的终点)
+        cum_from_start = torch.cat([
+            torch.zeros(B, 1, device=path_xy.device),
+            torch.cumsum(seg_len, dim=1)
+        ], dim=1)  # [B, N]  索引0..N-1，cum_from_start[i] 表示点 i 的距离起点距离
+
+        # 前视目标距离 = 起点距离 + 前视量
+        start_dist = cum_from_start[torch.arange(B), start_idx]  # [B]
+        target_dist = start_dist + dist_forward  # [B]
+
+        # 若目标超出路径总长，则直接取最后一个点
+        total_len = cum_from_start[:, -1]  # [B]
+        overrun = target_dist >= total_len
+
+        # 对于未超出的，找到第一个 cum_from_start >= target_dist 的点索引
+        # 使用搜索排序：在 cum_from_start 上逐 batch 查找
+        # 由于 cum_from_start 单调递增，可以用 torch.searchsorted
+        look_idx = torch.searchsorted(cum_from_start, target_dist.unsqueeze(1)).squeeze(1)  # [B]
+        # 防止超出 N-1
+        look_idx = look_idx.clamp(0, N - 1)
+        # 对于超出的，强制为 N-1
+        look_idx = torch.where(overrun, torch.full_like(look_idx, N - 1), look_idx)
+
+        # 获取目标点坐标
+        look_xy = path_xy[torch.arange(B), look_idx]  # [B,2]
+
+        # 计算目标点航向：使用 look_idx 与 look_idx+1 (若为 N-1 则用 N-2 和 N-1)
+        next_idx = torch.where(look_idx < N - 1, look_idx + 1, look_idx)
+        prev_idx = torch.where(look_idx > 0, look_idx - 1, look_idx)
+        # 如果 look_idx == N-1 且不是 overrun，则用前一段的航向；否则直接用下一点
+        # 为简化且鲁棒，统一使用：点 look_idx 到 next_idx 的方向（如果 next_idx == look_idx 则回退到 prev_idx 方向）
+        dxy = path_xy[torch.arange(B), next_idx] - path_xy[torch.arange(B), look_idx]
+        # 如果两点重合（比如已在终点），则使用 prev_idx 方向
+        dxy_len = torch.norm(dxy, dim=-1, keepdim=True)
+        use_prev = (dxy_len < 1e-6).squeeze(-1)
+        dxy = torch.where(
+            use_prev.unsqueeze(-1),
+            path_xy[torch.arange(B), look_idx] - path_xy[torch.arange(B), prev_idx],
+            dxy
+        )
+        dxy_len = torch.norm(dxy, dim=-1, keepdim=True).clamp(min=1e-6)
+        dxy = dxy / dxy_len
+        look_phi = torch.atan2(dxy[..., 1], dxy[..., 0])  # [B]
+
+        return look_xy, look_phi, look_idx
 
     def unpack_tensor(self, data: torch.Tensor) -> Tuple[torch.Tensor, ...]:
         if data.dim() != 3 or data.shape[2] != self.TOTAL_STATE_DIM:

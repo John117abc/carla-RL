@@ -657,114 +657,170 @@ def get_current_lane_forward_edges(
     return left_edges, right_edges
 
 
-
-def rect_min_dist_sq(ego_xy: torch.Tensor,        # [B, 2]
-                     ego_phi: torch.Tensor,        # [B]
-                     other_xy: torch.Tensor,       # [B, 2]
-                     other_phi: torch.Tensor,      # [B]
-                     half_l: float, half_w: float) -> torch.Tensor:   # [B]
+def ellipse_min_dist_sq(
+    ego_xy: torch.Tensor,        # [B, 2] 自车中心
+    ego_phi: torch.Tensor,       # [B]    自车航向 (rad)
+    other_xy: torch.Tensor,      # [B, 2] 周车中心
+    other_phi: torch.Tensor,     # [B]    周车航向
+    a: float = 2.25,
+    b: float = 1.0,
+    num_samples: int = 5         # 采样方向数（奇数，含中心方向）
+) -> torch.Tensor:
     """
-    返回自车与周车矩形之间的最小距离平方（无碰撞时 >0，碰撞时为0）
-    ego_phi, other_phi 是世界系下的航向角
+    计算两辆车椭圆之间的最小距离平方（多方向采样，取最小值）。
+    返回 [B] 距离平方，重叠时返回 0。
     """
     B = ego_xy.shape[0]
     device = ego_xy.device
 
-    # ----- 四个顶点相对中心坐标（局部坐标系） -----
-    corners_local = torch.tensor([
-        [ half_l,  half_w],
-        [ half_l, -half_w],
-        [-half_l, -half_w],
-        [-half_l,  half_w]
-    ], device=device, dtype=ego_xy.dtype)  # [4, 2]
+    d_vec = other_xy - ego_xy               # [B, 2]
+    d_sq = (d_vec ** 2).sum(dim=1)           # [B]
+    d = torch.sqrt(d_sq + 1e-8)              # [B]
+    u = d_vec / d.unsqueeze(1)               # [B, 2] 中心连线方向
 
-    # ----- 构建旋转矩阵 -----
-    def rot_matrix(phi):  # [B]
-        c = torch.cos(phi)
-        s = torch.sin(phi)
-        R = torch.stack([c, -s, s, c], dim=-1).view(-1, 2, 2)  # [B, 2, 2]
-        return R
+    # 在连线方向附近生成多个采样方向（在 2D 平面内旋转）
+    angles = torch.linspace(-0.5, 0.5, num_samples, device=device)  # 度数范围可调
+    # 将 u 旋转这些角度：u_rot = R(angle) * u
+    # R = [[cos(a), -sin(a)], [sin(a), cos(a)]]
+    cos_a = torch.cos(angles)  # [num_samples]
+    sin_a = torch.sin(angles)  # [num_samples]
+    # 扩展到 [B, num_samples, 2]
+    u_exp = u.unsqueeze(1)                # [B, 1, 2]
+    cos_a = cos_a.view(1, -1, 1)
+    sin_a = sin_a.view(1, -1, 1)
 
-    R_ego = rot_matrix(ego_phi)    # [B, 2, 2]
-    R_oth = rot_matrix(other_phi)
+    u_x = u_exp[..., 0:1]  # [B, 1, 1]
+    u_y = u_exp[..., 1:2]
 
-    # ----- 全局坐标下的四个角点 -----
-    ego_corners = (corners_local.unsqueeze(0) @ R_ego.transpose(1, 2)) + ego_xy.unsqueeze(1)   # [B, 4, 2]
-    oth_corners = (corners_local.unsqueeze(0) @ R_oth.transpose(1, 2)) + other_xy.unsqueeze(1) # [B, 4, 2]
+    u_rot_x = cos_a * u_x - sin_a * u_y   # [B, num_samples, 1]
+    u_rot_y = sin_a * u_x + cos_a * u_y
 
-    # ----- 分离轴候选：两个矩形的两条边法向 -----
-    def get_axes(corners):  # [B, 4, 2] -> [B, 2, 2] (两个正交轴)
-        # 边向量
-        edges = corners[:, 1:] - corners[:, :-1]              # [B, 3, 2]
-        # 取其中两条正交边（任意相邻边都可以）
-        axis1 = edges[:, 0]                                   # [B, 2]
-        axis2 = edges[:, 1]                                   # [B, 2]
-        # 法向量（单位化）
-        axis1 = axis1 / torch.norm(axis1, dim=1, keepdim=True).clamp(min=1e-8)
-        axis2 = axis2 / torch.norm(axis2, dim=1, keepdim=True).clamp(min=1e-8)
-        return torch.stack([axis1, axis2], dim=1)             # [B, 2, 2]
+    u_rot = torch.cat([u_rot_x, u_rot_y], dim=-1)  # [B, num_samples, 2]
 
-    axes_ego = get_axes(ego_corners)   # [B, 2, 2]
-    axes_oth = get_axes(oth_corners)   # [B, 2, 2]
-    all_axes = torch.cat([axes_ego, axes_oth], dim=1)  # [B, 4, 2]
+    # 计算自车椭圆在各方向上的半径
+    def ellipse_radius(u_local_x, u_local_y):
+        # u_local_x, u_local_y: [B, num_samples]
+        denom = torch.sqrt((a * u_local_y) ** 2 + (b * u_local_x) ** 2 + 1e-8)
+        return a * b / denom
 
-    # ----- 投影并检测重叠 -----
-    def project(corners, axis):       # corners: [B,4,2], axis: [B,4,2] -> [B,4,2] (点乘)
-        return (corners.unsqueeze(2) * axis.unsqueeze(1)).sum(dim=-1)  # [B, 4, 4]
+    # 自车：航向 phi_ego，旋转矩阵 (cos, sin; -sin, cos)
+    cos_e = torch.cos(ego_phi).view(B, 1, 1)
+    sin_e = torch.sin(ego_phi).view(B, 1, 1)
+    u_ego_x = cos_e * u_rot[..., 0:1] + sin_e * u_rot[..., 1:2]   # [B, num_samples, 1]
+    u_ego_y = -sin_e * u_rot[..., 0:1] + cos_e * u_rot[..., 1:2]
+    r_ego = ellipse_radius(u_ego_x.squeeze(-1), u_ego_y.squeeze(-1))  # [B, num_samples]
 
-    proj_ego = project(ego_corners, all_axes)  # [B, 4, 4]
-    proj_oth = project(oth_corners, all_axes)  # [B, 4, 4]
+    # 周车：航向 phi_other，对相反方向 -u_rot 计算半径
+    cos_o = torch.cos(other_phi).view(B, 1, 1)
+    sin_o = torch.sin(other_phi).view(B, 1, 1)
+    u_oth_x = -(cos_o * u_rot[..., 0:1] + sin_o * u_rot[..., 1:2])
+    u_oth_y = -(-sin_o * u_rot[..., 0:1] + cos_o * u_rot[..., 1:2])
+    r_oth = ellipse_radius(u_oth_x.squeeze(-1), u_oth_y.squeeze(-1))  # [B, num_samples]
 
-    ego_min, _ = proj_ego.min(dim=1)   # [B, 4]
-    ego_max, _ = proj_ego.max(dim=1)
-    oth_min, _ = proj_oth.min(dim=1)
-    oth_max, _ = proj_oth.max(dim=1)
+    # 每个采样方向上的间隙
+    gap_samples = d.unsqueeze(1) - (r_ego + r_oth)   # [B, num_samples]
+    gap_min, _ = torch.min(gap_samples, dim=1)       # [B]
 
-    # 任意轴上投影不重叠 → 未碰撞
-    overlap = torch.min(ego_max, oth_max) - torch.max(ego_min, oth_min)  # [B, 4]
-    separated = (overlap < 0).any(dim=1)  # [B]  bool
+    dist = torch.clamp(gap_min, min=0.0)
+    return dist ** 2
 
-    # ----- 计算最短距离（仅对未碰撞的样本） -----
-    dist_sq = torch.zeros(B, device=device, dtype=ego_xy.dtype)
 
-    if separated.any():
-        sep_idx = separated.nonzero(as_tuple=True)[0]
-        # 方法：取顶点到对边距离 + 边到边距离
-        # 简化：计算所有顶点到对方所有边的最短距离
-        def point_to_segment_dist_sq(p, a, b):  # p:[N,2], a:[N,2], b:[N,2]
-            ab = b - a
-            ap = p - a
-            t = ((ap * ab).sum(dim=-1) / (ab.norm(dim=-1)**2 + 1e-8)).clamp(0, 1)
-            projection = a + t.unsqueeze(-1) * ab
-            return ((p - projection)**2).sum(dim=-1)
+def rect_min_dist_sq(center1, phi1, half_l1, half_w1, center2, phi2, half_l2, half_w2):
+    """
+    计算两个旋转矩形之间的最小距离平方（单对矩形）。
+    参数均为 Tensor，支持批量（形状末尾维对齐）。
+    """
+    # 保证形状一致： (..., 2) 和 (..., )
+    delta = center1 - center2  # (..., 2)
+    cos1, sin1 = torch.cos(phi1), torch.sin(phi1)
+    cos2, sin2 = torch.cos(phi2), torch.sin(phi2)
+    # 每个矩形的两个局部轴（单位向量）
+    axes1_x = torch.stack([cos1, sin1], dim=-1)  # (..., 2)
+    axes1_y = torch.stack([-sin1, cos1], dim=-1)
+    axes2_x = torch.stack([cos2, sin2], dim=-1)
+    axes2_y = torch.stack([-sin2, cos2], dim=-1)
 
-        # 对 separated 样本计算
-        ego_c = ego_corners[sep_idx]  # [S, 4, 2]
-        oth_c = oth_corners[sep_idx]  # [S, 4, 2]
-        S = ego_c.shape[0]
+    # 候选分离轴：四个轴
+    axes = [axes1_x, axes1_y, axes2_x, axes2_y]
+    # 矩形半长、半宽
+    r1_x, r1_y = half_l1, half_w1
+    r2_x, r2_y = half_l2, half_w2
 
-        # 周车每条边
-        oth_edges = [[0,1],[1,2],[2,3],[3,0]]
-        ego_edges = [[0,1],[1,2],[2,3],[3,0]]
+    max_gap = None
+    for axis in axes:
+        # 投影间隙
+        proj_delta = torch.sum(delta * axis, dim=-1)
+        # 矩形1投影半径
+        abs_ax1_x = torch.abs(torch.sum(axis * axes1_x, dim=-1))
+        abs_ax1_y = torch.abs(torch.sum(axis * axes1_y, dim=-1))
+        proj_r1 = r1_x * abs_ax1_x + r1_y * abs_ax1_y
+        # 矩形2投影半径
+        abs_ax2_x = torch.abs(torch.sum(axis * axes2_x, dim=-1))
+        abs_ax2_y = torch.abs(torch.sum(axis * axes2_y, dim=-1))
+        proj_r2 = r2_x * abs_ax2_x + r2_y * abs_ax2_y
+        gap = torch.abs(proj_delta) - (proj_r1 + proj_r2)
+        if max_gap is None:
+            max_gap = gap
+        else:
+            max_gap = torch.max(max_gap, gap)
+    min_dist = torch.clamp(max_gap, min=0.0)
+    return min_dist ** 2
 
-        min_d_sq = torch.full((S,), 1e9, device=device)
 
-        # 1) 自车顶点到周车各边
-        for i in range(4):  # ego corner
-            for j0, j1 in oth_edges:
-                d = point_to_segment_dist_sq(ego_c[:, i, :], oth_c[:, j0, :], oth_c[:, j1, :])
-                min_d_sq = torch.min(min_d_sq, d)
+def rect_min_dist_sq_batch(ego_center, ego_phi, ego_half_l, ego_half_w,
+                           other_center, other_phi, other_half_l, other_half_w):
+    """
+    批量计算自车与多个周车之间的最小距离平方。
+    参数：
+        ego_center: (B, 1, 2) 或 (B, 2)
+        ego_phi:    (B, 1) 或 (B,)
+        other_center: (B, 1, N, 2)
+        other_phi:    (B, 1, N)
+    返回：
+        min_dist_sq: (B, 1, N)
+    """
+    # 统一扩展为 (B, 1, N, 2) 和 (B, 1, N)
+    B = ego_center.shape[0]
+    if ego_center.dim() == 2:
+        ego_center = ego_center.unsqueeze(1).unsqueeze(2)  # (B,1,1,2)
+    elif ego_center.dim() == 3:
+        ego_center = ego_center.unsqueeze(2)  # (B,1,1,2)
+    if ego_phi.dim() == 1:
+        ego_phi = ego_phi.unsqueeze(1).unsqueeze(2)  # (B,1,1)
+    elif ego_phi.dim() == 2:
+        ego_phi = ego_phi.unsqueeze(2)  # (B,1,1)
+    N = other_center.shape[2]
+    # 展平到 (B*N, 2) 和 (B*N,)
+    ego_center_flat = ego_center.expand(-1, -1, N, -1).reshape(B * N, 2)
+    ego_phi_flat = ego_phi.expand(-1, -1, N).reshape(B * N)
+    other_center_flat = other_center.reshape(B * N, 2)
+    other_phi_flat = other_phi.reshape(B * N)
+    min_dist_sq_flat = rect_min_dist_sq(
+        ego_center_flat, ego_phi_flat, ego_half_l, ego_half_w,
+        other_center_flat, other_phi_flat, other_half_l, other_half_w
+    )
+    return min_dist_sq_flat.reshape(B, 1, N)
 
-        # 2) 周车顶点到自车各边
-        for i in range(4):
-            for j0, j1 in ego_edges:
-                d = point_to_segment_dist_sq(oth_c[:, i, :], ego_c[:, j0, :], ego_c[:, j1, :])
-                min_d_sq = torch.min(min_d_sq, d)
 
-        # 3) 平行边的最短距离（边对边）已在上述覆盖，但为保证完全，再加一次边-边垂直距离
-        # 这部分通常被顶点-边覆盖，可省略
+# 放在 src/carla_utils.py 或类似位置
+def resample_path_equal_distance(path_xy: np.ndarray, spacing: float) -> np.ndarray:
+    """
+    对 2D 路径进行等距重采样。
+    :param path_xy: [N, 2] 原始路径点
+    :param spacing: 期望点间距 (米)
+    :return: [M, 2] 重采样后的路径
+    """
+    if len(path_xy) < 2:
+        return path_xy
+    # 计算每段长度
+    segs = np.linalg.norm(np.diff(path_xy, axis=0), axis=1)
+    cum_dist = np.insert(np.cumsum(segs), 0, 0)
+    total_len = cum_dist[-1]
+    if total_len < spacing:
+        return path_xy
 
-        dist_sq[sep_idx] = min_d_sq
-
-    # 若已碰撞，dist_sq 保持 0
-    return dist_sq
+    sample_dists = np.arange(0, total_len, spacing)
+    # 使用线性插值
+    resampled_x = np.interp(sample_dists, cum_dist, path_xy[:, 0])
+    resampled_y = np.interp(sample_dists, cum_dist, path_xy[:, 1])
+    return np.stack([resampled_x, resampled_y], axis=1)

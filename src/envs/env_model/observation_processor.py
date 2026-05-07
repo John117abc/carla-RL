@@ -1,7 +1,7 @@
 import numpy as np
 import math
 import carla
-from src.carla_utils import get_compass, world_to_vehicle_frame, get_ocp_observation
+from src.carla_utils import get_compass, world_to_vehicle_frame, get_ocp_observation,resample_path_equal_distance
 
 class ObservationProcessor:
     def __init__(self, vehicle_manager, sensor_manager,world, config, normalizer):
@@ -64,6 +64,16 @@ class ObservationProcessor:
             obs["measurements"] = meas_normalized
         if "ocp_obs" in self.config["obs_type"]:
             # 获取ocp观察信息
+            v = self.vehicle_manager.ego_vehicle.get_velocity()
+            speed = np.linalg.norm([v.x, v.y])
+            # 速度越快，间距越大 (0.8 秒 * 速度)
+            spacing = np.clip(speed * 0.8, 1.0, 5.0)
+            if input_params.get('path_locations') is not None:
+                raw_path = np.array([[p.x, p.y] for p in input_params['path_locations']])
+                # 暂时无法直接用上述函数，因为世界坐标下距离是真实的，可以直接重采样。
+                resampled = resample_path_equal_distance(raw_path, spacing)
+                # 用新的 carla.Location 替换
+                input_params['path_locations'] = [carla.Location(x=pt[0], y=pt[1], z=0) for pt in resampled]
             # 观察周车
             self.vehicle_manager.get_surrounding_vehicles()
             network_state, s_road, s_ref_raw, s_ref_error, s_others = get_ocp_observation(

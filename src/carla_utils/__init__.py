@@ -1,8 +1,8 @@
 # src/carla_utils/__init__.py
 from .vehicle_control import get_compass,world_to_vehicle_frame
 from .route_planner import RoutePlanner
-from .ocp_setup import rect_min_dist_sq, get_ocp_observation,get_current_lane_forward_edges,get_ocp_observation_ego_frame,ego_to_world_coordinate,batch_world_to_ego
-from .draw_info import draw_lines_between_points,draw_text_at_location,draw_points,draw_predicted_trajectory
+from .ocp_setup import resample_path_equal_distance, rect_min_dist_sq_batch, ellipse_min_dist_sq, rect_min_dist_sq, get_ocp_observation,get_current_lane_forward_edges,get_ocp_observation_ego_frame,ego_to_world_coordinate,batch_world_to_ego
+from .draw_info import draw_all_vehicles_ellipses, draw_lines_between_points,draw_text_at_location,draw_points,draw_predicted_trajectory
 from .world_setup import remove_only_visible_traffic_signs
 __all__ = ['get_compass',
            'world_to_vehicle_frame',
@@ -17,4 +17,6 @@ __all__ = ['get_compass',
            'batch_world_to_ego',
            'remove_only_visible_traffic_signs',
            'draw_predicted_trajectory',
-           'rect_min_dist_sq']
+           'rect_min_dist_sq',
+           'ellipse_min_dist_sq',
+           'rect_min_dist_sq_batch']
