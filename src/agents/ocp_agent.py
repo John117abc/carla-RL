@@ -256,7 +256,7 @@ class OcpAgent(BaseAgent):
             if self.DIM_OTHER > 0:
                 # --- 1. 构造自车双圆中心 ---
                 # 使用 next_ego [B,1,6]
-                dist_ego = self.HALF_L * 0.6  # 圆心偏移 (约1.35m)
+                dist_ego = self.HALF_L * 0.65  # 圆心偏移 (约1.35m)
                 ego_cos = torch.cos(next_ego[..., 4])  # phi
                 ego_sin = torch.sin(next_ego[..., 4])
                 ego_x = next_ego[..., 0]
@@ -279,7 +279,7 @@ class OcpAgent(BaseAgent):
 
                 other_cos = torch.cos(other_phi)
                 other_sin = torch.sin(other_phi)
-                dist_other = self.HALF_L * 0.6  # 同样的偏移量
+                dist_other = self.HALF_L * 0.65  # 同样的偏移量
 
                 other_front_x = other_x + dist_other * other_cos
                 other_front_y = other_y + dist_other * other_sin
@@ -307,7 +307,7 @@ class OcpAgent(BaseAgent):
                 min_dist_sq = torch.where(invalid_mask, torch.full_like(min_dist_sq, 1e9), min_dist_sq)
 
                 # --- 5. 计算安全距离阈值 ---
-                circle_radius = self.HALF_W * 0.9  # 每个圆的半径 (~0.9m)
+                circle_radius = self.HALF_W * 0.8  # 每个圆的半径 (~0.9m)
                 # 两个圆之间的最小中心距 = 2*半径 + 预设间隙
                 safe_center_dist = 2.0 * circle_radius + self.other_car_min_distance  # 米
                 safe_center_dist_sq = safe_center_dist ** 2
@@ -526,15 +526,12 @@ class OcpAgent(BaseAgent):
         self.gep_iteration += 1  # 记录策略改进次数
 
         # 3. GEP惩罚因子放大 (每 m 次策略改进后执行，严格对齐 Algorithm 2)
-        # 门槛设为0，确保ρ尽早放大，引入阻尼
         if self.gep_iteration % self.amplifier_m == 0:
-            avg_phi = step_phi_actor.mean().item()
-            if avg_phi > self.penalty_growth_threshold:
+            # 只要有违反，立即放大，不再要求门槛
+            if violation_per_sample.sum() > 1e-6:
                 old_penalty = self.init_penalty
                 self.init_penalty = min(self.init_penalty * self.amplifier_c, self.max_penalty)
-                logger.info(f"[GEP] 惩罚因子更新: {old_penalty:.4f} → {self.init_penalty:.4f}，当前违反量 {avg_phi:.6f}")
-            else:
-                logger.debug(f"[GEP] 惩罚因子未放大，当前违反量 {avg_phi:.6f}")
+                logger.info(f"[GEP] 立即放大 ρ: {old_penalty:.2f} → {self.init_penalty:.2f}")
 
         self.predict_traj = states_traj.cpu().detach().numpy()
 
@@ -545,9 +542,6 @@ class OcpAgent(BaseAgent):
             # 将违反程度映射到优先级 0.1~10
             priority = 0.1 + 9.9 * (violation_per_sample[i].item() / max_violation)
             experiences_and_priorities.append((item, priority))
-
-        # 更新缓冲区中的优先级
-        self.buffer.update_priorities(experiences_and_priorities)
 
         return {
             "actor_loss": actor_loss.item(),

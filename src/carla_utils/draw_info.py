@@ -120,16 +120,16 @@ def draw_all_vehicles_double_circles(world, ego_vehicle, other_vehicles, a=2.25,
     # 绘制自车
     draw_vehicle_circles(debug, ego_vehicle,
                          color=carla.Color(0, 255, 0),
-                         circle_radius=a * 0.9,
-                         dist_from_center=b * 0.6,
+                         circle_radius=a * 0.8,
+                         dist_from_center=b * 0.65,
                          life_time=life_time)
     # 绘制每辆NPC
     for npc in other_vehicles:
         if npc.is_alive:
             draw_vehicle_circles(debug, npc,
                                  color=carla.Color(255, 100, 0),
-                                 circle_radius=a * 0.9,
-                                 dist_from_center=b * 0.6,
+                                 circle_radius=a * 0.8,
+                                 dist_from_center=b * 0.65,
                                  life_time=life_time)
 
 
