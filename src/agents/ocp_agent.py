@@ -247,39 +247,80 @@ class OcpAgent(BaseAgent):
             r_weights = torch.tensor(self.R_matrix.diagonal().copy(), device=self.device).float()
             control_cost = torch.sum((phy_action ** 2) * r_weights, dim=1)
 
-            step_l = torch.clamp(err_cost + control_cost , max=100.0)
-
             # 2. 补全约束违反量 step_phi 并计算周车原始违反量 (用于平滑惩罚)
-            ego_xy = next_ego[..., :2]  # [B,1,2]
+            ego_xy = next_ego[..., :2]  # [B,1,2] (仍然保留，如果需要其他地方用，但双圆不再用它)
             phi_violation = torch.zeros(B, device=self.device)
-            penalty_npc_raw = torch.zeros(B, device=self.device)  # 新增：用于条件判断
+            penalty_npc_raw = torch.zeros(B, device=self.device)
 
-            # 周车安全距离约束
+            # ============= 周车安全距离约束 (双圆覆盖模型) =============
             if self.DIM_OTHER > 0:
-                other_xy = next_other[..., :2]  # [B,1,8,2]
+                # --- 1. 构造自车双圆中心 ---
+                # 使用 next_ego [B,1,6]
+                dist_ego = self.HALF_L * 0.6  # 圆心偏移 (约1.35m)
+                ego_cos = torch.cos(next_ego[..., 4])  # phi
+                ego_sin = torch.sin(next_ego[..., 4])
+                ego_x = next_ego[..., 0]
+                ego_y = next_ego[..., 1]
 
-                # 计算欧氏距离
-                dist_veh = torch.norm(ego_xy.unsqueeze(2) - other_xy, dim=-1)  # [B,1,8]
-                # 过滤全零占位车辆 (将距离设为极大值以避免误报)
-                other_norm = torch.norm(other_xy, dim=-1)
+                ego_front_x = ego_x + dist_ego * ego_cos
+                ego_front_y = ego_y + dist_ego * ego_sin
+                ego_rear_x = ego_x - dist_ego * ego_cos
+                ego_rear_y = ego_y - dist_ego * ego_sin
+
+                ego_front = torch.stack([ego_front_x, ego_front_y], dim=-1)  # [B,1,2]
+                ego_rear = torch.stack([ego_rear_x, ego_rear_y], dim=-1)  # [B,1,2]
+
+                # --- 2. 构造周车双圆中心 ---
+                # next_other 形状 [B,1,N,4] (x,y,phi,v_lon)
+                other_x = next_other[..., 0]
+                other_y = next_other[..., 1]
+                other_phi = next_other[..., 2]  # 第三维是 phi
+                other_v = next_other[..., 3]
+
+                other_cos = torch.cos(other_phi)
+                other_sin = torch.sin(other_phi)
+                dist_other = self.HALF_L * 0.6  # 同样的偏移量
+
+                other_front_x = other_x + dist_other * other_cos
+                other_front_y = other_y + dist_other * other_sin
+                other_rear_x = other_x - dist_other * other_cos
+                other_rear_y = other_y - dist_other * other_sin
+
+                other_front = torch.stack([other_front_x, other_front_y], dim=-1)  # [B,1,N,2]
+                other_rear = torch.stack([other_rear_x, other_rear_y], dim=-1)  # [B,1,N,2]
+
+                # --- 3. 计算四个圆对距离平方 ---
+                # 扩展维度以便广播: 自车 [B,1,1,2] vs 周车 [B,1,N,2]
+                ego_front_exp = ego_front.unsqueeze(2)  # [B,1,1,2]
+                ego_rear_exp = ego_rear.unsqueeze(2)
+
+                d_ff = torch.sum((ego_front_exp - other_front) ** 2, dim=-1)  # [B,1,N]
+                d_fr = torch.sum((ego_front_exp - other_rear) ** 2, dim=-1)
+                d_rf = torch.sum((ego_rear_exp - other_front) ** 2, dim=-1)
+                d_rr = torch.sum((ego_rear_exp - other_rear) ** 2, dim=-1)
+
+                min_dist_sq, _ = torch.min(torch.stack([d_ff, d_fr, d_rf, d_rr], dim=-1), dim=-1)  # [B,1,N]
+
+                # --- 4. 过滤占位车辆 ---
+                other_norm = torch.norm(torch.stack([other_x, other_y], dim=-1), dim=-1)  # [B,1,N]
                 invalid_mask = other_norm < 1e-3
-                dist_veh = torch.where(invalid_mask, torch.full_like(dist_veh, 1e9), dist_veh)
+                min_dist_sq = torch.where(invalid_mask, torch.full_like(min_dist_sq, 1e9), min_dist_sq)
 
-                # 平方距离用于后续平方违反量 (与原代码一致)
-                dist_veh_sq = dist_veh ** 2
-                veh_violation_sq = torch.clamp(
-                    torch.maximum(safe_veh_sq - dist_veh_sq, torch.zeros_like(dist_veh_sq)),
-                    max=10.0
-                )
+                # --- 5. 计算安全距离阈值 ---
+                circle_radius = self.HALF_W * 0.9  # 每个圆的半径 (~0.9m)
+                # 两个圆之间的最小中心距 = 2*半径 + 预设间隙
+                safe_center_dist = 2.0 * circle_radius + self.other_car_min_distance  # 米
+                safe_center_dist_sq = safe_center_dist ** 2
+
+                # --- 6. 违反量 ---
+                veh_violation_sq = torch.clamp(safe_center_dist_sq - min_dist_sq, min=0.0, max=10.0)
                 phi_violation += (veh_violation_sq ** 2).sum(dim=[1, 2])
 
-                # 计算未平方的周车约束违反量 (距离形式)，用于条件平滑
-                veh_violation_raw = torch.clamp(
-                    self.other_car_min_distance - dist_veh, min=0.0
-                )  # [B,1,8]
+                # 原始违反量 (用于平滑惩罚)
+                veh_violation_raw = torch.clamp(safe_center_dist - torch.sqrt(min_dist_sq), min=0.0)
                 penalty_npc_raw = veh_violation_raw.sum(dim=[1, 2])  # [B]
 
-                # 道路边缘安全距离约束 (road_left/right 已在自车坐标系)
+            # 道路边缘安全距离约束 (road_left/right 已在自车坐标系)
             dist_left_sq = torch.sum((ego_xy.unsqueeze(2) - road_left) ** 2, dim=-1)
             dist_right_sq = torch.sum((ego_xy.unsqueeze(2) - road_right) ** 2, dim=-1)
             min_left_sq, _ = torch.min(dist_left_sq, dim=-1)
@@ -421,6 +462,7 @@ class OcpAgent(BaseAgent):
             # 有限时域累计成本 (无折扣 γ=1，对齐论文 OCP)
             # 【防御】截断目标值，防止梯度爆炸
             targets = torch.clamp(torch.flip(torch.cumsum(torch.flip(step_l, [1]), dim=1), [1]), max=1000.0)
+            violation_per_sample = step_phi.sum(dim=1)  # [B] 每个样本 horizon 内的总违反
 
         all_states = torch.cat([state_tensor.unsqueeze(1), states_traj], dim=1)
         critic_inputs = all_states[:, :-1].reshape(-1, self.TOTAL_STATE_DIM)
@@ -456,6 +498,17 @@ class OcpAgent(BaseAgent):
                 logger.debug(f"[GEP] 惩罚因子未放大，当前违反量 {avg_phi:.6f}")
 
         self.predict_traj = states_traj.cpu().detach().numpy()
+
+        # 构造 (experience, new_priority) 列表
+        experiences_and_priorities = []
+        max_violation = violation_per_sample.max().item() + 1e-5
+        for i, item in enumerate(batch_data):
+            # 将违反程度映射到优先级 0.1~10
+            priority = 0.1 + 9.9 * (violation_per_sample[i].item() / max_violation)
+            experiences_and_priorities.append((item, priority))
+
+        # 更新缓冲区中的优先级
+        self.buffer.update_priorities(experiences_and_priorities)
 
         return {
             "actor_loss": actor_loss.item(),

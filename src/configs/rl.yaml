@@ -34,9 +34,9 @@ rl:
     lr_actor: 3e-4  # 保持不变
     lr_critic: 8e-4  # 还原论文的8e-4，加快价值网络收敛
     init_penalty: 1.0  # 初始惩罚因子调小，先学跟踪再学安全约束
-    max_penalty: 100.0  # 放大最大惩罚因子，保证约束最终生效
+    max_penalty: 500.0  # 放大最大惩罚因子，保证约束最终生效
     hidden_dim: 256
-    other_car_min_distance: 6.0
+    other_car_min_distance: 0.8
     road_min_distance: 1.0
     min_start_train: 1024  # 先收集10000步随机样本，再开始训练
     total_capacity: 500000  # 还原论文的5e5缓冲区大小

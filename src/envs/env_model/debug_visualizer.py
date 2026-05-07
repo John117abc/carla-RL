@@ -2,7 +2,7 @@ import math
 import numpy as np
 import carla
 import traceback
-from src.carla_utils import draw_points,draw_text_at_location, draw_all_vehicles_ellipses,draw_lines_between_points
+from src.carla_utils import draw_all_vehicles_double_circles,draw_points,draw_text_at_location, draw_all_vehicles_ellipses,draw_lines_between_points
 from src.utils import get_logger, unpack_ocp_numpy
 
 logger = get_logger(name='debug_visualizer')
@@ -107,6 +107,9 @@ class DebugVisualizer:
 
         # 椭圆周车约束
         # draw_all_vehicles_ellipses(self.world,ego_vehicle,other_vehicles)
+
+        # 绘制双圆约束车辆
+        draw_all_vehicles_double_circles(self.world,ego_vehicle,other_vehicles,life_time=0.15)
 
         # 周车约束
         distances = np.linalg.norm(other_pos - [world_ego_x, world_ego_y], axis=1)

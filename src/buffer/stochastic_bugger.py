@@ -94,6 +94,30 @@ class PriorityBuffer:
         # 重置计数器到加载时的位置
         self._counter = itertools.count(start=data['counter'] + 1)
 
+    def update_priorities(self, experiences_and_new_priorities):
+        """
+        批量更新经验的优先级。
+        experiences_and_new_priorities: [(experience, new_priority), ...]
+        策略：在堆中查找并移除旧条目，然后插入新条目。
+        """
+        for exp, new_priority in experiences_and_new_priorities:
+            # 在堆中查找并移除具有相同 state（或整个 experience）的条目
+            # 为了避免过于复杂的查找，我们利用 experience 的 state 部分作为 key
+            # （这里假设 experience[0] 是 state，可以唯一标识）
+            state_key = exp[0]  # state tensor
+            for i, (pri, cnt, buf_exp) in enumerate(self.buffer):
+                if buf_exp[0] is state_key or torch.equal(buf_exp[0], state_key):
+                    # 移除旧条目
+                    self.buffer[i] = self.buffer[-1]
+                    self.buffer.pop()
+                    heapq.heapify(self.buffer)  # 重新堆化（O(n)）
+                    self.sum_priorities -= pri
+                    break
+            # 插入新条目
+            count = next(self._counter)
+            heapq.heappush(self.buffer, (new_priority, count, exp))
+            self.sum_priorities += new_priority
+
 
 class SafetyCriticalBuffer(PriorityBuffer):
     """存储与安全约束违反或接近违反的样本"""

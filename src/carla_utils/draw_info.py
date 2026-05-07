@@ -115,6 +115,24 @@ def draw_all_vehicles_ellipses(world, ego_vehicle, other_vehicles, a=3.2, b=1.5,
             draw_vehicle_ellipse(world, v.get_transform(), a, b,
                                  color=carla.Color(0, 255, 0), life_time=life_time)
 
+def draw_all_vehicles_double_circles(world, ego_vehicle, other_vehicles, a=2.25, b=1.0, life_time=0.1):
+    debug = world.debug
+    # 绘制自车
+    draw_vehicle_circles(debug, ego_vehicle,
+                         color=carla.Color(0, 255, 0),
+                         circle_radius=a * 0.9,
+                         dist_from_center=b * 0.6,
+                         life_time=life_time)
+    # 绘制每辆NPC
+    for npc in other_vehicles:
+        if npc.is_alive:
+            draw_vehicle_circles(debug, npc,
+                                 color=carla.Color(255, 100, 0),
+                                 circle_radius=a * 0.9,
+                                 dist_from_center=b * 0.6,
+                                 life_time=life_time)
+
+
 def draw_vehicle_ellipse(
     world: carla.World,
     transform: carla.Transform,
@@ -167,3 +185,58 @@ def draw_vehicle_ellipse(
     # head_y = transform.location.y + sin_y * a
     # debug.draw_point(carla.Location(x=head_x, y=head_y, z=transform.location.z + 0.5),
     #                  size=0.1, color=carla.Color(255, 0, 0), life_time=life_time)
+
+def draw_circle(debug_helper, center, radius, color=carla.Color(255,255,255),
+                life_time=0.1, num_segments=16):
+    """
+    用线段逼近圆，适配 Carla DebugHelper::draw_line 的完整签名。
+    """
+    pts = []
+    for i in range(num_segments + 1):
+        angle = 2 * math.pi * i / num_segments
+        x = center.x + radius * math.cos(angle)
+        y = center.y + radius * math.sin(angle)
+        pts.append(carla.Location(x, y, center.z))
+    for i in range(num_segments):
+        debug_helper.draw_line(
+            pts[i], pts[i+1],
+            thickness=0.1,
+            color=color,
+            life_time=life_time,
+            persistent_lines=False
+        )
+
+def draw_vehicle_circles(debug_helper, vehicle, color=carla.Color(255, 0, 0),
+                         circle_radius=1.0, dist_from_center=1.35, life_time=0.1):
+    """
+    绘制车辆的双圆覆盖模型（前后两个圆 + 圆心连线）。
+    """
+    transform = vehicle.get_transform()
+    loc = transform.location
+    yaw_rad = math.radians(transform.rotation.yaw)
+    cos = math.cos(yaw_rad)
+    sin = math.sin(yaw_rad)
+
+    front_center = carla.Location(
+        loc.x + dist_from_center * cos,
+        loc.y + dist_from_center * sin,
+        loc.z + 0.3
+    )
+    rear_center = carla.Location(
+        loc.x - dist_from_center * cos,
+        loc.y - dist_from_center * sin,
+        loc.z + 0.3
+    )
+
+    # 画前后圆
+    draw_circle(debug_helper, front_center, circle_radius, color, life_time)
+    draw_circle(debug_helper, rear_center, circle_radius, color, life_time)
+
+    # 画圆心连线（车辆纵轴方向）
+    debug_helper.draw_line(
+        front_center, rear_center,
+        thickness=0.1,
+        color=color,
+        life_time=life_time,
+        persistent_lines=False
+    )
