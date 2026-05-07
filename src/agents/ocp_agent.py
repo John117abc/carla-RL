@@ -467,41 +467,16 @@ class OcpAgent(BaseAgent):
             # step_phi: [B, horizon] 是每个样本每步的违规平方和
             violation_per_sample = step_phi.sum(dim=1)  # 每个样本总违规
 
-            # 也可以拿到 tracking 性能：用 step_l 的总和
-            tracking_per_sample = step_l.sum(dim=1)  # 每个样本总跟踪成本
+        # 构造 (experience, new_priority) 列表
+        experiences_and_priorities = []
+        max_violation = violation_per_sample.max().item() + 1e-5
+        for i, item in enumerate(batch_data):
+            # 将违反程度映射到优先级 0.1~10
+            priority = 0.1 + 9.9 * (violation_per_sample[i].item() / max_violation)
+            experiences_and_priorities.append((item, priority))
 
-            # 为每个样本计算它所属类别的新优先级，然后统一更新
-            # 注意：batch_data 中的样本可能来自不同缓冲区，我们需要知道它们原本属于哪个缓冲区
-            # 简便方法：根据样本的特征动态判断类别，或者直接对号入座（用 _classify_experience）
-            # 更简单的做法：只对安全关键缓冲区和性能缓冲区做更新，其他先保持原样。
-
-            # 第一步：分离出安全关键样本
-            safe_pairs = []  # 用于 SafetyCriticalBuffer
-            perf_pairs = []  # 用于 PerformanceBuffer
-            # 也可以为 Diversity 和 Curriculum 准备，这里按需扩展
-
-            for i, item in enumerate(batch_data):
-                exp = item
-                # 使用你现有的分类函数判断该样本应该属于哪个缓冲区
-                buf_idx = self.buffer._classify_experience(exp)  # 返回 0~3
-                if buf_idx == 0:  # 安全关键
-                    # 新优先级 = 基础 + GEP 因子 * 违规总量
-                    pri = 0.5 + self.init_penalty * violation_per_sample[i].item()
-                    pri = np.clip(pri, 0.1, 10.0)
-                    safe_pairs.append((exp, pri))
-                elif buf_idx == 1:  # 高性能
-                    # 新优先级：根据跟踪性能（越小越好，所以用倒数）
-                    track = tracking_per_sample[i].item()
-                    pri = 0.5 + 2.0 / (track + 0.1)
-                    pri = np.clip(pri, 0.1, 10.0)
-                    perf_pairs.append((exp, pri))
-                # 其他类别暂时不更新，或者用默认值。
-
-            # 将更新后的对写入对应缓冲区
-            if safe_pairs:
-                self.buffer.buffers[0].update_priorities(safe_pairs)  # SafetyCriticalBuffer
-            if perf_pairs:
-                self.buffer.buffers[1].update_priorities(perf_pairs)  # PerformanceBuffer
+        # 更新缓冲区中的优先级
+        self.buffer.buffers[3].update_priorities(experiences_and_priorities)
 
         all_states = torch.cat([state_tensor.unsqueeze(1), states_traj], dim=1)
         critic_inputs = all_states[:, :-1].reshape(-1, self.TOTAL_STATE_DIM)
