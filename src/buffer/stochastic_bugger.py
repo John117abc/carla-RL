@@ -96,27 +96,42 @@ class PriorityBuffer:
 
     def update_priorities(self, experiences_and_new_priorities):
         """
-        批量更新经验的优先级。
-        experiences_and_new_priorities: [(experience, new_priority), ...]
-        策略：在堆中查找并移除旧条目，然后插入新条目。
+        批量更新已有经验的优先级。
+        参数: [(experience, new_priority), ...]
+        会自动扫描当前堆，移除旧条目，插入新条目。
         """
-        for exp, new_priority in experiences_and_new_priorities:
-            # 在堆中查找并移除具有相同 state（或整个 experience）的条目
-            # 为了避免过于复杂的查找，我们利用 experience 的 state 部分作为 key
-            # （这里假设 experience[0] 是 state，可以唯一标识）
-            state_key = exp[0]  # state tensor
-            for i, (pri, cnt, buf_exp) in enumerate(self.buffer):
-                if buf_exp[0] is state_key or torch.equal(buf_exp[0], state_key):
-                    # 移除旧条目
-                    self.buffer[i] = self.buffer[-1]
-                    self.buffer.pop()
-                    heapq.heapify(self.buffer)  # 重新堆化（O(n)）
-                    self.sum_priorities -= pri
-                    break
-            # 插入新条目
-            count = next(self._counter)
-            heapq.heappush(self.buffer, (new_priority, count, exp))
-            self.sum_priorities += new_priority
+        # 构建 state -> (exp, new_pri) 的映射，用于快速查找
+        update_dict = {}
+        for exp, new_pri in experiences_and_new_priorities:
+            key = self._get_state_key(exp[0])  # 用 state 作为标识
+            update_dict[key] = (exp, new_pri)
+
+        new_heap = []
+        removed_sum = 0.0
+        for pri, cnt, exp in self.buffer:
+            key = self._get_state_key(exp[0])
+            if key in update_dict:
+                removed_sum += pri
+                # 旧条目跳过，不放入新堆
+            else:
+                new_heap.append((pri, cnt, exp))
+
+        # 将更新后的条目插入新堆
+        for exp, new_pri in update_dict.values():
+            cnt = next(self._counter)
+            new_heap.append((new_pri, cnt, exp))
+            self.sum_priorities += new_pri
+
+        self.buffer = new_heap
+        heapq.heapify(self.buffer)
+        self.sum_priorities -= removed_sum
+
+    def _get_state_key(self, state):
+        """为 state 生成唯一标识，用于更新时匹配"""
+        if isinstance(state, np.ndarray):
+            return state.tobytes()
+        else:
+            return str(state)
 
 
 class SafetyCriticalBuffer(PriorityBuffer):
