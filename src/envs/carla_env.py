@@ -366,7 +366,7 @@ class CarlaEnv(gym.Env):
         input_params = {'path_locations':self.path_locations,
                         'ego_ref_speed':self.ego_ref_speed,
                         'ref_offset':self.carla_cfg['world']['ref_offset'],
-                        'other_car_min_distance':self.train_cfg['other_car_min_distance']}
+                        'perceived_distance':self.env_cfg['actors']['ego']['perceived_distance']}
 
         obs = self.observation_processor.get_observation(self.is_eval,input_params)
         
@@ -382,6 +382,7 @@ class CarlaEnv(gym.Env):
         
         # 5. 检查终止 → 委托 TerminationChecker
         terminated, truncated, info = self.termination_checker.check_termination(collision,obstacle,self.step_count)
+
         info.update(reward)
         
         # 6. 调试可视化（可选）→ 委托 DebugVisualizer
@@ -447,7 +448,7 @@ class CarlaEnv(gym.Env):
         input_params = {'path_locations':self.path_locations,
                         'ego_ref_speed':self.ego_ref_speed,
                         'ref_offset':self.carla_cfg['world']['ref_offset'],
-                        'other_car_min_distance':self.train_cfg['other_car_min_distance']}
+                        'perceived_distance':self.env_cfg['actors']['ego']['perceived_distance']}
         obs = self.observation_processor.get_observation(self._is_eval,input_params)
         
         # 【加固】确保初始 ocp_obs 维度正确

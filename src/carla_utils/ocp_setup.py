@@ -202,7 +202,7 @@ def get_ocp_observation(
         path_locations: List[carla.Location],
         ego_ref_speed: float,
         ref_offset: int,
-        other_car_min_distance:float,
+        perceived_distance:float,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     获取完全对齐论文的OCP控制所需全量观测信息
@@ -224,7 +224,7 @@ def get_ocp_observation(
     s_ego = get_ego_observation(ego_vehicle, ego_imu)
 
     # 2. 获取周车状态
-    s_other = get_other_observation(ego_vehicle, other_vehicles,distance_threshold = other_car_min_distance)
+    s_other = get_other_observation(ego_vehicle, other_vehicles,distance_threshold = perceived_distance)
 
     # 3. 获取多帧道路边缘状态
     s_road = get_road_observation_multi_frame(ego_vehicle, ego_vehicle.get_world())

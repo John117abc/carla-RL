@@ -83,7 +83,7 @@ class ObservationProcessor:
                 input_params['path_locations'],
                 input_params['ego_ref_speed'],
                 input_params['ref_offset'],
-                input_params['other_car_min_distance']
+                input_params['perceived_distance']
             )
 
             obs["ocp_obs"] = network_state

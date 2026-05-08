@@ -94,22 +94,6 @@ class PriorityBuffer:
         # 重置计数器到加载时的位置
         self._counter = itertools.count(start=data['counter'] + 1)
 
-    def update_priorities(self, experiences_and_new_priorities):
-        """
-        批量更新经验的优先级。
-        experiences_and_new_priorities: [(experience, new_priority), ...]
-        策略：在堆中查找并移除旧条目，然后插入新条目。
-        """
-        for exp, new_priority in experiences_and_new_priorities:
-            # 在堆中查找并移除具有相同 state（或整个 experience）的条目
-            # 为了避免过于复杂的查找，我们利用 experience 的 state 部分作为 key
-            # （这里假设 experience[0] 是 state，可以唯一标识）
-            state_key = exp[0]  # state tensor
-            # 插入新条目
-            count = next(self._counter)
-            heapq.heappush(self.buffer, (new_priority, count, exp))
-            self.sum_priorities += new_priority
-
     def _get_state_key(self, state):
         """为 state 生成唯一标识，用于更新时匹配"""
         if isinstance(state, np.ndarray):

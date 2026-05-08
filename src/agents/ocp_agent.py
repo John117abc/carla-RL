@@ -11,7 +11,7 @@ from .base_agent import BaseAgent
 from src.models.actor_critic import ActorNet, CriticNet
 from src.models.bicycle import BicycleModel
 from src.utils import save_checkpoint, load_checkpoint
-from src.buffer import StochasticBuffer
+from src.buffer import StochasticBuffer,PERBuffer
 from src.utils import get_logger
 from src.carla_utils import rect_min_dist_sq
 
@@ -103,10 +103,7 @@ class OcpAgent(BaseAgent):
         self.gamma = self.ocp_config['gamma']
 
         # 缓冲区
-        self.buffer = StochasticBuffer(
-            min_start_train=self.ocp_config['min_start_train'],
-            total_capacity=self.ocp_config['total_capacity']
-        )
+        self.buffer = PERBuffer(capacity=100000, min_start_train=256)
 
         # 训练状态
         self.global_step = 0
@@ -256,7 +253,7 @@ class OcpAgent(BaseAgent):
             if self.DIM_OTHER > 0:
                 # --- 1. 构造自车双圆中心 ---
                 # 使用 next_ego [B,1,6]
-                dist_ego = self.HALF_L * 0.65  # 圆心偏移 (约1.35m)
+                dist_ego = self.HALF_L * 1.0  # 圆心偏移 (约1.35m)
                 ego_cos = torch.cos(next_ego[..., 4])  # phi
                 ego_sin = torch.sin(next_ego[..., 4])
                 ego_x = next_ego[..., 0]
@@ -279,7 +276,7 @@ class OcpAgent(BaseAgent):
 
                 other_cos = torch.cos(other_phi)
                 other_sin = torch.sin(other_phi)
-                dist_other = self.HALF_L * 0.65  # 同样的偏移量
+                dist_other = self.HALF_L * 1.0  # 同样的偏移量
 
                 other_front_x = other_x + dist_other * other_cos
                 other_front_y = other_y + dist_other * other_sin
@@ -303,11 +300,15 @@ class OcpAgent(BaseAgent):
 
                 # --- 4. 过滤占位车辆 ---
                 other_norm = torch.norm(torch.stack([other_x, other_y], dim=-1), dim=-1)  # [B,1,N]
+                # print(f"DEBUG other_norm max: {other_norm.max().item():.4f}, min: {other_norm.min().item():.4f}")
                 invalid_mask = other_norm < 1e-3
                 min_dist_sq = torch.where(invalid_mask, torch.full_like(min_dist_sq, 1e9), min_dist_sq)
+                # print(f"DEBUG invalid count: {invalid_mask.sum().item()} / {invalid_mask.numel()}")
+                if (min_dist_sq < 1e8).any():
+                    logger.debug(f"检测到车辆接近！最近平方距离: {min_dist_sq.min().item():.2f}")
 
                 # --- 5. 计算安全距离阈值 ---
-                circle_radius = self.HALF_W * 0.8  # 每个圆的半径 (~0.9m)
+                circle_radius = self.HALF_W * 0.65  # 每个圆的半径 (~0.9m)
                 # 两个圆之间的最小中心距 = 2*半径 + 预设间隙
                 safe_center_dist = 2.0 * circle_radius + self.other_car_min_distance  # 米
                 safe_center_dist_sq = safe_center_dist ** 2
@@ -466,6 +467,12 @@ class OcpAgent(BaseAgent):
             # 重新计算本批次的约束违反/性能指标（你已算出的 step_phi 可以复用）
             # step_phi: [B, horizon] 是每个样本每步的违规平方和
             violation_per_sample = step_phi.sum(dim=1)  # 每个样本总违规
+            new_pri = violation_per_sample.cpu().numpy().astype(np.float64)
+            # 确保最小值为正
+            new_pri = np.maximum(new_pri, 1e-6)
+            # 打印观察
+            if new_pri.min() > 1e8:
+                logger(f"DEBUG: violation range [{new_pri.min():.4f}, {new_pri.max():.4f}], mean={new_pri.mean():.4f}")
 
         # 构造 (experience, new_priority) 列表
         experiences_and_priorities = []
@@ -474,9 +481,6 @@ class OcpAgent(BaseAgent):
             # 将违反程度映射到优先级 0.1~10
             priority = 0.1 + 9.9 * (violation_per_sample[i].item() / max_violation)
             experiences_and_priorities.append((item, priority))
-
-        # 更新缓冲区中的优先级
-        self.buffer.buffers[3].update_priorities(experiences_and_priorities)
 
         all_states = torch.cat([state_tensor.unsqueeze(1), states_traj], dim=1)
         critic_inputs = all_states[:, :-1].reshape(-1, self.TOTAL_STATE_DIM)
@@ -506,17 +510,14 @@ class OcpAgent(BaseAgent):
             if violation_per_sample.sum() > 1e-6:
                 old_penalty = self.init_penalty
                 self.init_penalty = min(self.init_penalty * self.amplifier_c, self.max_penalty)
-                logger.info(f"[GEP] 立即放大 ρ: {old_penalty:.2f} → {self.init_penalty:.2f}")
+                logger.debug(f"[GEP] 立即放大 ρ: {old_penalty:.2f} → {self.init_penalty:.2f}")
 
         self.predict_traj = states_traj.cpu().detach().numpy()
 
-        # 构造 (experience, new_priority) 列表
-        experiences_and_priorities = []
-        max_violation = violation_per_sample.max().item() + 1e-5
-        for i, item in enumerate(batch_data):
-            # 将违反程度映射到优先级 0.1~10
-            priority = 0.1 + 9.9 * (violation_per_sample[i].item() / max_violation)
-            experiences_and_priorities.append((item, priority))
+        # 更新缓冲区
+        # 将每个样本的违规量作为新优先级
+        new_pri = violation_per_sample.cpu().numpy() + 1e-5  # 确保>0
+        self.buffer.update_last_batch_priorities(new_pri)
 
         return {
             "actor_loss": actor_loss.item(),

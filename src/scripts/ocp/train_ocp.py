@@ -174,10 +174,6 @@ def main():
 
                 if done:
                     logger.info(f"  Episode 结束")
-                    # 如果本回合发生了碰撞，将轨迹存入安全关键缓冲区
-                    if info.get('collision', False) and episode_transitions:
-                        agent.buffer.add_safety_trajectory(episode_transitions)
-                        logger.debug(f"已存入 {len(episode_transitions)} 条安全关键经验")
                     break
                 agent.global_step += 1
 
