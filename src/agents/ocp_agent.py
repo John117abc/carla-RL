@@ -300,11 +300,9 @@ class OcpAgent(BaseAgent):
 
                 # --- 4. 过滤占位车辆 ---
                 other_norm = torch.norm(torch.stack([other_x, other_y], dim=-1), dim=-1)  # [B,1,N]
-                # print(f"DEBUG other_norm max: {other_norm.max().item():.4f}, min: {other_norm.min().item():.4f}")
                 invalid_mask = other_norm < 1e-3
                 min_dist_sq = torch.where(invalid_mask, torch.full_like(min_dist_sq, 1e9), min_dist_sq)
-                # print(f"DEBUG invalid count: {invalid_mask.sum().item()} / {invalid_mask.numel()}")
-                if (min_dist_sq < 1e8).any():
+                if (min_dist_sq < 1e9).any():
                     logger.debug(f"检测到车辆接近！最近平方距离: {min_dist_sq.min().item():.2f}")
 
                 # --- 5. 计算安全距离阈值 ---
@@ -472,7 +470,7 @@ class OcpAgent(BaseAgent):
             new_pri = np.maximum(new_pri, 1e-6)
             # 打印观察
             if new_pri.min() > 1e8:
-                logger(f"DEBUG: violation range [{new_pri.min():.4f}, {new_pri.max():.4f}], mean={new_pri.mean():.4f}")
+                logger.debug(f"DEBUG: violation range [{new_pri.min():.4f}, {new_pri.max():.4f}], mean={new_pri.mean():.4f}")
 
         # 构造 (experience, new_priority) 列表
         experiences_and_priorities = []
