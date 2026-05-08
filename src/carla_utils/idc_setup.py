@@ -1,4 +1,4 @@
-# src/carla_utils/ocp_setup.py
+# src/carla_utils/idc_setup.py
 import numpy as np
 from typing import List, Optional
 import src.envs.env_model.sensors_manager
@@ -25,7 +25,7 @@ def batch_world_to_ego(path_locations, ego_transform):
     y_ego = dx * (-s) + dy * c  # 修复符号问题
 
     # 修复2：确保横向误差定义正确
-    # 在OCP中：y_ego > 0 表示参考路径在车辆左侧（需要右转）
+    # 在IDC中：y_ego > 0 表示参考路径在车辆左侧（需要右转）
     #          y_ego < 0 表示参考路径在车辆右侧（需要左转）
     return np.stack([x_ego, y_ego], axis=1).tolist()
 
@@ -94,7 +94,7 @@ def world_to_ego_coordinate(
     return ego_x, ego_y
 
 
-def get_ocp_observation_ego_frame(
+def get_idc_observation_ego_frame(
         ego_vehicle: carla.Vehicle,
         ego_imu: Optional[src.envs.env_model.sensors_manager.IMUSensor],
         other_vehicles: List[carla.Vehicle],
@@ -103,10 +103,10 @@ def get_ocp_observation_ego_frame(
         ref_offset: int,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
-    获取OCP观测信息并转换为自车坐标系（修复了ref_error未转换的Bug）
+    获取IDC观测信息并转换为自车坐标系（修复了ref_error未转换的Bug）
     """
     # 1. 调用原函数获取世界坐标系下的观测数据
-    network_state, s_road, s_ref_raw, s_ref_error = get_ocp_observation(
+    network_state, s_road, s_ref_raw, s_ref_error = get_idc_observation(
         ego_vehicle, ego_imu, other_vehicles, path_locations, ego_ref_speed, ref_offset
     )
 
@@ -195,7 +195,7 @@ def get_ocp_observation_ego_frame(
 
     return network_state_ego, s_road_ego, s_ref_ego, s_ref_error_ego, s_road, s_ref_raw
 
-def get_ocp_observation(
+def get_idc_observation(
         ego_vehicle: carla.Vehicle,
         ego_imu: Optional[src.envs.env_model.sensors_manager.IMUSensor],
         other_vehicles: List[carla.Vehicle],
@@ -205,7 +205,7 @@ def get_ocp_observation(
         perceived_distance:float,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
-    获取完全对齐论文的OCP控制所需全量观测信息
+    获取完全对齐论文的IDC控制所需全量观测信息
     :param ref_offset: 参考偏移
     :param ego_vehicle: 自车
     :param ego_imu: IMU传感器（允许为空）
@@ -437,7 +437,7 @@ def get_road_observation_multi_frame(
 ) -> np.ndarray:
     """
     获取论文隐含的多帧道路边缘状态 (80维)
-    用于OCP有限时域安全约束
+    用于IDC有限时域安全约束
     :param ego_vehicle: 自车
     :param world: Carla世界对象
     :param distance: 前方搜索距离 (米)

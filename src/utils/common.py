@@ -79,7 +79,7 @@ class RunningNormalizer:
 import numpy as np
 
 
-def normalize_ocp_scenario_relative(data):
+def normalize_idc_scenario_relative(data):
     """
     基于自车的局部观测归一化（观测半径 50m）
 
@@ -157,9 +157,9 @@ def normalize_ocp_scenario_relative(data):
     ]
 
 
-def average_ocp_list(data_list):
+def average_idc_list(data_list):
     """
-    对多个 ocp_data 样本求平均，返回平均后的 data。
+    对多个 idc_data 样本求平均，返回平均后的 data。
 
     输入:
         data_list: List[data], 每个 data 结构为 [ego, agents, road_edge, ref_path]
@@ -195,9 +195,9 @@ def average_ocp_list(data_list):
         avg_ref_path
     ]
 
-def unpack_ocp_numpy(data,road_num,other_number):
+def unpack_idc_numpy(data,road_num,other_number):
     """
-    严格解包ocp维状态张量
+    严格解包idc维状态张量
     输入维度：[B, N, 121] → 输出：
     - ego_state: [B, N, 6]
     - other_states: [B, N, 8, 4]

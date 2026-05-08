@@ -3,7 +3,7 @@ from .logger import get_logger
 from .checkpoint import save_checkpoint,load_checkpoint
 from .config import load_config,load_config_json
 from .env import setup_code_environment
-from .common import normalize_Kinematics_obs,get_project_root,RunningNormalizer,normalize_ocp_scenario_relative,average_ocp_list,unpack_ocp_numpy
+from .common import normalize_Kinematics_obs,get_project_root,RunningNormalizer,normalize_idc_scenario_relative,average_idc_list,unpack_idc_numpy
 from .draw import Plotter
 __all__ = ['get_logger',
            'save_checkpoint',
@@ -15,6 +15,6 @@ __all__ = ['get_logger',
            'Plotter',
            'get_project_root',
            'RunningNormalizer',
-           'normalize_ocp_scenario_relative',
-           'average_ocp_list',
-           'unpack_ocp_numpy']
+           'normalize_idc_scenario_relative',
+           'average_idc_list',
+           'unpack_idc_numpy']

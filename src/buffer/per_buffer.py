@@ -126,7 +126,7 @@ class PERBuffer:
 
     def update_last_batch_priorities(self, new_priorities):
         """
-        根据 OCP 计算出的违规量（或其他指标）更新最近一批样本的优先级。
+        根据 IDC 计算出的违规量（或其他指标）更新最近一批样本的优先级。
         new_priorities: list/array of float, 长度与上次采样的 batch_size 相同
         """
         p_array = np.array(new_priorities, dtype=np.float64)

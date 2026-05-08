@@ -1,7 +1,7 @@
 import numpy as np
 import math
 import carla
-from src.carla_utils import get_compass, world_to_vehicle_frame, get_ocp_observation,resample_path_equal_distance
+from src.carla_utils import get_compass, world_to_vehicle_frame, get_idc_observation,resample_path_equal_distance
 
 class ObservationProcessor:
     def __init__(self, vehicle_manager, sensor_manager,world, config, normalizer):
@@ -62,8 +62,8 @@ class ObservationProcessor:
             meas_normalized = self.normalizer.normalize(meas_array)
 
             obs["measurements"] = meas_normalized
-        if "ocp_obs" in self.config["obs_type"]:
-            # 获取ocp观察信息
+        if "idc_obs" in self.config["obs_type"]:
+            # 获取idc观察信息
             v = self.vehicle_manager.ego_vehicle.get_velocity()
             speed = np.linalg.norm([v.x, v.y])
             # 速度越快，间距越大 (0.8 秒 * 速度)
@@ -76,7 +76,7 @@ class ObservationProcessor:
                 input_params['path_locations'] = [carla.Location(x=pt[0], y=pt[1], z=0) for pt in resampled]
             # 观察周车
             self.vehicle_manager.get_surrounding_vehicles()
-            network_state, s_road, s_ref_raw, s_ref_error, s_others = get_ocp_observation(
+            network_state, s_road, s_ref_raw, s_ref_error, s_others = get_idc_observation(
                 self.vehicle_manager.ego_vehicle,
                 self.sensor_manager.imu_sensor,
                 self.vehicle_manager.npc_vehicles,
@@ -86,7 +86,7 @@ class ObservationProcessor:
                 input_params['perceived_distance']
             )
 
-            obs["ocp_obs"] = network_state
+            obs["idc_obs"] = network_state
             obs["s_road_raw"] = s_road
             obs["s_ref_raw"] = s_ref_raw
             obs["s_ref_error"] = s_ref_error

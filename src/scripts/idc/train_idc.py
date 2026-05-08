@@ -19,7 +19,7 @@ from src.buffer import Trajectory
 import gymnasium as gym
 from src.envs.carla_env import CarlaEnv
 
-logger = get_logger('train_ocp')
+logger = get_logger('train_idc')
 
 
 def save_image(obs, step: int, save_dir: str = "debug_images"):
@@ -65,9 +65,9 @@ def main():
         # 【新增】将智能体绑定至环境，用于 step 中实时可视化预测轨迹
         env.agent = agent
         
-        if train_config['continue_ocp']:
+        if train_config['continue_idc']:
             logger.info("开始读取智能体参数...")
-            checkpoint = agent.load(train_config["model_path_ocp"])
+            checkpoint = agent.load(train_config["model_path_idc"])
 
         logger.info("环境创建成功！")
         logger.info(f"观测空间: {env.observation_space}")
@@ -78,7 +78,7 @@ def main():
         while episode < num_episodes:
             logger.info(f"\n开始第 {episode + 1} 轮测试...")
             obs = env.reset()
-            state = obs['ocp_obs']
+            state = obs['idc_obs']
             # 提取参考路径，转为tensor [1, N, 2]
             ref_path_locations = obs['ref_path_locations']  # 你的路径规划输出的carla.Location列表
             
@@ -97,9 +97,9 @@ def main():
                 if ref_path_tensor.shape != (1, ref_path_locations.shape[0], 2):
                     raise ValueError(f"参考路径维度异常: {ref_path_tensor.shape} (期望 [1, N, 2])")
 
-                action, _ = agent.select_action(state,train_config['continue_ocp'])
+                action, _ = agent.select_action(state,train_config['continue_idc'])
                 next_obs, reward, _, _, info = env.step(action)
-                next_state = next_obs['ocp_obs']
+                next_state = next_obs['idc_obs']
                 # 【修改】获取道路信息，转为tensor
                 road_state_np = obs['s_road_raw']
                 road_state_tensor = torch.from_numpy(road_state_np).unsqueeze(0).to(

@@ -1,4 +1,4 @@
-# src/agents/ocp_agent.py
+# src/agents/idc_agent.py
 import os
 import gymnasium as gym
 import numpy as np
@@ -16,7 +16,7 @@ from src.utils import get_logger
 from src.carla_utils import rect_min_dist_sq
 
 
-logger = get_logger('ocp_agent')
+logger = get_logger('idc_agent')
 
 
 class OcpAgent(BaseAgent):
@@ -31,51 +31,51 @@ class OcpAgent(BaseAgent):
             device: torch.device = torch.device("cpu"),
     ) -> None:
         super().__init__(env, device)
-        assert isinstance(self.action_space, gym.spaces.Box), "OCP智能体需要连续的动作空间。"
+        assert isinstance(self.action_space, gym.spaces.Box), "IDC智能体需要连续的动作空间。"
 
         # 读取配置
-        rl_algorithm = "OCP"
+        rl_algorithm = "IDC"
         self.base_config = rl_config['rl']
-        self.ocp_config = rl_config['rl'][rl_algorithm]
+        self.idc_config = rl_config['rl'][rl_algorithm]
 
         # 严格对齐论文的状态维度定义
         self.DIM_EGO = 6  # 自车 [x,y,v_lon,v_lat,phi,omega]
-        self.DIM_OTHER = self.env.env_cfg['ocp'][
+        self.DIM_OTHER = self.env.env_cfg['idc'][
                              'others'] * 4  # 8车×4维
         self.DIM_REF_ERROR = 3  # 跟踪误差 [δ_p, δ_φ, δ_v]
         self.TOTAL_STATE_DIM = self.DIM_EGO + self.DIM_OTHER + self.DIM_REF_ERROR
 
         # 道路维度
-        self.DIM_ROAD = self.env.env_cfg['ocp'][
+        self.DIM_ROAD = self.env.env_cfg['idc'][
                             'num_points'] * 4  # 道路80维
 
         self.road_state_buffer = None  # 用于存储当前的道路边缘信息
 
         # 核心参数初始化
-        self.dt = self.ocp_config['dt']
-        self.horizon = self.ocp_config['horizon']
-        self.batch_size = self.ocp_config['batch_size']
+        self.dt = self.idc_config['dt']
+        self.horizon = self.idc_config['horizon']
+        self.batch_size = self.idc_config['batch_size']
 
         # 网络初始化
         self.actor = ActorNet(
             state_dim=self.TOTAL_STATE_DIM,
-            hidden_dim=self.ocp_config['hidden_dim']
+            hidden_dim=self.idc_config['hidden_dim']
         ).to(self.device)
         self.critic = CriticNet(
             state_dim=self.TOTAL_STATE_DIM,
-            hidden_dim=self.ocp_config['hidden_dim']
+            hidden_dim=self.idc_config['hidden_dim']
         ).to(self.device)
         self.dynamics_model = BicycleModel(dt=self.dt, L=2.9)
 
         # 优化器
         self.actor_optimizer = optim.Adam(
             self.actor.parameters(),
-            lr=self.ocp_config['lr_actor'],
+            lr=self.idc_config['lr_actor'],
             betas=(0.9, 0.999)
         )
         self.critic_optimizer = optim.Adam(
             self.critic.parameters(),
-            lr=self.ocp_config['lr_critic'],
+            lr=self.idc_config['lr_critic'],
             betas=(0.9, 0.999)
         )
 
@@ -94,13 +94,13 @@ class OcpAgent(BaseAgent):
         self.HALF_W = 1.0  # 车宽的一半
 
         # GEP算法超参数（严格对齐论文收敛逻辑）
-        self.init_penalty = self.ocp_config['init_penalty']
-        self.max_penalty = self.ocp_config['max_penalty']
-        self.amplifier_c = self.ocp_config['amplifier_c']
-        self.amplifier_m = self.ocp_config['amplifier_m']
-        self.other_car_min_distance = self.ocp_config['other_car_min_distance']
-        self.road_min_distance = self.ocp_config['road_min_distance']
-        self.gamma = self.ocp_config['gamma']
+        self.init_penalty = self.idc_config['init_penalty']
+        self.max_penalty = self.idc_config['max_penalty']
+        self.amplifier_c = self.idc_config['amplifier_c']
+        self.amplifier_m = self.idc_config['amplifier_m']
+        self.other_car_min_distance = self.idc_config['other_car_min_distance']
+        self.road_min_distance = self.idc_config['road_min_distance']
+        self.gamma = self.idc_config['gamma']
 
         # 缓冲区
         self.buffer = PERBuffer(capacity=100000, min_start_train=256)
@@ -122,7 +122,7 @@ class OcpAgent(BaseAgent):
 
         # 校验配置一致性
         if self.DIM_OTHER < 0:
-            raise ValueError("env_cfg['ocp']['others'] 必须为非负整数，当前值导致 DIM_OTHER < 0")
+            raise ValueError("env_cfg['idc']['others'] 必须为非负整数，当前值导致 DIM_OTHER < 0")
 
     def _calc_ref_error_from_state(self, ego_state: torch.Tensor, ref_path_tensor: torch.Tensor) -> torch.Tensor:
         B = ego_state.shape[0]
@@ -179,7 +179,7 @@ class OcpAgent(BaseAgent):
                          ref_path_tensor: torch.Tensor,
                          road_state: torch.Tensor = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        严格对齐论文 OCP 公式与 GEP 算法，
+        严格对齐论文 IDC 公式与 GEP 算法，
         """
         B = state_tensor.shape[0]
         ego_state, other_states, ref_error = self.unpack_tensor(state_tensor.unsqueeze(1))
@@ -230,7 +230,7 @@ class OcpAgent(BaseAgent):
             ], dim=1)
             trajectory_states.append(next_state)
 
-            # 1. 计算OCP成本项 step_l
+            # 1. 计算IDC成本项 step_l
             lat_err_t = next_ref_error[..., 0].squeeze(1)
             head_err_t = next_ref_error[..., 1].squeeze(1)
             speed_err_t = next_ref_error[..., 2].squeeze(1)
@@ -375,7 +375,7 @@ class OcpAgent(BaseAgent):
             if obs_np.shape[0] != self.TOTAL_STATE_DIM:
                 raise ValueError(
                     f"观测维度异常: {obs_np.shape[0]} (期望{self.TOTAL_STATE_DIM})。"
-                    f"请检查环境 ocp_obs 是否严格遵循论文格式：[ego(6) + others*4 + ref_err(3)] 且为自车相对坐标。"
+                    f"请检查环境 idc_obs 是否严格遵循论文格式：[ego(6) + others*4 + ref_err(3)] 且为自车相对坐标。"
                 )
 
             if deterministic:
@@ -433,7 +433,7 @@ class OcpAgent(BaseAgent):
             if state_np.shape[0] != self.TOTAL_STATE_DIM:
                 raise ValueError(
                     f"Buffer 状态维度异常: {state_np.shape[0]} (期望{self.TOTAL_STATE_DIM})。"
-                    f"请检查环境 ocp_obs 输出格式。"
+                    f"请检查环境 idc_obs 输出格式。"
                 )
             states_list.append(state_np)
 
@@ -458,7 +458,7 @@ class OcpAgent(BaseAgent):
         # 1. Critic更新 (策略评估) - 严格对齐 Eq.7: 目标仅为成本项 J_actor，不含惩罚
         with torch.no_grad():
             step_l, step_phi, states_traj = self._forward_horizon(state_tensor, ref_path_tensor, road_tensor)
-            # 有限时域累计成本 (无折扣 γ=1，对齐论文 OCP)
+            # 有限时域累计成本 (无折扣 γ=1，对齐论文 IDC)
             # 【防御】截断目标值，防止梯度爆炸
             targets = torch.clamp(torch.flip(torch.cumsum(torch.flip(step_l, [1]), dim=1), [1]), max=1000.0)
             # ----- 优先经验回放：实时刷新采样批次的优先级 -----
@@ -622,7 +622,7 @@ class OcpAgent(BaseAgent):
         # 【修复】处理 others=0 时的维度对齐问题
         if self.DIM_OTHER > 0:
             other_raw = data[:, :, self.DIM_EGO:self.DIM_EGO + self.DIM_OTHER]
-            other_states = other_raw.view(B, N, self.env.env_cfg['ocp']['others'], 4)
+            other_states = other_raw.view(B, N, self.env.env_cfg['idc']['others'], 4)
         else:
             other_states = torch.empty(B, N, 0, 4, device=data.device)
 
@@ -643,7 +643,7 @@ class OcpAgent(BaseAgent):
             'buffer_data': save_info['buffer_data']
         }
         metrics = {'episode': extra_info['globe_eps']}
-        save_checkpoint(model=model, model_name='ocp-v1.0', optimizer=optimizer,
+        save_checkpoint(model=model, model_name='idc-v1.0', optimizer=optimizer,
                         extra_info=extra_info, metrics=metrics, env_name=save_info['map'])
         self.globe_eps = extra_info['globe_eps']
         self.global_step = extra_info['global_step']
@@ -675,8 +675,8 @@ class OcpAgent(BaseAgent):
             episode_reward = 0.0
             done = False
             while not done:
-                obs_ocp = obs.get('ocp_obs', obs)
-                action, _ = self.select_action(obs_ocp, deterministic=True)
+                obs_idc = obs.get('idc_obs', obs)
+                action, _ = self.select_action(obs_idc, deterministic=True)
                 obs, reward, terminated, truncated, _ = self.env.step(action)
                 episode_reward += reward
                 done = terminated or truncated

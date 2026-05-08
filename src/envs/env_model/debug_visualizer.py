@@ -3,7 +3,7 @@ import numpy as np
 import carla
 import traceback
 from src.carla_utils import draw_all_vehicles_double_circles,draw_points,draw_text_at_location, draw_all_vehicles_ellipses,draw_lines_between_points
-from src.utils import get_logger, unpack_ocp_numpy
+from src.utils import get_logger, unpack_idc_numpy
 
 logger = get_logger(name='debug_visualizer')
 class DebugVisualizer:
@@ -13,8 +13,8 @@ class DebugVisualizer:
         self.config = config
         self.other_car_min_distance = other_car_min_distance
 
-    def debug_ocp(self,
-                  ocp_obs,
+    def debug_idc(self,
+                  idc_obs,
                   s_ref_raw,
                   s_road,
                   s_others,
@@ -24,9 +24,9 @@ class DebugVisualizer:
                   other_vehicles,
                   ego_vehicle):
 
-        ocp_obs_np = np.array(ocp_obs, dtype=np.float32).flatten().reshape([1, 1, -1])
-        ego_state, other_states, ref_error = unpack_ocp_numpy(ocp_obs_np, self.config['ocp']['num_points'],
-                                                              self.config['ocp']['others'])
+        idc_obs_np = np.array(idc_obs, dtype=np.float32).flatten().reshape([1, 1, -1])
+        ego_state, other_states, ref_error = unpack_idc_numpy(idc_obs_np, self.config['idc']['num_points'],
+                                                              self.config['idc']['others'])
 
         # 显示当前步数和最大步数
         step_num_text = f'now step:{step_count},\n max limit step:{self.config["termination"]["max_episode_steps"]}'
@@ -55,8 +55,8 @@ class DebugVisualizer:
             color=carla.Color(0, 0, 255)
         )
 
-        road_left = s_road[..., :self.config['ocp']['num_points'] * 2].reshape(self.config['ocp']['num_points'], 2)
-        road_right = s_road[..., self.config['ocp']['num_points'] * 2:].reshape(self.config['ocp']['num_points'], 2)
+        road_left = s_road[..., :self.config['idc']['num_points'] * 2].reshape(self.config['idc']['num_points'], 2)
+        road_right = s_road[..., self.config['idc']['num_points'] * 2:].reshape(self.config['idc']['num_points'], 2)
 
         # 左车道
         draw_points(
@@ -126,13 +126,13 @@ class DebugVisualizer:
             )
 
         # # 绘制预测点
-        # # 【新增】可视化 OCP 预测轨迹
+        # # 【新增】可视化 IDC 预测轨迹
         # if predict_traj is not None:
         #     try:
         #         traj_xy = predict_traj[0, :, :2]
         #         draw_predicted_trajectory(self.world,traj_xy,0.1,carla.Color(255, 255, 0),0.2)
         #     except Exception as e:
-        #         logger.error(f"OCP 轨迹可视化失败: {e}")
+        #         logger.error(f"IDC 轨迹可视化失败: {e}")
         #         traceback.print_exc()
 
 

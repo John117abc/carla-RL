@@ -18,7 +18,7 @@ import gymnasium as gym
 from src.envs.carla_env_bak import CarlaEnv
 from src.utils import Plotter
 
-logger = get_logger('eval_ocp')
+logger = get_logger('eval_idc')
 
 def main():
     logger.info('开始读取配置文件...')
@@ -42,9 +42,9 @@ def main():
     )
     try:
         agent = OcpAgent(env=env, rl_config=rl_config, device=device)
-        if eval_config['continue_ocp']:
+        if eval_config['continue_idc']:
             logger.info("开始读取智能体参数...")
-            checkpoint = agent.load(eval_config["model_path_ocp"])
+            checkpoint = agent.load(eval_config["model_path_idc"])
             logger.info('开始绘制图像')
             plotter = Plotter()
             plotter.load_history(checkpoint['history'])

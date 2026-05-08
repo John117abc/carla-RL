@@ -1,6 +1,6 @@
 """
 在线模式训练入口脚本。
-严格对齐 OCP 在线单步更新逻辑，不依赖大规模经验回放缓冲区。
+严格对齐 IDC 在线单步更新逻辑，不依赖大规模经验回放缓冲区。
 """
 
 import os
@@ -12,7 +12,7 @@ from src.utils import (load_config, get_logger, setup_code_environment)
 from src.agents import OcpAgentOnline
 from src.envs.carla_env import CarlaEnv
 
-logger = get_logger('train_ocp_online')
+logger = get_logger('train_idc_online')
 
 
 def save_image(obs, step: int, save_dir: str = "debug_images"):
@@ -58,9 +58,9 @@ def main():
         agent = OcpAgentOnline(env=env, rl_config=rl_config, device=device)
         env.agent = agent  # 绑定智能体用于可视化
         
-        if train_config['continue_ocp']:
+        if train_config['continue_idc']:
             logger.info("开始读取智能体参数...")
-            checkpoint = agent.load(train_config["model_path_ocp"])
+            checkpoint = agent.load(train_config["model_path_idc"])
 
         logger.info("环境创建成功！")
         logger.info(f"观测空间: {env.observation_space}")
@@ -71,7 +71,7 @@ def main():
         while episode < num_episodes:
             logger.info(f"\n开始第 {episode + 1} 轮测试...")
             obs = env.reset()
-            state = obs['ocp_obs']
+            state = obs['idc_obs']
             ref_path_locations = obs['ref_path_locations']  # carla.Location 列表
             
             # 【修复】正确转换参考路径为 numpy 数组
@@ -85,9 +85,9 @@ def main():
             total_reward = 0.0
             done = False
             while not done:
-                action, _ = agent.select_action(state, train_config['continue_ocp'])
+                action, _ = agent.select_action(state, train_config['continue_idc'])
                 next_obs, reward, terminated, truncated, info = env.step(action)
-                next_state = next_obs['ocp_obs']
+                next_state = next_obs['idc_obs']
                 
                 # 【修复】正确累加奖励
                 total_reward += reward

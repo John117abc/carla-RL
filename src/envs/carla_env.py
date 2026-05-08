@@ -7,7 +7,7 @@ import torch
 from typing import Dict, Any, Optional
 from src.carla_utils import RoutePlanner, remove_only_visible_traffic_signs
 from src.carla_utils.draw_info import draw_lines_between_points
-from src.carla_utils.ocp_setup import ego_to_world_coordinate
+from src.carla_utils.idc_setup import ego_to_world_coordinate
 
 from src.utils import get_logger, RunningNormalizer
 from src.configs.constant import (LAYERS_TO_REMOVE_1,
@@ -79,14 +79,14 @@ class CarlaEnv(gym.Env):
         self.carla_cfg = carla_config
         self.env_cfg = env_config
         self.sumo_cfg = sumo_config
-        self.train_cfg = train_config['rl']['OCP']
+        self.train_cfg = train_config['rl']['IDC']
         # 渲染/评估模式
         self.render_mode = render_mode
         self._is_eval = is_eval
         # 核心开关
         self.enable_sumo = env_config['traffic']['enable_sumo']
-        # OCP调试模式
-        self._ocp_debug = True
+        # IDC调试模式
+        self._idc_debug = True
         # 自车参考速度
         self.ego_ref_speed = self.env_cfg['actors']['ego']['ref_speed']
 
@@ -112,7 +112,7 @@ class CarlaEnv(gym.Env):
         # Z轴平滑相关变量（后续_place_spectator_above_vehicle中初始化）
         self.smoothed_z = None
         
-        # OCP智能体引用（用于可视化预测轨迹）
+        # IDC智能体引用（用于可视化预测轨迹）
         self.agent = None
 
     def _init_carla_client(self):
@@ -213,10 +213,10 @@ class CarlaEnv(gym.Env):
                 low=-np.inf, high=np.inf, shape=(n_meas,), dtype=np.float32
             )
 
-        # OCP观测
-        if "ocp_obs" in obs_type:
-            n_meas = self._get_ocp_dim()
-            obs_spaces["ocp_obs"] = gym.spaces.Box(
+        # IDC观测
+        if "idc_obs" in obs_type:
+            n_meas = self._get_idc_dim()
+            obs_spaces["idc_obs"] = gym.spaces.Box(
                 low=-np.inf, high=np.inf, shape=(n_meas,), dtype=np.float32
             )
 
@@ -233,21 +233,21 @@ class CarlaEnv(gym.Env):
             draw_shadow=True
         )
 
-    def _get_ocp_dim(self):
+    def _get_idc_dim(self):
         """
-                获取ocp观察下的维度大小
+                获取idc观察下的维度大小
                 :return: 维度大小
                 """
         dim = 0
-        for key in self.env_cfg["ocp"]["include"]:
+        for key in self.env_cfg["idc"]["include"]:
             if key == "ego":
                 dim += 6
             elif key == "others":
-                dim += (self.env_cfg["ocp"]["others"] * 4)
+                dim += (self.env_cfg["idc"]["others"] * 4)
             elif key == "ref_error":
                 dim += 3
             elif key == "road":
-                dim += (self.env_cfg["ocp"]["num_points"] * 4)
+                dim += (self.env_cfg["idc"]["num_points"] * 4)
 
         return dim
 
@@ -370,9 +370,9 @@ class CarlaEnv(gym.Env):
 
         obs = self.observation_processor.get_observation(self.is_eval,input_params)
         
-        # 【加固】确保 ocp_obs 为连续一维数组，防止维度异常导致训练崩溃
-        if 'ocp_obs' in obs and obs['ocp_obs'] is not None:
-            obs['ocp_obs'] = np.asarray(obs['ocp_obs'], dtype=np.float32).flatten()
+        # 【加固】确保 idc_obs 为连续一维数组，防止维度异常导致训练崩溃
+        if 'idc_obs' in obs and obs['idc_obs'] is not None:
+            obs['idc_obs'] = np.asarray(obs['idc_obs'], dtype=np.float32).flatten()
             
         # 4. 计算奖励 → 委托 RewardCalculator
         lane_inv = self.sensor_manager.lane_invasion_sensor.get_count()
@@ -386,9 +386,9 @@ class CarlaEnv(gym.Env):
         info.update(reward)
         
         # 6. 调试可视化（可选）→ 委托 DebugVisualizer
-        if self._ocp_debug:
+        if self._idc_debug:
             self.vehicle_manager.get_surrounding_vehicles()
-            self.debug_visualizer.debug_ocp(obs['ocp_obs'],
+            self.debug_visualizer.debug_idc(obs['idc_obs'],
                                             obs['s_ref_raw'],
                                             obs['s_road_raw'],
                                             obs['s_others'],
@@ -407,7 +407,7 @@ class CarlaEnv(gym.Env):
         if 's_road' in obs and obs['s_road'] is not None:
             info['road_state'] = np.asarray(obs['s_road'], dtype=np.float32).flatten()
         else:
-            info['road_state'] = np.zeros(self._get_ocp_dim(), dtype=np.float32)
+            info['road_state'] = np.zeros(self._get_idc_dim(), dtype=np.float32)
             
         return obs, reward['total_reward'], terminated, truncated, info
 
@@ -451,9 +451,9 @@ class CarlaEnv(gym.Env):
                         'perceived_distance':self.env_cfg['actors']['ego']['perceived_distance']}
         obs = self.observation_processor.get_observation(self._is_eval,input_params)
         
-        # 【加固】确保初始 ocp_obs 维度正确
-        if 'ocp_obs' in obs and obs['ocp_obs'] is not None:
-            obs['ocp_obs'] = np.asarray(obs['ocp_obs'], dtype=np.float32).flatten()
+        # 【加固】确保初始 idc_obs 维度正确
+        if 'idc_obs' in obs and obs['idc_obs'] is not None:
+            obs['idc_obs'] = np.asarray(obs['idc_obs'], dtype=np.float32).flatten()
             
         # 【修复】传递原始 carla.Location 列表，供训练脚本在每个时间步动态转换到当前自车坐标系
         self.step_count = 0

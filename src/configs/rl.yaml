@@ -11,8 +11,8 @@ rl:
   save_freq: 20            # 每多少回合保存一次模型
   continue_a2c: False    # 是否继续训练，如果需要继续训练，则需要填写模型地址
   model_path_a2c: 'checkpoints/20260131/a2c-v1.0_Town06_Opt_020547_episode=4000.pth'
-  continue_ocp: True    # 是否继续训练，如果需要继续训练，则需要填写模型地址
-  model_path_ocp: 'checkpoints/20260508/ocp-v1.0_Town06_Opt_101522_episode=20.pth'
+  continue_idc: True    # 是否继续训练，如果需要继续训练，则需要填写模型地址
+  model_path_idc: 'checkpoints/20260508/idc-v1.0_Town06_Opt_152844_episode=40.pth'
   num_eps_eval: 10    # 评估步数
 
   A2C:
@@ -27,8 +27,8 @@ rl:
     total_capacity: 4096  # 缓冲区容量
     batch_size: 2048   # n-step
 
-  OCP:
-    gamma: 1.0  # 有限时域OCP必须无折扣，和论文完全一致
+  IDC:
+    gamma: 1.0  # 有限时域IDC必须无折扣，和论文完全一致
     amplifier_c: 1.1  # 还原论文的1.1放大系数，加快约束生效
     amplifier_m: 512  # 每10000步放大一次，给网络足够时间学习跟踪，再加约束
     lr_actor: 3e-4  # 保持不变

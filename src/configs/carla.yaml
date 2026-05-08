@@ -16,4 +16,4 @@ word_01:
     map_layer: 5  # 世界层级，级别越高越复杂,最高5级最小1级
     sampling_resolution: 1.0    #  路径采样间隔（米），值越小路径越精细
     ref_offset: 5  # 参考偏移，暂未使用
-    notice_world: 'OCP-train'
+    notice_world: 'IDC-train'
