@@ -13,7 +13,6 @@ from src.models.bicycle import BicycleModel
 from src.utils import save_checkpoint, load_checkpoint
 from src.buffer import StochasticBuffer,PERBuffer
 from src.utils import get_logger
-from src.carla_utils import rect_min_dist_sq
 
 
 logger = get_logger('idc_agent')

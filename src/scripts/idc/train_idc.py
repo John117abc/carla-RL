@@ -172,10 +172,10 @@ def main():
                         )
                         history.append(loss)
 
+                agent.global_step += 1
                 if done:
                     logger.info(f"  Episode 结束")
                     break
-                agent.global_step += 1
 
             episode += 1
 

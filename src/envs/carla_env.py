@@ -7,7 +7,6 @@ import torch
 from typing import Dict, Any, Optional
 from src.carla_utils import RoutePlanner, remove_only_visible_traffic_signs
 from src.carla_utils.draw_info import draw_lines_between_points
-from src.carla_utils.idc_setup import ego_to_world_coordinate
 
 from src.utils import get_logger, RunningNormalizer
 from src.configs.constant import (LAYERS_TO_REMOVE_1,

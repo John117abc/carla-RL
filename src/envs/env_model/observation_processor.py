@@ -1,7 +1,9 @@
 import numpy as np
 import math
 import carla
-from src.carla_utils import get_compass, world_to_vehicle_frame, get_idc_observation,resample_path_equal_distance
+from .observers.idc_state_builder import get_idc_observation
+from src.carla_utils import get_compass, world_to_vehicle_frame
+from utils import resample_path_equal_distance
 
 class ObservationProcessor:
     def __init__(self, vehicle_manager, sensor_manager,world, config, normalizer):
