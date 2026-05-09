@@ -667,20 +667,61 @@ class OcpAgent(BaseAgent):
         self.buffer.load_buffer_data(checkpoint['buffer_data'])
         return checkpoint
 
-    def eval(self, num_episodes: int = 10) -> Tuple[float, float]:
-        total_rewards = []
+    def eval(self, num_episodes: int = 10):
+        self.actor.eval()
+        self.critic.eval()
         for _ in range(num_episodes):
-            obs, _ = self.env.reset()
-            episode_reward = 0.0
+            obs = self.env.reset()
+            state = obs['idc_obs']
+            # 提取参考路径，转为tensor [1, N, 2]
+            ref_path_locations = obs['ref_path_locations']  # 你的路径规划输出的carla.Location列表
             done = False
             while not done:
-                obs_idc = obs.get('idc_obs', obs)
-                action, _ = self.select_action(obs_idc, deterministic=True)
-                obs, reward, terminated, truncated, _ = self.env.step(action)
-                episode_reward += reward
-                done = terminated or truncated
-            total_rewards.append(episode_reward)
-        mean_reward = float(np.mean(total_rewards))
-        std_reward = float(np.std(total_rewards))
-        logger.info(f"评估完成：{num_episodes}轮，平均奖励={mean_reward:.2f}，标准差={std_reward:.2f}")
-        return mean_reward, std_reward
+                action, _ = self.select_action(state, True)
+                next_obs, reward, _, _, info = self.env.step(action)
+                next_state = next_obs['idc_obs']
+
+                done = info['TimeLimit.truncated'] or info['collision']
+                state = next_state
+
+                # 打印关键信息
+                if self.global_step %  self.base_config["log_interval"] == 0:
+                    logger.info(f"车辆偏右时: ref_path_ego[0] = {ref_path_locations[0]} (X,Y)")
+                    if 'speed' in info:
+                        logger.info(f"    速度: {info['speed']:.2f} km/h,动作：{action}")
+                        try:
+                            d_e = self.DIM_EGO  # 自车维度
+                            d_o = self.DIM_OTHER  # 周车维度
+                            d_r = self.DIM_REF_ERROR  # 误差维度
+                            if state.shape[0] >= d_e + d_o + d_r:
+                                delta_p = float(state[d_e + d_o])
+                                delta_phi = float(state[d_e + d_o + 1])
+                                delta_v = float(state[d_e + d_o + 2])
+                                steer_dir = "右" if action[1] > 0 else ("左" if action[1] < 0 else "0")
+                                logger.info(
+                                    f"    ref_error: δ_p={delta_p:.3f} m, δ_φ={delta_phi:.3f} rad, "
+                                    f"δ_v={delta_v:.3f} m/s, 转向:{steer_dir}({action[1]:.3f} rad)"
+                                )
+                        except Exception as diag_e:
+                            logger.warning(f"ref_error诊断失败: {diag_e}")
+                        try:
+                            ego_vehicle = self.env.vehicle_manager.ego_vehicle
+                            control = ego_vehicle.get_control()
+                            logger.info(
+                                f"    物理动作转向: {action[1]:.4f}, 实际施加控制转向: {control.steer:.4f}"
+                            )
+                        except Exception as steer_e:
+                            logger.warning(f"实际转向读取失败: {steer_e}")
+                        try:
+                            ego_vehicle = self.env.vehicle_manager.ego_vehicle
+                            acc = ego_vehicle.get_acceleration()
+                            logger.info(
+                                f"    请求加速度: {action[0]:.4f}, 实际加速度 Vector3D: ({acc.x:.4f}, {acc.y:.4f}, {acc.z:.4f})"
+                            )
+                        except Exception as acc_e:
+                            logger.warning(f"实际加速度读取失败: {acc_e}")
+
+                if done:
+                    logger.info(f"  Episode 结束")
+                    break
+            self.global_step +=1

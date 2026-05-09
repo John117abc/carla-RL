@@ -12,7 +12,7 @@ rl:
   continue_a2c: False    # 是否继续训练，如果需要继续训练，则需要填写模型地址
   model_path_a2c: 'checkpoints/20260131/a2c-v1.0_Town06_Opt_020547_episode=4000.pth'
   continue_idc: True    # 是否继续训练，如果需要继续训练，则需要填写模型地址
-  model_path_idc: 'checkpoints/20260509/idc-v1.0_Town06_Opt_082742_episode=380.pth'
+  model_path_idc: 'checkpoints/20260508/idc-v1.0_Town06_Opt_101522_episode=20.pth'
   num_eps_eval: 10    # 评估步数
 
   A2C:

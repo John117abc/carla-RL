@@ -112,7 +112,7 @@ class CarlaEnv(gym.Env):
         self.smoothed_z = None
         
         # IDC智能体引用（用于可视化预测轨迹）
-        self.agent = None
+        # self.agent = None
 
     def _init_carla_client(self):
         """初始化CARLA客户端并加载指定地图世界"""
@@ -393,7 +393,6 @@ class CarlaEnv(gym.Env):
                                             obs['s_others'],
                                             self.step_count,
                                             self.carla_cfg["fixed_delta_seconds"],
-                                            self.agent.predict_traj,
                                             self.vehicle_manager.npc_vehicles,
                                             self.vehicle_manager.ego_vehicle)
 

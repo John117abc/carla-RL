@@ -31,11 +31,11 @@ class Plotter:
         plt.figure(figsize=(10, 6))
         actor_loss = [s['actor_loss'] for s in self.history]
         critic_loss = [s['critic_loss'] for s in self.history]
-        global_step = [s['global_step'] for s in self.history]
+        global_step = [s['gep_iteration'] for s in self.history]
         plt.plot(global_step, actor_loss, label='actor 损失', color='green')
         plt.xlabel('step')
         plt.ylabel('actor_loss')
-        plt.title('cator损失表')
+        plt.title('actor损失表')
         plt.grid(True)
         plt.legend()
         plt.show()

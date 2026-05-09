@@ -20,7 +20,6 @@ class DebugVisualizer:
                   s_others,
                   step_count,
                   fixed_delta_seconds,
-                  predict_traj,
                   other_vehicles,
                   ego_vehicle):
 
