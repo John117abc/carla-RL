@@ -504,11 +504,11 @@ class OcpAgent(BaseAgent):
 
         # 3. GEP惩罚因子放大 (每 m 次策略改进后执行，严格对齐 Algorithm 2)
         if self.gep_iteration % self.amplifier_m == 0:
-            # 只要有违反，立即放大，不再要求门槛
-            if violation_per_sample.sum() > 1e-6:
+            avg_phi = step_phi_actor.mean().item()  # 获取本轮 actor 更新的平均违规成本
+            if avg_phi > 0.5:  # 当平均违规超过 0.5 时才认为是真正的危险，放大 ρ
                 old_penalty = self.init_penalty
                 self.init_penalty = min(self.init_penalty * self.amplifier_c, self.max_penalty)
-                logger.debug(f"[GEP] 立即放大 ρ: {old_penalty:.2f} → {self.init_penalty:.2f}")
+                logger.info(f"[GEP] ρ 放大：{old_penalty:.2f} → {self.init_penalty:.2f}，平均违规={avg_phi:.4f}")
 
         self.predict_traj = states_traj.cpu().detach().numpy()
 
