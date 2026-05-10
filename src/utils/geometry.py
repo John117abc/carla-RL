@@ -87,3 +87,13 @@ def batch_world_to_ego(path_locations, ego_transform):
     # 在IDC中：y_ego > 0 表示参考路径在车辆左侧（需要右转）
     #          y_ego < 0 表示参考路径在车辆右侧（需要左转）
     return np.stack([x_ego, y_ego], axis=1).tolist()
+
+
+def velocity_to_global(v_lon:float, yaw:float):
+    """
+    根据车辆纵向速度和航向角计算全局速度。
+    """
+    vx = v_lon * np.cos(yaw)
+    vy = v_lon * np.sin(yaw)
+
+    return np.array([vx, vy], dtype=float)

@@ -3,7 +3,7 @@ import math
 import carla
 from .observers.idc_state_builder import get_idc_observation
 from src.carla_utils import get_compass, world_to_vehicle_frame
-from utils import resample_path_equal_distance
+from utils import resample_path_equal_distance, RiskDistanceTTC
 
 class ObservationProcessor:
     def __init__(self, vehicle_manager, sensor_manager,world, config, normalizer):
@@ -12,6 +12,10 @@ class ObservationProcessor:
         self.world = world
         self.config = config
         self.normalizer = normalizer
+        self.distance_TTC = RiskDistanceTTC(
+            vehicle_length=self.config['actors']['others']['half_l'] * 2,
+            vehicle_width=self.config['actors']['others']['half_w'] * 2
+        )
 
     def get_observation(self,is_eval,input_params):
         obs = {}
@@ -94,6 +98,9 @@ class ObservationProcessor:
             obs["s_ref_error"] = s_ref_error
             obs["s_others"] = s_others
             obs["ref_path_locations"] = np.array([[p.x, p.y] for p in input_params['path_locations']], dtype=np.float32)
+
+            # 新版本加入ttc时间计算
+
         if len(obs) == 1:
             return list(obs.values())[0]
         return obs
